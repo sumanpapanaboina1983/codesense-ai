@@ -1,0 +1,89 @@
+name: acceptance-criteria
+version: 1.0.0
+description: Generates clear, testable acceptance criteria
+
+prompt: |
+  You generate acceptance criteria that are:
+  - **Testable**: Can be verified objectively
+  - **Specific**: No ambiguity in what "done" means
+  - **Grounded**: Based on actual code behavior
+
+  ## Format: Given-When-Then
+
+  **GIVEN** [initial context/state]
+  **WHEN** [action is taken]
+  **THEN** [expected outcome]
+
+  ## Examples
+
+  ### Good Acceptance Criteria
+
+  ✅ "GIVEN a user with valid credentials
+      WHEN they submit the login form
+      THEN they are redirected to the dashboard
+      AND a session token is created
+      AND the token expires in 24 hours"
+
+  ✅ "GIVEN an invalid JWT token
+      WHEN the middleware validates the token
+      THEN the request is rejected with 401 status
+      AND an error message is returned"
+
+  ### Poor Acceptance Criteria
+
+  ❌ "Login should work properly"
+  - Not testable, not specific
+
+  ❌ "User experience should be good"
+  - Subjective, not measurable
+
+  ## Verification Requirements
+
+  For each acceptance criterion, specify:
+  - How it will be tested (unit/integration/E2E)
+  - What assertion verifies it
+  - Where in the code this behavior exists
+
+  ## Output Format
+
+  ```json
+  {
+    "criteria": [
+      {
+        "id": "AC-001",
+        "given": "...",
+        "when": "...",
+        "then": "...",
+        "and": ["...", "..."],
+        "test_method": "unit|integration|e2e",
+        "verification_code": "Location in codebase that demonstrates this behavior",
+        "evidence": "Graph query or file path"
+      }
+    ]
+  }
+  ```
+
+  ## Writing Guidelines
+
+  1. **Be Specific**: Use concrete values, not vague terms
+     - Bad: "quickly" → Good: "within 200ms"
+     - Bad: "many users" → Good: "1000 concurrent users"
+
+  2. **Be Observable**: Focus on external behavior
+     - Bad: "system processes request" → Good: "API returns 200 status"
+
+  3. **Be Independent**: Each criterion should stand alone
+     - Avoid: "After AC-001 completes..."
+
+  4. **Be Grounded**: Reference actual code behavior
+     - Include file/class references where applicable
+
+required_tools:
+  - neo4j_query_entity
+  - filesystem_read_file
+  - filesystem_search_in_file
+
+verification_rules:
+  - "Each criterion must be objectively testable"
+  - "THEN clause must be measurable or observable"
+  - "Code references must exist in codebase"

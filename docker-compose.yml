@@ -1,0 +1,313 @@
+services:
+  # ===========================================
+  # Main Application - CodeSense AI API
+  # ===========================================
+  api:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+      target: production
+    container_name: codesense-api
+    ports:
+      - "8001:8000"
+    environment:
+      - APP_NAME=CodeSense AI
+      - APP_ENV=production
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+      - HOST=0.0.0.0
+      - PORT=8000
+      # Database connections
+      - DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/ai_accelerator
+      - REDIS_URL=redis://redis:6379/0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
+      # MCP Server URLs
+      - NEO4J_MCP_URL=http://neo4j-mcp:3000
+      - FILESYSTEM_MCP_URL=http://filesystem-mcp:3001
+      # Codebase
+      - CODEBASE_PATH=/codebase
+      - CODEBASE_ROOT=/codebase
+      # GitHub Authentication (for Copilot CLI/SDK)
+      # Use GH_TOKEN or GITHUB_TOKEN with "Copilot Requests" permission
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - COPILOT_API_KEY=${COPILOT_API_KEY:-}
+      # Copilot CLI Settings
+      - COPILOT_CLI_PATH=/usr/local/bin/copilot
+      - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4-5}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      neo4j-mcp:
+        condition: service_healthy
+      filesystem-mcp:
+        condition: service_healthy
+    volumes:
+      - ./skills_definitions:/app/skills_definitions:ro
+      - ${CODEBASE_PATH:-./codebase}:/codebase:ro
+    networks:
+      - ai-accelerator
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ===========================================
+  # Development API (with hot reload)
+  # ===========================================
+  api-dev:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+      target: development
+    container_name: codesense-api-dev
+    ports:
+      - "8001:8000"
+    environment:
+      - APP_NAME=CodeSense AI
+      - APP_ENV=development
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+      - HOST=0.0.0.0
+      - PORT=8000
+      # Database connections
+      - DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/ai_accelerator
+      - REDIS_URL=redis://redis:6379/0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
+      # MCP Server URLs
+      - NEO4J_MCP_URL=http://neo4j-mcp:3000
+      - FILESYSTEM_MCP_URL=http://filesystem-mcp:3001
+      # Codebase
+      - CODEBASE_PATH=/codebase
+      - CODEBASE_ROOT=/codebase
+      # GitHub Authentication (for Copilot CLI/SDK)
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - COPILOT_API_KEY=${COPILOT_API_KEY:-}
+      # Copilot CLI Settings
+      - COPILOT_CLI_PATH=/usr/local/bin/copilot
+      - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4-5}
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-key}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      neo4j-mcp:
+        condition: service_healthy
+      filesystem-mcp:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+      - ./skills_definitions:/app/skills_definitions:ro
+      - ${CODEBASE_PATH:-./codebase}:/codebase:ro
+    networks:
+      - ai-accelerator
+    profiles:
+      - dev
+
+  # ===========================================
+  # Neo4j MCP Server
+  # ===========================================
+  neo4j-mcp:
+    build:
+      context: ./mcp_servers/neo4j_mcp
+      dockerfile: Dockerfile
+    container_name: codesense-neo4j-mcp
+    ports:
+      - "3006:3000"
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
+      - HOST=0.0.0.0
+      - PORT=3000
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    networks:
+      - ai-accelerator
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+  # ===========================================
+  # Filesystem MCP Server
+  # ===========================================
+  filesystem-mcp:
+    build:
+      context: ./mcp_servers/filesystem_mcp
+      dockerfile: Dockerfile
+    container_name: codesense-filesystem-mcp
+    ports:
+      - "3004:3001"
+    environment:
+      - CODEBASE_ROOT=/codebase
+      - MAX_FILE_SIZE_MB=10
+      - HOST=0.0.0.0
+      - PORT=3001
+    volumes:
+      - ${CODEBASE_PATH:-./codebase}:/codebase:ro
+    networks:
+      - ai-accelerator
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3001/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 5s
+      retries: 3
+
+  # ===========================================
+  # PostgreSQL Database
+  # ===========================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: codesense-postgres
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=ai_accelerator
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ai-accelerator
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d ai_accelerator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================
+  # Redis Cache
+  # ===========================================
+  redis:
+    image: redis:7-alpine
+    container_name: codesense-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - ai-accelerator
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================
+  # Neo4j Graph Database
+  # ===========================================
+  neo4j:
+    image: neo4j:5
+    container_name: codesense-neo4j
+    ports:
+      - "7474:7474"  # HTTP Browser
+      - "7687:7687"  # Bolt Protocol
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=1G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_plugins:/plugins
+    networks:
+      - ai-accelerator
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+
+  # ===========================================
+  # OpenWebUI (Optional Frontend)
+  # ===========================================
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: codesense-webui
+    ports:
+      - "3080:8080"
+    environment:
+      # OpenAI-compatible API configuration
+      - OPENAI_API_BASE_URL=http://api:8000/v1
+      - OPENAI_API_KEY=not-needed
+      # Disable Ollama (we're using OpenAI-compatible API only)
+      - OLLAMA_BASE_URL=
+      - ENABLE_OLLAMA_API=false
+      # WebUI settings
+      - WEBUI_AUTH=false
+      - WEBUI_NAME=CodeSense AI
+      - DEFAULT_MODELS=codesense-ai
+      - ENABLE_SIGNUP=false
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - openwebui_data:/app/backend/data
+    networks:
+      - ai-accelerator
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    profiles:
+      - webui
+
+# ===========================================
+# Volumes
+# ===========================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  neo4j_plugins:
+    driver: local
+  openwebui_data:
+    driver: local
+
+# ===========================================
+# Networks
+# ===========================================
+networks:
+  ai-accelerator:
+    driver: bridge
+    name: codesense-network
