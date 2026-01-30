@@ -17,9 +17,10 @@ from .aggregator import ContextAggregator
 from .synthesizer import LLMSynthesizer, TemplateConfig
 from .tool_registry import ToolRegistry
 from .skill_loader import SkillLoader
-from ..utils.logger import get_logger
+from ..utils.logger import get_logger, get_progress_logger, log_operation
 
 logger = get_logger(__name__)
+progress = get_progress_logger(__name__, "BRDGenerator")
 
 # Default MCP config locations
 MCP_CONFIG_PATHS = [
@@ -227,32 +228,39 @@ class BRDGenerator:
         if self._initialized:
             return
 
-        logger.info("Initializing BRD Generator...")
+        progress.start_operation("BRDGenerator.initialize", "Setting up all components")
 
-        # Connect MCP clients (for fallback/direct access)
+        # Step 1: Connect MCP clients
+        progress.step("initialize", "Connecting MCP clients (Neo4j, Filesystem)")
         await self.neo4j_client.connect()
         await self.filesystem_client.connect()
+        progress.info("MCP clients connected", neo4j=self.neo4j_uri, workspace=str(self.workspace_root))
 
-        # Create Tool Registry for MCP tools (fallback)
+        # Step 2: Create Tool Registry
+        progress.step("initialize", "Creating tool registry")
         self.tool_registry = ToolRegistry(
             neo4j_client=self.neo4j_client,
             filesystem_client=self.filesystem_client,
         )
-        logger.info("Tool registry created with MCP tools")
+        progress.info("Tool registry created")
 
-        # Initialize Copilot SDK client
+        # Step 3: Initialize Copilot SDK client
+        progress.step("initialize", "Initializing Copilot SDK client")
         if COPILOT_SDK_AVAILABLE and CopilotClient is not None:
             try:
                 # Create and start the client
                 self._copilot_client = CopilotClient()
                 await self._copilot_client.start()
-                logger.info("Copilot SDK client started")
+                progress.info("Copilot SDK client started")
 
                 # Map model name to Copilot CLI format
                 copilot_model = self._get_copilot_model(self.copilot_model)
+                progress.info(f"Using model: {copilot_model}")
 
                 # Build MCP servers configuration
+                progress.step("initialize", "Building MCP servers configuration")
                 mcp_servers = self._build_mcp_servers_config()
+                progress.info(f"MCP servers configured: {list(mcp_servers.keys())}")
 
                 # Create session configuration with MCP servers
                 session_config = {
@@ -267,41 +275,43 @@ class BRDGenerator:
                     tools = self.tool_registry.get_tool_definitions()
                     if tools:
                         session_config["tools"] = tools
-                        logger.info(f"Registered {len(tools)} tools with session for auto-execution")
+                        progress.info(f"Registered {len(tools)} tools for auto-execution")
 
                 # Add skills directory for Copilot SDK native skill loading
-                # skill_directories: List[str] - directories to load skills from
+                progress.step("initialize", "Loading skills")
                 if self.skills_dir and self.skills_dir.exists():
                     session_config["skill_directories"] = [str(self.skills_dir)]
-                    logger.info(f"Registered skills directory: {self.skills_dir}")
+                    progress.info(f"Skills directory: {self.skills_dir}")
 
                     # Load skills locally for reference/logging
                     self.skill_loader.load_skills()
                     skill_names = list(self.skill_loader.skills.keys())
-                    logger.info(f"Skills available: {skill_names}")
+                    progress.info(f"Skills available: {skill_names}")
+                else:
+                    progress.warning("No skills directory found")
 
-                # Log configuration
-                logger.info(f"Session config: model={copilot_model}, mcp_servers={list(mcp_servers.keys())}")
-
+                # Create Copilot session
+                progress.step("initialize", "Creating Copilot session")
                 self._copilot_session = await self._copilot_client.create_session(session_config)
-                logger.info(f"Copilot session created with model: {copilot_model}")
-                logger.info(f"MCP servers registered: {list(mcp_servers.keys())}")
+                progress.info(f"Copilot session created", model=copilot_model, mcp_servers=list(mcp_servers.keys()))
 
             except Exception as e:
-                logger.error(f"Failed to initialize Copilot SDK: {e}")
-                logger.warning("Will use mock mode for LLM responses")
+                progress.error(f"Failed to initialize Copilot SDK: {e}")
+                progress.warning("Will use mock mode for LLM responses")
                 self._copilot_client = None
                 self._copilot_session = None
         else:
-            logger.warning("Copilot SDK not available - using mock mode")
+            progress.warning("Copilot SDK not available - using mock mode")
 
-        # Initialize context aggregator
+        # Step 4: Initialize context aggregator
+        progress.step("initialize", "Creating context aggregator")
         self.aggregator = ContextAggregator(
             self.neo4j_client,
             self.filesystem_client,
         )
 
-        # Initialize synthesizer with Copilot session and template config
+        # Step 5: Initialize synthesizer
+        progress.step("initialize", "Creating LLM synthesizer")
         templates_dir = self.templates_dir or Path(__file__).parent.parent / "templates"
 
         self.synthesizer = LLMSynthesizer(
@@ -313,7 +323,7 @@ class BRDGenerator:
         )
 
         self._initialized = True
-        logger.info("BRD Generator initialized")
+        progress.end_operation("BRDGenerator.initialize", success=True, details="All components ready")
 
     async def generate_brd(
         self,
@@ -337,23 +347,32 @@ class BRDGenerator:
         if not self._initialized:
             await self.initialize()
 
-        start_time = time.time()
-        logger.info(f"[PHASE 1] Generating BRD for: {request.feature_description}")
-        logger.info(f"Mode: {'Skill-based (automatic)' if use_skill else 'Template-based'}")
+        mode_desc = "Skill-based (automatic)" if use_skill else "Template-based"
+        progress.start_operation("PHASE 1: Generate BRD", f"Feature: {request.feature_description[:50]}...")
+        progress.info(f"Generation mode: {mode_desc}")
 
-        # Build context from MCP servers
+        # Step 1: Build context from MCP servers
+        progress.step("generate_brd", "Building context from codebase", current=1, total=3)
+        progress.info("Querying Neo4j code graph and reading source files...")
         context = await self.aggregator.build_context(
             request=request.feature_description,
             affected_components=request.affected_components,
             include_similar=request.include_similar_features,
         )
+        progress.info(
+            f"Context built",
+            components=len(context.architecture.components),
+            files=len(context.implementation.key_files),
+            tokens=context.estimated_tokens
+        )
 
-        # Generate BRD using Copilot SDK
+        # Step 2: Generate BRD using Copilot SDK
+        progress.step("generate_brd", "Generating BRD document with LLM", current=2, total=3)
         brd = await self.synthesizer.generate_brd(context, use_skill=use_skill)
+        progress.info(f"BRD generated: {brd.title}")
 
-        # Build output (no epics/stories in Phase 1)
-        elapsed_ms = int((time.time() - start_time) * 1000)
-
+        # Step 3: Build output
+        progress.step("generate_brd", "Building output", current=3, total=3)
         output = BRDOutput(
             brd=brd,
             epics=[],  # Empty - generated in Phase 2
@@ -364,13 +383,16 @@ class BRDGenerator:
                 "generation_mode": "skill-based" if use_skill else "template-based",
                 "phase": "brd_only",
                 "files_analyzed": len(context.implementation.key_files),
-                "generation_time_ms": elapsed_ms,
                 "components_found": len(context.architecture.components),
                 "mcp_servers": ["filesystem", "neo4j-code-graph"],
             },
         )
 
-        logger.info(f"[PHASE 1] BRD generation complete in {elapsed_ms}ms")
+        progress.end_operation(
+            "PHASE 1: Generate BRD",
+            success=True,
+            details=f"Generated '{brd.title}' with {len(context.implementation.key_files)} files analyzed"
+        )
         return output
 
     async def generate_epics_from_brd(
@@ -395,19 +417,19 @@ class BRDGenerator:
         if not self._initialized:
             await self.initialize()
 
-        start_time = time.time()
-        logger.info(f"[PHASE 2] Generating Epics from BRD: {brd.title}")
+        progress.start_operation("PHASE 2: Generate Epics", f"From BRD: {brd.title[:50]}...")
 
-        # Generate Epics only (no stories)
+        # Step 1: Generate Epics
+        progress.step("generate_epics", "Generating Epics from BRD", current=1, total=2)
         epics = await self.synthesizer.generate_epics_from_brd(
             brd=brd,
             use_skill=use_skill,
         )
+        progress.info(f"Generated {len(epics)} epics")
 
-        # Calculate implementation order based on epic dependencies
+        # Step 2: Calculate implementation order
+        progress.step("generate_epics", "Calculating implementation order", current=2, total=2)
         implementation_order = self._calculate_epic_implementation_order(epics)
-
-        elapsed_ms = int((time.time() - start_time) * 1000)
 
         output = EpicsOutput(
             brd_id=f"BRD-{hash(brd.title) % 10000:04d}",
@@ -418,12 +440,11 @@ class BRDGenerator:
                 "copilot_model": self.copilot_model,
                 "generation_mode": "skill-based" if use_skill else "template-based",
                 "phase": "epics_only",
-                "generation_time_ms": elapsed_ms,
                 "total_epics": len(epics),
             },
         )
 
-        logger.info(f"[PHASE 2] Generated {len(epics)} Epics in {elapsed_ms}ms")
+        progress.end_operation("PHASE 2: Generate Epics", success=True, details=f"{len(epics)} epics generated")
         return output
 
     async def generate_backlogs_from_epics(
@@ -447,22 +468,23 @@ class BRDGenerator:
         if not self._initialized:
             await self.initialize()
 
-        start_time = time.time()
-        logger.info(f"[PHASE 3] Generating Backlogs from {len(epics_output.epics)} Epics")
+        progress.start_operation("PHASE 3: Generate Backlogs", f"From {len(epics_output.epics)} Epics")
 
-        # Generate Stories from Epics
+        # Step 1: Generate Stories from Epics
+        progress.step("generate_backlogs", "Generating User Stories from Epics", current=1, total=3)
         stories = await self.synthesizer.generate_backlogs_from_epics(
             epics=epics_output.epics,
             use_skill=use_skill,
         )
+        progress.info(f"Generated {len(stories)} user stories")
 
-        # Calculate implementation order based on story dependencies
+        # Step 2: Calculate implementation order
+        progress.step("generate_backlogs", "Calculating implementation order", current=2, total=3)
         implementation_order = self._calculate_story_implementation_order(stories)
 
-        # Calculate total story points
+        # Step 3: Calculate totals
+        progress.step("generate_backlogs", "Calculating story points", current=3, total=3)
         total_points = sum(s.estimated_points or 0 for s in stories)
-
-        elapsed_ms = int((time.time() - start_time) * 1000)
 
         output = BacklogsOutput(
             epics=epics_output.epics,
@@ -472,13 +494,16 @@ class BRDGenerator:
                 "copilot_model": self.copilot_model,
                 "generation_mode": "skill-based" if use_skill else "template-based",
                 "phase": "backlogs",
-                "generation_time_ms": elapsed_ms,
                 "total_stories": len(stories),
                 "total_story_points": total_points,
             },
         )
 
-        logger.info(f"[PHASE 3] Generated {len(stories)} Stories ({total_points} points) in {elapsed_ms}ms")
+        progress.end_operation(
+            "PHASE 3: Generate Backlogs",
+            success=True,
+            details=f"{len(stories)} stories ({total_points} points)"
+        )
         return output
 
     def _calculate_epic_implementation_order(self, epics: list[Epic]) -> list[str]:
@@ -890,35 +915,41 @@ class BRDGenerator:
 
     async def cleanup(self) -> None:
         """Cleanup resources."""
-        # Cleanup synthesizer
+        progress.start_operation("BRDGenerator.cleanup", "Releasing all resources")
+
+        # Step 1: Cleanup synthesizer
+        progress.step("cleanup", "Cleaning up synthesizer")
         if self.synthesizer is not None:
             await self.synthesizer.cleanup()
 
-        # Cleanup Copilot session
+        # Step 2: Cleanup Copilot session
+        progress.step("cleanup", "Destroying Copilot session")
         if self._copilot_session is not None:
             try:
                 await self._copilot_session.destroy()
-                logger.info("Copilot session destroyed")
+                progress.info("Copilot session destroyed")
             except Exception as e:
-                logger.warning(f"Error destroying Copilot session: {e}")
+                progress.warning(f"Error destroying Copilot session: {e}")
             self._copilot_session = None
 
-        # Cleanup Copilot client
+        # Step 3: Cleanup Copilot client
+        progress.step("cleanup", "Stopping Copilot client")
         if self._copilot_client is not None:
             try:
                 if hasattr(self._copilot_client, 'stop'):
                     await self._copilot_client.stop()
-                logger.info("Copilot client stopped")
+                progress.info("Copilot client stopped")
             except Exception as e:
-                logger.warning(f"Error stopping Copilot client: {e}")
+                progress.warning(f"Error stopping Copilot client: {e}")
             self._copilot_client = None
 
-        # Disconnect MCP clients
+        # Step 4: Disconnect MCP clients
+        progress.step("cleanup", "Disconnecting MCP clients")
         await self.neo4j_client.disconnect()
         await self.filesystem_client.disconnect()
 
         self._initialized = False
-        logger.info("BRD Generator cleaned up")
+        progress.end_operation("BRDGenerator.cleanup", success=True)
 
     def _find_mcp_config(self) -> Optional[Path]:
         """Find the native MCP config file."""

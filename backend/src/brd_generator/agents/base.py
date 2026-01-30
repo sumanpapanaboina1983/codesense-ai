@@ -26,12 +26,13 @@ from typing import Any, Optional, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from ..utils.logger import get_logger
+from ..utils.logger import get_logger, get_progress_logger
 
 if TYPE_CHECKING:
     from ..core.tool_registry import ToolRegistry
 
 logger = get_logger(__name__)
+progress = get_progress_logger(__name__, "Agent")
 
 
 class AgentRole(str, Enum):
@@ -458,11 +459,13 @@ class BaseAgent(ABC):
         2. If LLM wants to call a tool, execute it and feed result back
         3. Repeat until LLM provides final response
         """
-        logger.info(f"Agent {self.role.value}: Starting agentic loop with tools")
+        role = self.role.value.upper()
+        progress.start_operation(f"{role} Agentic Loop", "Starting tool-augmented generation")
 
         # Get tool definitions
         tools = self.tool_registry.get_tool_definitions()
-        logger.info(f"Agent {self.role.value}: {len(tools)} tools available")
+        tool_names = [t.get('function', {}).get('name', 'unknown') if isinstance(t, dict) else getattr(t, '__name__', 'unknown') for t in tools]
+        logger.info(f"  [{role}] Available tools ({len(tools)}): {tool_names}")
 
         # Include skill instructions if available
         full_prompt = prompt
@@ -472,7 +475,7 @@ class BaseAgent(ABC):
 
 ## Task
 {prompt}"""
-            logger.info(f"Agent {self.role.value}: Using skill instructions")
+            logger.info(f"  [{role}] Using skill instructions")
 
         # Build initial message with tools
         message_options = {
@@ -481,6 +484,7 @@ class BaseAgent(ABC):
         }
 
         iteration = 0
+        total_tool_calls = 0
         start_time = asyncio.get_event_loop().time()
 
         while iteration < self.max_tool_iterations:
@@ -489,10 +493,11 @@ class BaseAgent(ABC):
             remaining_timeout = timeout - elapsed
 
             if remaining_timeout <= 0:
-                logger.warning(f"Agent {self.role.value}: Agentic loop timeout")
+                progress.end_operation(f"{role} Agentic Loop", success=False, details="Timeout")
+                logger.warning(f"  [{role}] Agentic loop timeout after {elapsed:.1f}s")
                 break
 
-            logger.info(f"Agent {self.role.value}: Agentic iteration {iteration}")
+            logger.info(f"  [{role}] Iteration {iteration}/{self.max_tool_iterations} (elapsed: {elapsed:.1f}s)")
 
             # Send to LLM
             event = await asyncio.wait_for(
@@ -501,7 +506,7 @@ class BaseAgent(ABC):
             )
 
             if not event:
-                logger.warning(f"Agent {self.role.value}: No event from LLM")
+                logger.warning(f"  [{role}] No response from LLM")
                 break
 
             # Check if LLM wants to call tools
@@ -509,8 +514,19 @@ class BaseAgent(ABC):
 
             if tool_calls:
                 # Execute tool calls and prepare results
-                logger.info(f"Agent {self.role.value}: LLM requested {len(tool_calls)} tool calls")
+                total_tool_calls += len(tool_calls)
+                logger.info(f"  [{role}] LLM requesting {len(tool_calls)} tool call(s):")
+                for tc in tool_calls:
+                    tc_name = tc.get('name', 'unknown')
+                    tc_args = str(tc.get('arguments', {}))[:100]
+                    logger.info(f"    -> {tc_name}({tc_args}...)")
+
                 tool_results = await self._execute_tool_calls(tool_calls)
+
+                # Log tool results summary
+                for tr in tool_results:
+                    result_preview = str(tr.get('result', ''))[:100]
+                    logger.debug(f"    <- {tr.get('tool_call_id', 'unknown')}: {result_preview}...")
 
                 # Build next message with tool results
                 message_options = {
@@ -519,11 +535,19 @@ class BaseAgent(ABC):
             else:
                 # No tool calls - LLM has final response
                 response = self._extract_from_event(event)
-                logger.info(f"Agent {self.role.value}: Agentic loop complete after {iteration} iterations")
+                elapsed = asyncio.get_event_loop().time() - start_time
+                progress.end_operation(
+                    f"{role} Agentic Loop",
+                    success=True,
+                    details=f"{iteration} iterations, {total_tool_calls} tool calls, {elapsed:.1f}s"
+                )
+                logger.info(f"  [{role}] Response received ({len(response)} chars)")
                 return response
 
         # Max iterations reached
-        logger.warning(f"Agent {self.role.value}: Max tool iterations ({self.max_tool_iterations}) reached")
+        elapsed = asyncio.get_event_loop().time() - start_time
+        progress.end_operation(f"{role} Agentic Loop", success=False, details="Max iterations reached")
+        logger.warning(f"  [{role}] Max tool iterations ({self.max_tool_iterations}) reached after {elapsed:.1f}s")
         return self._extract_from_event(event) if event else ""
 
     def _extract_tool_calls(self, event: Any) -> list[dict[str, Any]]:
@@ -598,17 +622,27 @@ class BaseAgent(ABC):
     async def _execute_tool_calls(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Execute tool calls and return results."""
         results = []
+        role = self.role.value.upper()
 
-        for tc in tool_calls:
+        for i, tc in enumerate(tool_calls, 1):
             tool_name = tc.get("name")
             tool_args = tc.get("arguments", {})
             tool_id = tc.get("id", "unknown")
 
-            logger.info(f"Agent {self.role.value}: Executing tool '{tool_name}'")
+            # Log tool execution start
+            args_preview = str(tool_args)[:150]
+            logger.info(f"      [{role}] Tool {i}/{len(tool_calls)}: {tool_name}")
+            logger.debug(f"        Args: {args_preview}...")
+
+            import time
+            start_time = time.time()
 
             try:
                 # Execute via tool registry
                 result = await self.tool_registry.execute_tool(tool_name, tool_args)
+
+                elapsed = time.time() - start_time
+                result_preview = str(result)[:200] if result else "(empty)"
 
                 results.append({
                     "tool_call_id": tool_id,
@@ -617,10 +651,12 @@ class BaseAgent(ABC):
                     "content": result,
                 })
 
-                logger.info(f"Agent {self.role.value}: Tool '{tool_name}' executed successfully")
+                logger.info(f"      [{role}] Tool {tool_name} completed ({elapsed:.2f}s)")
+                logger.debug(f"        Result: {result_preview}...")
 
             except Exception as e:
-                logger.error(f"Agent {self.role.value}: Tool '{tool_name}' failed: {e}")
+                elapsed = time.time() - start_time
+                logger.error(f"      [{role}] Tool {tool_name} FAILED ({elapsed:.2f}s): {e}")
                 results.append({
                     "tool_call_id": tool_id,
                     "role": "tool",

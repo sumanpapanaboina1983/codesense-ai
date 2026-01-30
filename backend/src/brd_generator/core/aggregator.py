@@ -15,10 +15,11 @@ from ..models.context import (
 )
 from ..mcp_clients.neo4j_client import Neo4jMCPClient
 from ..mcp_clients.filesystem_client import FilesystemMCPClient
-from ..utils.logger import get_logger
+from ..utils.logger import get_logger, get_progress_logger
 from ..utils.token_counter import estimate_tokens
 
 logger = get_logger(__name__)
+progress = get_progress_logger(__name__, "ContextAggregator")
 
 # Type for progress callback: async function that takes (step: str, detail: str)
 ProgressCallback = Callable[[str, str], Awaitable[None]]
@@ -64,7 +65,7 @@ class ContextAggregator:
         Returns:
             Aggregated context ready for LLM
         """
-        logger.info("Building aggregated context...")
+        progress.start_operation("build_context", f"Request: {request[:50]}...")
 
         # Helper to report progress
         async def report(step: str, detail: str) -> None:
@@ -74,26 +75,38 @@ class ContextAggregator:
         await report("context", "Starting context aggregation...")
 
         # Phase 1: Get architecture from Neo4j
+        progress.step("build_context", "Querying Neo4j code graph", current=1, total=3)
         await report("neo4j", "Querying code graph for architecture context...")
         architecture = await self._get_architecture_context(
             request,
             affected_components,
             progress_callback,
         )
-        await report("neo4j", f"Found {len(architecture.components)} components")
+        progress.info(
+            f"Architecture context retrieved",
+            components=len(architecture.components),
+            dependencies=len(architecture.dependencies),
+            apis=len(architecture.api_contracts)
+        )
 
         # Phase 2: Get implementation details from filesystem
+        progress.step("build_context", "Reading source files", current=2, total=3)
         await report("filesystem", "Reading source files for implementation context...")
         implementation = await self._get_implementation_context(architecture, progress_callback)
-        await report("filesystem", f"Analyzed {len(implementation.key_files)} key files")
+        progress.info(
+            f"Implementation context retrieved",
+            key_files=len(implementation.key_files),
+            configs=len(implementation.configs)
+        )
 
         # Phase 3: Find similar features
         similar_features = []
         if include_similar:
+            progress.step("build_context", "Finding similar features", current=3, total=3)
             await report("neo4j", "Searching for similar features in codebase...")
             similar_features = await self._find_similar_features(request)
             if similar_features:
-                await report("neo4j", f"Found {len(similar_features)} similar features")
+                progress.info(f"Found {len(similar_features)} similar features")
 
         # Build complete context
         context = AggregatedContext(
@@ -105,12 +118,16 @@ class ContextAggregator:
 
         # Check token budget
         if context.estimated_tokens > self.max_tokens:
-            logger.warning(
-                f"Context exceeds token limit ({context.estimated_tokens} > {self.max_tokens})"
+            progress.warning(
+                f"Context exceeds token limit ({context.estimated_tokens} > {self.max_tokens}), compressing..."
             )
             context = await self._compress_context(context)
 
-        logger.info(f"Context built: ~{context.estimated_tokens} tokens")
+        progress.end_operation(
+            "build_context",
+            success=True,
+            details=f"{len(architecture.components)} components, {len(implementation.key_files)} files, ~{context.estimated_tokens} tokens"
+        )
         return context
 
     async def _get_architecture_context(

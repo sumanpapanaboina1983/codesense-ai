@@ -22,12 +22,13 @@ from ..mcp_clients.neo4j_client import Neo4jMCPClient
 from ..mcp_clients.filesystem_client import FilesystemMCPClient
 from .tool_registry import ToolRegistry
 from .skill_loader import SkillLoader
-from ..utils.logger import get_logger
+from ..utils.logger import get_logger, get_progress_logger, log_operation
 
 if TYPE_CHECKING:
     from .template_parser import ParsedBRDTemplate
 
 logger = get_logger(__name__)
+progress = get_progress_logger(__name__, "Orchestrator")
 
 
 class MultiAgentOrchestrator:
@@ -114,27 +115,32 @@ class MultiAgentOrchestrator:
 
     async def initialize(self) -> None:
         """Initialize the agents with SKILLS and AGENTIC TOOL CALLING support."""
-        logger.info("Initializing Multi-Agent Orchestrator with skills and agentic tools")
+        progress.start_operation("Initialize Orchestrator", "Setting up multi-agent system")
 
         # Load skills
+        progress.step("Initialize Orchestrator", "Loading skills from .github/skills/")
         self.skill_loader.load_skills()
-        logger.info(f"Loaded skills: {list(self.skill_loader.skills.keys())}")
+        loaded_skills = list(self.skill_loader.skills.keys())
+        logger.info(f"  Loaded {len(loaded_skills)} skills: {loaded_skills}")
 
         # Get skill instructions for each agent
         generator_skill = self.skill_loader.get_skill("generate-brd")
         verifier_skill = self.skill_loader.get_skill("verify-brd")
 
         # Create Tool Registry for agentic tool calling
+        progress.step("Initialize Orchestrator", "Creating Tool Registry")
         if self.neo4j_client and self.filesystem_client:
             self.tool_registry = ToolRegistry(
                 neo4j_client=self.neo4j_client,
                 filesystem_client=self.filesystem_client,
             )
-            logger.info("Tool Registry created with Neo4j and Filesystem tools")
+            tool_count = len(self.tool_registry.get_tool_definitions())
+            logger.info(f"  Tool Registry created with {tool_count} tools (Neo4j + Filesystem)")
         else:
-            logger.warning("No MCP clients available - agents will run without tools")
+            logger.warning("  No MCP clients available - agents will run without tools")
 
         # Create Generator Agent with tools, template, and skill instructions
+        progress.step("Initialize Orchestrator", "Creating Generator Agent")
         generator_config = {
             "max_regenerations": self.max_iterations,
             "enable_agentic_tools": True,
@@ -142,7 +148,7 @@ class MultiAgentOrchestrator:
         }
         if generator_skill:
             generator_config["skill_instructions"] = generator_skill.instructions
-            logger.info(f"Generator using skill: {generator_skill.name}")
+            logger.info(f"  Generator skill: {generator_skill.name}")
 
         self.generator = BRDGeneratorAgent(
             copilot_session=self.copilot_session,
@@ -152,11 +158,12 @@ class MultiAgentOrchestrator:
         )
 
         if self.parsed_template:
-            logger.info(f"Generator initialized with template: {len(self.parsed_template.sections)} sections")
+            logger.info(f"  Generator template: {len(self.parsed_template.sections)} sections")
         else:
-            logger.info("Generator initialized with default template")
+            logger.info("  Generator using default template")
 
         # Create Verifier Agent with tools and skill instructions
+        progress.step("Initialize Orchestrator", "Creating Verifier Agent")
         verifier_config = {
             "enable_agentic_tools": True,
             "max_tool_iterations": 10,
@@ -165,7 +172,7 @@ class MultiAgentOrchestrator:
             verifier_config.update(self.verification_config.__dict__)
         if verifier_skill:
             verifier_config["skill_instructions"] = verifier_skill.instructions
-            logger.info(f"Verifier using skill: {verifier_skill.name}")
+            logger.info(f"  Verifier skill: {verifier_skill.name}")
 
         self.verifier = BRDVerifierAgent(
             copilot_session=self.copilot_session,
@@ -175,7 +182,8 @@ class MultiAgentOrchestrator:
             config=verifier_config,
         )
 
-        logger.info("Multi-Agent Orchestrator initialized with skills and agentic tool support")
+        progress.end_operation("Initialize Orchestrator", success=True,
+                               details=f"Generator + Verifier ready with {len(loaded_skills)} skills")
 
     async def generate_verified_brd(
         self,
@@ -196,10 +204,12 @@ class MultiAgentOrchestrator:
             await self.initialize()
 
         start_time = time.time()
-        logger.info("Starting multi-agent BRD generation")
+        request_preview = context.request[:100] + "..." if len(context.request) > 100 else context.request
+        progress.start_operation("BRD Generation", f"Request: {request_preview}")
 
         # Set context for generator
         self.generator.set_context(context)
+        logger.info(f"  Context set: {len(context.components)} components, {len(context.files)} files")
 
         # Reset state
         self.current_iteration = 0
@@ -209,6 +219,7 @@ class MultiAgentOrchestrator:
 
         try:
             # Run the agent loop
+            progress.step("BRD Generation", "Running Generator-Verifier loop")
             await self._run_agent_loop()
 
             # Build output
@@ -217,12 +228,34 @@ class MultiAgentOrchestrator:
 
             output = self._build_output(context, elapsed_ms)
 
-            logger.info(
-                f"Multi-agent BRD generation complete in {elapsed_ms}ms "
-                f"({self.metrics['total_iterations']} iterations)"
+            # Log final summary
+            verified_status = "VERIFIED" if (self.final_evidence and self.final_evidence.is_approved) else "UNVERIFIED"
+            confidence = self.final_evidence.overall_confidence if self.final_evidence else 0
+            progress.end_operation(
+                "BRD Generation",
+                success=True,
+                details=f"{verified_status} | Confidence: {confidence:.1%} | Iterations: {self.metrics['total_iterations']} | Time: {elapsed_ms}ms"
             )
 
+            # Log metrics summary
+            logger.info("=" * 60)
+            logger.info("BRD GENERATION SUMMARY")
+            logger.info("=" * 60)
+            logger.info(f"  Status: {verified_status}")
+            logger.info(f"  Confidence Score: {confidence:.1%}")
+            logger.info(f"  Total Iterations: {self.metrics['total_iterations']}")
+            logger.info(f"  Sections Regenerated: {self.metrics['sections_regenerated']}")
+            logger.info(f"  Claims Verified: {self.metrics['claims_verified']}")
+            logger.info(f"  Claims Failed: {self.metrics['claims_failed']}")
+            logger.info(f"  Total Time: {elapsed_ms}ms")
+            logger.info("=" * 60)
+
             return output
+
+        except Exception as e:
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            progress.end_operation("BRD Generation", success=False, details=str(e))
+            raise
 
         finally:
             self.is_running = False
@@ -239,7 +272,12 @@ class MultiAgentOrchestrator:
         self.current_iteration = 1
         self.metrics["total_iterations"] = 0
 
+        logger.info("-" * 60)
+        logger.info(f"ITERATION {self.current_iteration}/{self.max_iterations}")
+        logger.info("-" * 60)
+
         # Start the generator
+        logger.info("  [Generator] Starting BRD generation...")
         await self.generator.deliver(AgentMessage(
             message_type=MessageType.START,
             sender=AgentRole.ORCHESTRATOR,
@@ -248,15 +286,20 @@ class MultiAgentOrchestrator:
         ))
 
         # Process messages until complete
+        message_count = 0
         while self.is_running and self.current_iteration <= self.max_iterations:
             # Check for generator output
             gen_message = await self.generator.get_outgoing()
             if gen_message:
+                message_count += 1
+                logger.debug(f"  [Message #{message_count}] Generator -> {gen_message.message_type.value}")
                 await self._handle_message(gen_message)
 
             # Check for verifier output
             ver_message = await self.verifier.get_outgoing()
             if ver_message:
+                message_count += 1
+                logger.debug(f"  [Message #{message_count}] Verifier -> {ver_message.message_type.value}")
                 await self._handle_message(ver_message)
 
             # Small delay to prevent busy waiting
@@ -265,15 +308,19 @@ class MultiAgentOrchestrator:
             # Check if we're done
             if self.final_brd and self.final_evidence:
                 if self.final_evidence.is_approved:
-                    logger.info("BRD approved by verifier")
+                    logger.info("  [Result] BRD APPROVED by verifier")
                     break
                 elif self.current_iteration >= self.max_iterations:
-                    logger.warning(f"Max iterations ({self.max_iterations}) reached")
+                    logger.warning(f"  [Result] Max iterations ({self.max_iterations}) reached - stopping")
                     break
                 else:
                     # Start next iteration
                     self.current_iteration += 1
                     self.metrics["total_iterations"] = self.current_iteration
+                    logger.info("-" * 60)
+                    logger.info(f"ITERATION {self.current_iteration}/{self.max_iterations}")
+                    logger.info("-" * 60)
+                    logger.info(f"  [Reason] Verification failed, regenerating with feedback")
 
     async def _handle_message(self, message: AgentMessage) -> None:
         """Route and handle a message from an agent."""
@@ -306,7 +353,9 @@ class MultiAgentOrchestrator:
     async def _handle_brd_complete(self, message: AgentMessage) -> None:
         """Handle completed BRD from generator."""
         self.final_brd = message.content
-        logger.info("Received complete BRD from generator")
+        brd_title = self.final_brd.title if self.final_brd else "Unknown"
+        logger.info(f"  [Generator] BRD complete: '{brd_title}'")
+        logger.info(f"  [Generator] Sending to Verifier for validation...")
 
         # Send to verifier for final check
         await self._route_to_verifier(message)
@@ -322,19 +371,27 @@ class MultiAgentOrchestrator:
                 self.final_evidence.total_claims - self.final_evidence.verified_claims
             )
 
+            # Log verification details
+            logger.info(f"  [Verifier] Verification Result:")
+            logger.info(f"    - Total Claims: {self.final_evidence.total_claims}")
+            logger.info(f"    - Verified: {self.final_evidence.verified_claims}")
+            logger.info(f"    - Failed: {self.final_evidence.total_claims - self.final_evidence.verified_claims}")
+            logger.info(f"    - Confidence: {self.final_evidence.overall_confidence:.1%}")
+            logger.info(f"    - Hallucination Risk: {self.final_evidence.hallucination_risk.value}")
+
         if self.final_evidence and self.final_evidence.is_approved:
-            logger.info("BRD verification passed!")
+            logger.info("  [Verifier] APPROVED - BRD passed verification!")
             self.is_running = False
         else:
-            logger.info(
-                f"BRD verification failed (confidence: "
-                f"{self.final_evidence.overall_confidence:.2f if self.final_evidence else 0})"
-            )
+            confidence = self.final_evidence.overall_confidence if self.final_evidence else 0
+            logger.warning(f"  [Verifier] REJECTED - Confidence {confidence:.1%} below threshold")
 
             # Check if we should retry
             if self.current_iteration < self.max_iterations:
                 # Send feedback to generator for another iteration
                 if self.final_evidence and self.final_evidence.sections_to_regenerate:
+                    sections = self.final_evidence.sections_to_regenerate
+                    logger.info(f"  [Verifier] Requesting regeneration of {len(sections)} sections: {sections}")
                     await self._route_to_generator(AgentMessage(
                         message_type=MessageType.VERIFICATION_RESULT,
                         sender=AgentRole.VERIFIER,
@@ -345,7 +402,8 @@ class MultiAgentOrchestrator:
 
     async def _handle_error(self, message: AgentMessage) -> None:
         """Handle error messages."""
-        logger.error(f"Agent error: {message.content}")
+        logger.error(f"  [ERROR] Agent error: {message.content}")
+        logger.error(f"  [ERROR] Sender: {message.sender.value}")
         self.is_running = False
 
     def _build_output(self, context: AggregatedContext, elapsed_ms: int) -> BRDOutput:

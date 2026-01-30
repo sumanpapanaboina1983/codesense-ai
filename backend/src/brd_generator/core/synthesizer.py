@@ -19,9 +19,10 @@ from ..models.output import (
     AcceptanceCriteria,
     JiraCreationResult,
 )
-from ..utils.logger import get_logger
+from ..utils.logger import get_logger, get_progress_logger
 
 logger = get_logger(__name__)
+progress = get_progress_logger(__name__, "LLMSynthesizer")
 
 # Default timeout for LLM responses (5 minutes)
 LLM_TIMEOUT_SECONDS = 300
@@ -133,22 +134,26 @@ class LLMSynthesizer:
             use_skill: If True, use simple prompt to trigger automatic skill selection.
                       If False, use template-based approach with detailed prompts.
         """
-        logger.info(f"Generating BRD (use_skill={use_skill})...")
+        approach = "skill-based" if (use_skill and self._copilot_available) else "template-based"
+        progress.start_operation("LLM.generate_brd", f"Using {approach} approach")
 
         if use_skill and self._copilot_available:
             # SKILL-BASED APPROACH:
             # Send simple prompt - Copilot automatically matches to generate-brd skill
             # The skill instructs LLM to use MCP tools (Neo4j, Filesystem) to gather context
+            progress.step("generate_brd", "Invoking skill-based generation with MCP tools")
             response = await self._generate_brd_with_skill(context)
         else:
             # TEMPLATE-BASED APPROACH:
             # Build detailed prompt with pre-gathered context and templates
+            progress.step("generate_brd", "Building template-based prompt")
             response = await self._generate_brd_with_template(context)
 
         # Parse response into BRDDocument
+        progress.step("generate_brd", "Parsing LLM response into BRD document")
         brd = self._parse_brd_response(response, context.request)
 
-        logger.info("BRD generated successfully")
+        progress.end_operation("LLM.generate_brd", success=True, details=f"Generated: {brd.title}")
         return brd
 
     async def _generate_brd_with_skill(self, context: AggregatedContext) -> str:
@@ -191,7 +196,7 @@ class LLMSynthesizer:
 - Be concrete and actionable in requirements
 """
 
-        logger.info("Using skill-based BRD generation with template control")
+        progress.info("Sending skill-based prompt to LLM with template control")
         return await self._send_to_llm(prompt)
 
     def _build_template_instructions(self) -> str:
@@ -316,7 +321,7 @@ Use risk levels: {', '.join(config.risk_levels)}
         # Stage 2: BRD Generation
         brd_prompt = self._build_brd_prompt(context, analysis, template)
 
-        logger.info("Using template-based BRD generation")
+        progress.info("Sending template-based prompt to LLM")
         return await self._send_to_llm(brd_prompt)
 
     async def generate_epics_from_brd(
@@ -337,16 +342,20 @@ Use risk levels: {', '.join(config.risk_levels)}
         Returns:
             List of Epics
         """
-        logger.info(f"Generating Epics from BRD: {brd.title}")
+        progress.start_operation("LLM.generate_epics", f"From BRD: {brd.title[:40]}...")
 
         if use_skill and self._copilot_available:
+            progress.step("generate_epics", "Building epics prompt from BRD")
             prompt = self._build_epics_only_prompt(brd)
+            progress.step("generate_epics", "Sending to LLM")
             response = await self._send_to_llm(prompt)
+            progress.step("generate_epics", "Parsing epic response")
             epics = self._parse_epics_only_response(response)
         else:
+            progress.step("generate_epics", "Generating basic epics (fallback mode)")
             epics = self._generate_basic_epics(brd)
 
-        logger.info(f"Generated {len(epics)} Epics")
+        progress.end_operation("LLM.generate_epics", success=True, details=f"{len(epics)} epics generated")
         return epics
 
     def _build_epics_only_prompt(self, brd: BRDDocument) -> str:
@@ -473,21 +482,25 @@ Generate 2-4 Epics that cover all requirements from the BRD.
         Returns:
             List of User Stories
         """
-        logger.info(f"Generating Backlogs from {len(epics)} Epics")
+        progress.start_operation("LLM.generate_backlogs", f"From {len(epics)} Epics")
 
         all_stories = []
-        for epic in epics:
+        for i, epic in enumerate(epics, 1):
+            progress.step("generate_backlogs", f"Generating stories for Epic {i}/{len(epics)}: {epic.id}", current=i, total=len(epics))
+
             if use_skill and self._copilot_available:
                 prompt = self._build_backlogs_prompt(epic)
+                progress.info(f"Sending prompt for {epic.id} to LLM")
                 response = await self._send_to_llm(prompt)
                 stories = self._parse_stories_response(response, epic.id)
             else:
                 stories = self._generate_basic_stories_for_epic(epic)
 
+            progress.info(f"Generated {len(stories)} stories for {epic.id}")
             all_stories.extend(stories)
             epic.stories = [s.id for s in stories]
 
-        logger.info(f"Generated {len(all_stories)} User Stories")
+        progress.end_operation("LLM.generate_backlogs", success=True, details=f"{len(all_stories)} stories generated")
         return all_stories
 
     def _build_backlogs_prompt(self, epic: Epic) -> str:
@@ -1088,10 +1101,11 @@ Report any errors encountered.
     async def _send_to_llm(self, prompt: str) -> str:
         """Send prompt to LLM via Copilot SDK session."""
         if not self._copilot_available or not self.session:
-            logger.warning("Copilot session not available. Using mock response.")
+            progress.warning("Copilot session not available. Using mock response.")
             return self._generate_mock_response(prompt)
 
         try:
+            progress.info(f"Sending prompt to LLM ({len(prompt)} chars, timeout={LLM_TIMEOUT_SECONDS}s)")
             # Send message using SDK session with correct MessageOptions format
             response = await asyncio.wait_for(
                 self._send_to_session(prompt),
@@ -1099,17 +1113,17 @@ Report any errors encountered.
             )
 
             if response:
-                logger.info(f"Got Copilot response: {len(response)} chars")
+                progress.info(f"LLM response received: {len(response)} chars")
                 return response
             else:
-                logger.warning("Empty response from Copilot")
+                progress.warning("Empty response from Copilot, using mock")
                 return self._generate_mock_response(prompt)
 
         except asyncio.TimeoutError:
-            logger.warning(f"LLM response timed out after {LLM_TIMEOUT_SECONDS}s")
+            progress.error(f"LLM response timed out after {LLM_TIMEOUT_SECONDS}s")
             return self._generate_mock_response(prompt)
         except Exception as e:
-            logger.error(f"Copilot call failed: {e}")
+            progress.error(f"Copilot call failed: {e}")
             return self._generate_mock_response(prompt)
 
     async def _send_to_session(self, prompt: str) -> str:
@@ -1117,36 +1131,36 @@ Report any errors encountered.
         try:
             # Build MessageOptions with prompt key
             message_options = {"prompt": prompt}
-            logger.info(f"Sending prompt to Copilot ({len(prompt)} chars)...")
+            progress.debug(f"Building message options for Copilot SDK")
 
             # Use send_and_wait for synchronous response (it's async)
             if hasattr(self.session, 'send_and_wait'):
-                logger.info("Using send_and_wait method...")
+                progress.info("Calling session.send_and_wait()...")
                 # send_and_wait is an async method - await it directly
                 event = await self.session.send_and_wait(message_options, timeout=LLM_TIMEOUT_SECONDS)
 
                 if event:
                     # Extract content from SessionEvent
-                    logger.info(f"Got event type: {type(event)}")
+                    progress.debug(f"Received event type: {type(event).__name__}")
                     return self._extract_from_event(event)
                 else:
-                    logger.warning("send_and_wait returned None")
+                    progress.warning("send_and_wait returned None")
 
             # Fallback to send() method
             if hasattr(self.session, 'send'):
-                logger.info("Using send method...")
+                progress.info("Using fallback send() method...")
                 # send() is also async
                 message_id = await self.session.send(message_options)
-                logger.info(f"Message sent, ID: {message_id}")
+                progress.info(f"Message sent, ID: {message_id}")
 
                 # Wait for response by polling get_messages
                 return await self._wait_for_response(message_id)
 
-            logger.error("No suitable send method found on session")
+            progress.error("No suitable send method found on session")
             return ""
 
         except Exception as e:
-            logger.error(f"Error sending to Copilot session: {e}")
+            progress.error(f"Error sending to Copilot session: {e}")
             raise
 
     def _extract_from_event(self, event: Any) -> str:
