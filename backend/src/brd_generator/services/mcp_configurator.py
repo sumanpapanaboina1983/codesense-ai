@@ -167,7 +167,7 @@ class MCPConfigurator:
             name=name,
             type="stdio",
             command="npx",
-            args=["-y", "@neo4j-contrib/mcp-neo4j"],
+            args=["-y", "@neobarrientos/neo4j_mcpserver"],
             env={
                 "NEO4J_URI": self.neo4j_uri,
                 "NEO4J_USERNAME": self.neo4j_user,

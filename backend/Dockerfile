@@ -6,7 +6,7 @@
 #
 # MCP Servers installed:
 # - @modelcontextprotocol/server-filesystem (filesystem access)
-# - @neo4j-contrib/mcp-neo4j (Neo4j graph database)
+# - @neobarrientos/neo4j_mcpserver (Neo4j graph database)
 #
 # MCP Configuration:
 # - Native MCP config is mounted from host or created in container
@@ -47,13 +47,13 @@ RUN npm install -g @github/copilot
 # - github: Read files directly from GitHub (optional, controlled by MCP_USE_GITHUB_FOR_SOURCE)
 # Note: Atlassian MCP server can be added when the package becomes available
 RUN npm install -g @modelcontextprotocol/server-filesystem \
-    @neo4j-contrib/mcp-neo4j \
+    @neobarrientos/neo4j_mcpserver \
     @modelcontextprotocol/server-github
 
 # Verify MCP servers are installed
 RUN echo "Verifying MCP server installations..." \
     && npx -y @modelcontextprotocol/server-filesystem --help || true \
-    && npx -y @neo4j-contrib/mcp-neo4j --help || true \
+    && npx -y @neobarrientos/neo4j_mcpserver --help || true \
     && npx -y @modelcontextprotocol/server-github --help || true
 
 # Install Poetry

@@ -38,8 +38,8 @@ services:
       # Codebase path (mounted volume)
       - CODEBASE_ROOT=/codebase
       # GitHub Copilot Configuration
-      - GH_TOKEN=${GH_TOKEN:-}
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GH_TOKEN=${GH_TOKEN:-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}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-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}
       - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4-5}
       - COPILOT_CLI_PATH=/usr/local/bin/github-copilot-cli
       - COPILOT_LOG_LEVEL=info

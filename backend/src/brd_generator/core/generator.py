@@ -173,22 +173,23 @@ class BRDGenerator:
             logger.info(f"Registered filesystem MCP server for: {codebase_path}")
 
         # Neo4j Code Graph MCP Server
+        # Using @neobarrientos/neo4j_mcpserver (npm package)
+        # See: https://www.npmjs.com/package/@neobarrientos/neo4j_mcpserver
         if os.getenv("MCP_NEO4J_ENABLED", "true").lower() == "true":
             mcp_servers["neo4j-code-graph"] = {
                 "type": "stdio",
                 "command": "npx",
                 "args": [
                     "-y",
-                    "@neo4j-contrib/mcp-neo4j"
+                    "@neobarrientos/neo4j_mcpserver"
                 ],
                 "tools": ["*"],
                 "timeout": 30000,
                 "env": {
                     "NEO4J_URI": self.neo4j_uri,
-                    "NEO4J_USERNAME": self.neo4j_user,
+                    "NEO4J_USER": self.neo4j_user,
                     "NEO4J_PASSWORD": self.neo4j_password,
-                    "NEO4J_DATABASE": self.neo4j_database,
-                    "NEO4J_READ_ONLY": self.neo4j_read_only
+                    "NEO4J_DATABASE": self.neo4j_database
                 }
             }
             logger.info(f"Registered Neo4j MCP server: {self.neo4j_uri}/{self.neo4j_database}")
@@ -872,7 +873,7 @@ class BRDGenerator:
         mcp_servers["neo4j-code-graph"] = {
             "type": "stdio",
             "command": "npx",
-            "args": ["-y", "@neo4j-contrib/mcp-neo4j"],
+            "args": ["-y", "@neobarrientos/neo4j_mcpserver"],
             "tools": ["*"],
             "timeout": 30000,
             "env": {
