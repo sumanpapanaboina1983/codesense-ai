@@ -1,0 +1,70 @@
+name: verify-brd
+description: |
+  Verify claims in a BRD document against the actual codebase.
+  Extracts claims and validates them using code graph queries.
+
+# Trigger patterns
+triggers:
+  - "verify brd"
+  - "validate brd"
+  - "check brd claims"
+  - "verify requirements"
+  - "validate claims"
+
+# MCP servers needed
+mcp_servers:
+  - neo4j-code-graph
+  - filesystem
+
+# Tools available
+tools:
+  - name: query_code_structure
+    description: Query code graph to verify component existence and relationships
+  - name: get_component_dependencies
+    description: Verify dependency claims
+  - name: read_file
+    description: Read source files to verify implementation details
+  - name: search_files
+    description: Find files mentioned in claims
+
+# Instructions
+instructions: |
+  You are verifying claims in a Business Requirements Document against the codebase.
+
+  ## Process
+
+  1. **Extract Claims**
+     - Identify factual claims in the BRD (not opinions or future plans)
+     - Focus on claims about: components, workflows, integrations, data flows
+
+  2. **Verify Each Claim** (USE THE TOOLS!)
+     - Query Neo4j to check if claimed components/relationships exist
+     - Read source files to verify implementation details
+     - Search for files, classes, or patterns mentioned
+
+  3. **Report Results**
+     For each claim, report:
+     - Status: verified | partially_verified | unverified | contradicted
+     - Confidence: 0.0 to 1.0
+     - Evidence: What you found that supports/refutes the claim
+     - Suggestion: How to fix unverified claims
+
+  ## Output Format
+
+  ```json
+  {
+    "overall_status": "verified | needs_revision",
+    "confidence": 0.85,
+    "claims": [
+      {
+        "claim": "The order service handles payment processing",
+        "status": "verified",
+        "confidence": 0.9,
+        "evidence": [
+          {"source": "src/services/order.py", "content": "class OrderService with process_payment method"}
+        ]
+      }
+    ],
+    "suggestions": []
+  }
+  ```

@@ -1,0 +1,12 @@
+{
+  "feature_description": "Add user authentication with OAuth2 support including login, registration, password reset, and social login options (Google, GitHub)",
+  "scope": "full",
+  "affected_components": [
+    "api",
+    "auth",
+    "database",
+    "frontend"
+  ],
+  "include_similar_features": true,
+  "output_format": "markdown"
+}

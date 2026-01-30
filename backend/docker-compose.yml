@@ -1,0 +1,249 @@
+# =============================================================================
+# CodeSense-AI - Docker Compose
+# =============================================================================
+# Stack:
+# - BRD Generator (Python API with Copilot SDK) - Port 8000
+# - CodeGraph (Node.js API for codebase analysis) - Port 8001
+# - Neo4j Graph Database - Ports 7474 (HTTP), 7687 (Bolt)
+# - UI (Future) - Port 3000
+#
+# MCP Servers (installed in BRD Generator, registered via Copilot SDK):
+# - @modelcontextprotocol/server-filesystem (filesystem access)
+# - @neo4j-contrib/mcp-neo4j (Neo4j graph database)
+#
+# Data Flow:
+# 1. CodeGraph parses codebase → writes to Neo4j (classes, methods, deps)
+# 2. BRD Generator reads from Neo4j → generates BRDs using LLM
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # BRD Generator - Main Application
+  # ===========================================================================
+  brd-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: brd-generator
+    ports:
+      - "8002:8000"
+    environment:
+      # Neo4j Configuration (for MCP server)
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=test123456
+      - NEO4J_DATABASE=codegraph
+      - NEO4J_READ_ONLY=true
+      # Codebase path (mounted volume)
+      - CODEBASE_ROOT=/codebase
+      # GitHub Copilot Configuration
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4-5}
+      - COPILOT_CLI_PATH=/usr/local/bin/github-copilot-cli
+      - COPILOT_LOG_LEVEL=info
+      # MCP Server Configuration
+      - MCP_FILESYSTEM_ENABLED=true
+      - MCP_NEO4J_ENABLED=true
+      - MCP_ATLASSIAN_ENABLED=${MCP_ATLASSIAN_ENABLED:-false}
+      - MCP_SKILLS_DIR=/home/appuser/.github/skills
+      # Atlassian/JIRA Configuration (for Phase 3: Create JIRA issues)
+      - ATLASSIAN_URL=${ATLASSIAN_URL:-}
+      - ATLASSIAN_EMAIL=${ATLASSIAN_EMAIL:-}
+      - ATLASSIAN_API_TOKEN=${ATLASSIAN_API_TOKEN:-}
+      # Application Settings
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app/src
+      - HOME=/home/appuser
+      # Node.js paths for MCP servers
+      - PATH=/usr/local/lib/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - NODE_PATH=/usr/local/lib/node_modules
+    volumes:
+      # Mount the codebase to analyze
+      - ${CODEBASE_PATH:-../codebase}:/codebase:ro
+      # Mount output directory for generated BRDs
+      - ./output:/app/output
+      # Mount skills directory
+      - ./.github/skills:/home/appuser/.github/skills:ro
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    networks:
+      - codesense-ai
+    stdin_open: true
+    tty: true
+    command: ["python", "-m", "uvicorn", "brd_generator.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  # ===========================================================================
+  # BRD Generator CLI - For one-off commands
+  # ===========================================================================
+  brd-cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: cli
+    container_name: brd-cli
+    environment:
+      # Neo4j Configuration
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=test123456
+      - NEO4J_DATABASE=codegraph
+      - NEO4J_READ_ONLY=true
+      # Codebase path
+      - CODEBASE_ROOT=/codebase
+      # GitHub Copilot Configuration
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4-5}
+      # MCP Server Configuration
+      - MCP_FILESYSTEM_ENABLED=true
+      - MCP_NEO4J_ENABLED=true
+      - MCP_ATLASSIAN_ENABLED=${MCP_ATLASSIAN_ENABLED:-false}
+      - MCP_SKILLS_DIR=/home/appuser/.github/skills
+      # Atlassian/JIRA Configuration (for Phase 3: Create JIRA issues)
+      - ATLASSIAN_URL=${ATLASSIAN_URL:-}
+      - ATLASSIAN_EMAIL=${ATLASSIAN_EMAIL:-}
+      - ATLASSIAN_API_TOKEN=${ATLASSIAN_API_TOKEN:-}
+      # Application Settings
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app/src
+      - HOME=/home/appuser
+      # Node.js paths
+      - PATH=/usr/local/lib/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - NODE_PATH=/usr/local/lib/node_modules
+    volumes:
+      - ${CODEBASE_PATH:-../codebase}:/codebase:ro
+      - ./output:/app/output
+      - ./.github/skills:/home/appuser/.github/skills:ro
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    networks:
+      - codesense-ai
+    profiles:
+      - cli
+
+  # ===========================================================================
+  # CodeGraph - Codebase Analysis Engine
+  # Parses source code and creates context graph in Neo4j
+  # ===========================================================================
+  codegraph:
+    build:
+      context: ../codegraph
+      dockerfile: Dockerfile
+      target: production
+    container_name: codegraph
+    ports:
+      - "8001:8001"
+    environment:
+      # Neo4j Configuration
+      - NEO4J_URL=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=test123456
+      - NEO4J_DATABASE=codegraph
+      # Server Configuration
+      - PORT=8001
+      - LOG_LEVEL=info
+      - NODE_ENV=production
+      # Python for AST parsing
+      - PYTHON_EXECUTABLE=python3
+    volumes:
+      # Mount the codebase to analyze
+      - ${CODEBASE_PATH:-../codebase}:/codebase:ro
+      # Analysis data output
+      - codegraph_data:/app/analysis-data
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    networks:
+      - codesense-ai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8001/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  # ===========================================================================
+  # CodeGraph CLI - For one-off analysis commands
+  # ===========================================================================
+  codegraph-cli:
+    build:
+      context: ../codegraph
+      dockerfile: Dockerfile
+      target: production
+    container_name: codegraph-cli
+    environment:
+      - NEO4J_URL=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=test123456
+      - NEO4J_DATABASE=codegraph
+      - LOG_LEVEL=info
+      - PYTHON_EXECUTABLE=python3
+    volumes:
+      - ${CODEBASE_PATH:-../codebase}:/codebase:ro
+      - codegraph_data:/app/analysis-data
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    networks:
+      - codesense-ai
+    profiles:
+      - cli
+    # Override default command for CLI usage
+    entrypoint: ["node", "dist/index.js"]
+    command: ["analyze", "/codebase", "--update-schema"]
+
+  # ===========================================================================
+  # Neo4j Graph Database
+  # ===========================================================================
+  neo4j:
+    image: neo4j:5
+    container_name: brd-neo4j
+    ports:
+      - "7474:7474"  # HTTP Browser
+      - "7687:7687"  # Bolt Protocol
+    environment:
+      - NEO4J_AUTH=neo4j/test123456
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=1G
+      # Create codegraph database
+      - NEO4J_dbms_default__database=codegraph
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    networks:
+      - codesense-ai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  codegraph_data:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  codesense-ai:
+    driver: bridge
+    name: codesense-ai

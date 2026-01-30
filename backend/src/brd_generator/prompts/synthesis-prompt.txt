@@ -1,0 +1,50 @@
+Synthesize a comprehensive Business Requirements Document based on the analysis.
+
+Feature: {feature}
+
+Analysis Summary:
+{analysis}
+
+Key Components: {components}
+
+Requirements to Address:
+{requirements}
+
+Generate a BRD that includes:
+
+1. **Business Context**
+   - Why this feature is needed
+   - Business value and impact
+   - User personas affected
+
+2. **Objectives**
+   - Clear, measurable goals (SMART format)
+   - Success metrics
+
+3. **Functional Requirements** (FR-XXX format)
+   - What the system should do
+   - User-facing functionality
+   - System behaviors
+
+4. **Technical Requirements** (TR-XXX format)
+   - Architecture considerations
+   - Performance requirements
+   - Security requirements
+   - Integration requirements
+
+5. **Dependencies**
+   - Internal dependencies (other components/services)
+   - External dependencies (third-party services, APIs)
+   - Data dependencies
+
+6. **Risks and Mitigation**
+   - Technical risks
+   - Business risks
+   - Mitigation strategies
+
+Format each requirement with:
+- Unique ID (FR-001, TR-001, etc.)
+- Clear title
+- Detailed description
+- Priority (High/Medium/Low)
+- Acceptance criteria

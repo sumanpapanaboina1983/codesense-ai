@@ -1,0 +1,23 @@
+Analyze the following feature request and codebase context:
+
+Feature Request: {request}
+
+Architecture Components:
+{components}
+
+Files Available: {files_count}
+
+Provide:
+1. Scope assessment (which components affected)
+2. Integration points identified
+3. Similar existing features (if any)
+4. Key technical challenges
+5. Recommended implementation approach
+
+Be specific and reference actual component names and file paths.
+
+Focus on:
+- Understanding the full scope of changes required
+- Identifying dependencies that need to be considered
+- Recognizing patterns from similar features
+- Highlighting potential risks or complexities

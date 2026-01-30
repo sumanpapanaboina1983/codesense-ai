@@ -1,0 +1,68 @@
+name: generate-brd
+description: |
+  Generate a Business Requirements Document (BRD) for a software feature.
+  Uses code graph and filesystem to understand the codebase context.
+
+# Trigger patterns - Copilot SDK matches these to activate skill
+triggers:
+  - "generate brd"
+  - "create brd"
+  - "write brd"
+  - "business requirements"
+  - "generate requirements document"
+  - "create requirements"
+
+# MCP servers this skill needs access to
+mcp_servers:
+  - neo4j-code-graph    # For querying code structure, dependencies
+  - filesystem          # For reading source files
+
+# Tools available to the skill (from the MCP servers)
+tools:
+  # Neo4j tools
+  - name: query_code_structure
+    description: Execute Cypher queries on the code graph to find components, classes, functions
+  - name: get_component_dependencies
+    description: Get upstream and downstream dependencies of a component
+  - name: search_similar_features
+    description: Find similar features in the codebase
+
+  # Filesystem tools
+  - name: read_file
+    description: Read source code files
+  - name: list_directory
+    description: List files in a directory
+  - name: search_files
+    description: Search for files matching a pattern
+
+# Instructions for the LLM when this skill is activated
+instructions: |
+  You are generating a Business Requirements Document (BRD) for a software feature.
+
+  ## Process
+
+  1. **Understand the Feature Request**
+     - Parse the user's feature description
+     - Identify key business concepts and terminology
+
+  2. **Analyze the Codebase** (USE THE TOOLS!)
+     - Query Neo4j to find related components, classes, and dependencies
+     - Read relevant source files to understand existing patterns
+     - Search for similar features already implemented
+
+  3. **Generate the BRD**
+     - Follow the template structure provided
+     - Reference actual code components discovered
+     - Include specific file paths and class names
+     - Make claims that can be verified against the codebase
+
+  ## Important Guidelines
+
+  - ALWAYS use the tools to gather real information before writing
+  - DO NOT make assumptions - query the codebase
+  - Reference actual component names and file paths
+  - Be specific and verifiable in all claims
+
+  ## Output Format
+
+  Generate the BRD in Markdown format following the provided template structure.

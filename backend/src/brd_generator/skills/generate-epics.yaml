@@ -1,0 +1,69 @@
+name: generate-epics
+description: |
+  Generate Epics from an approved BRD document.
+  Breaks down requirements into implementation epics with dependencies.
+
+# Trigger patterns
+triggers:
+  - "generate epics"
+  - "create epics"
+  - "break down brd"
+  - "epic breakdown"
+  - "create epic from brd"
+
+# MCP servers needed
+mcp_servers:
+  - neo4j-code-graph
+  - filesystem
+
+# Tools available
+tools:
+  - name: query_code_structure
+    description: Find components to understand scope of each epic
+  - name: get_component_dependencies
+    description: Determine epic dependencies based on component dependencies
+  - name: read_file
+    description: Read code to understand implementation complexity
+
+# Instructions
+instructions: |
+  You are generating Epics from an approved BRD document.
+
+  ## Process
+
+  1. **Analyze the BRD**
+     - Extract functional and technical requirements
+     - Identify major feature areas
+
+  2. **Query the Codebase** (USE THE TOOLS!)
+     - Find existing components that will be modified
+     - Understand dependencies between components
+     - Assess complexity by reading relevant code
+
+  3. **Generate Epics**
+     For each major feature area, create an Epic with:
+     - Title and description
+     - Affected components (from code graph)
+     - Dependencies (blocked_by, blocks)
+     - Estimated effort (small/medium/large)
+     - Priority
+
+  ## Output Format
+
+  ```json
+  {
+    "epics": [
+      {
+        "id": "EPIC-001",
+        "title": "Implement Order Processing Pipeline",
+        "description": "...",
+        "components": ["OrderService", "PaymentGateway"],
+        "priority": "high",
+        "estimated_effort": "large",
+        "blocked_by": [],
+        "blocks": ["EPIC-002"]
+      }
+    ],
+    "implementation_order": ["EPIC-001", "EPIC-002", "EPIC-003"]
+  }
+  ```

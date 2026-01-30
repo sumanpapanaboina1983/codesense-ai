@@ -1,0 +1,363 @@
+import { useState, useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import {
+  Layers,
+  Upload,
+  FileText,
+  Send,
+  ArrowRight,
+  Loader2,
+  CheckCircle,
+  RefreshCw,
+  Bot,
+  User,
+  Download,
+  ExternalLink,
+} from 'lucide-react';
+import './GenerateEPIC.css';
+
+interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export function GenerateEPIC() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [step, setStep] = useState<'upload' | 'chat' | 'review'>('upload');
+  const [brdContent, setBrdContent] = useState<string>(location.state?.brdContent || '');
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [epicContent, setEpicContent] = useState<string>('');
+  const [jiraCreated, setJiraCreated] = useState(false);
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        setBrdContent(content);
+        startChatWithBRD();
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const startChatWithBRD = () => {
+    setStep('chat');
+    setMessages([
+      {
+        id: '1',
+        role: 'assistant',
+        content: `I've analyzed your BRD document. Based on the requirements, I can help you create EPICs for your project.\n\nFrom my analysis, I've identified the following key areas:\n- User authentication and access control\n- Dashboard and analytics features\n- Report generation capabilities\n\nWould you like me to generate EPICs based on these areas, or do you have specific prioritization or additional context to share?`,
+      },
+    ]);
+  };
+
+  const handleUseBRD = () => {
+    if (brdContent) {
+      startChatWithBRD();
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!input.trim() || isLoading) return;
+
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: input.trim(),
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInput('');
+    setIsLoading(true);
+
+    setTimeout(() => {
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: 'I understand. Let me incorporate that feedback into the EPIC structure. I\'ll ensure the EPICs are well-defined with clear acceptance criteria, user stories, and dependencies.\n\nClick "Generate EPIC" when you\'re ready to create the detailed EPIC document.',
+      };
+
+      setMessages((prev) => [...prev, assistantMessage]);
+      setIsLoading(false);
+    }, 1500);
+  };
+
+  const handleGenerateEPIC = () => {
+    setIsLoading(true);
+    setTimeout(() => {
+      setEpicContent(`# EPIC: User Authentication & Access Control
+
+## EPIC ID: EPIC-001
+## Project: ${location.state?.repository?.name || 'Project Name'}
+## Priority: High
+## Status: Draft
+
+---
+
+## Summary
+Implement comprehensive user authentication and role-based access control system to secure the application and provide personalized user experiences.
+
+## Business Value
+- Enhance security posture of the application
+- Enable personalized user experiences
+- Support compliance requirements (SOC 2, GDPR)
+
+## Acceptance Criteria
+1. Users can register with email and password
+2. Users can log in and receive JWT tokens
+3. Password reset functionality is available
+4. Role-based permissions control access to features
+5. Session management with secure logout
+
+## User Stories
+
+### US-001: User Registration
+**As a** new user
+**I want to** create an account
+**So that** I can access the application features
+
+**Acceptance Criteria:**
+- Email validation
+- Password strength requirements
+- Duplicate email prevention
+- Email verification flow
+
+### US-002: User Login
+**As a** registered user
+**I want to** log in to my account
+**So that** I can access personalized features
+
+**Acceptance Criteria:**
+- Secure credential validation
+- JWT token generation
+- Remember me functionality
+- Failed attempt rate limiting
+
+### US-003: Role-Based Access
+**As an** administrator
+**I want to** assign roles to users
+**So that** I can control feature access
+
+**Acceptance Criteria:**
+- Role assignment UI
+- Permission inheritance
+- Audit logging
+- Role hierarchy support
+
+## Dependencies
+- Database schema for users and roles
+- JWT library integration
+- Email service for verification
+
+## Technical Notes
+- Use bcrypt for password hashing
+- Implement refresh token rotation
+- Add rate limiting for auth endpoints
+
+## Estimated Effort
+- Development: 3 sprints
+- Testing: 1 sprint
+- Documentation: 0.5 sprint
+
+---
+*Generated by CodeSense AI*`);
+      setStep('review');
+      setIsLoading(false);
+    }, 2000);
+  };
+
+  const handleCreateInJira = async () => {
+    setIsLoading(true);
+    // Simulate JIRA API call via MCP
+    setTimeout(() => {
+      setJiraCreated(true);
+      setIsLoading(false);
+    }, 2000);
+  };
+
+  const handleDownload = () => {
+    const blob = new Blob([epicContent], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `EPIC-${new Date().toISOString().split('T')[0]}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCreateBacklogs = () => {
+    navigate('/generate-backlogs', { state: { epicContent, repository: location.state?.repository } });
+  };
+
+  return (
+    <div className="generate-epic-page">
+      {/* Progress Steps */}
+      <div className="workflow-stepper">
+        <div className={`step ${step === 'upload' ? 'active' : ''} ${step !== 'upload' ? 'completed' : ''}`}>
+          <div className="step-number">{step !== 'upload' ? <CheckCircle size={16} /> : '1'}</div>
+          <span className="step-label">Upload BRD</span>
+        </div>
+        <div className={`step ${step === 'chat' ? 'active' : ''} ${step === 'review' ? 'completed' : ''}`}>
+          <div className="step-number">{step === 'review' ? <CheckCircle size={16} /> : '2'}</div>
+          <span className="step-label">Refine Requirements</span>
+        </div>
+        <div className={`step ${step === 'review' ? 'active' : ''}`}>
+          <div className="step-number">3</div>
+          <span className="step-label">Review & Create</span>
+        </div>
+      </div>
+
+      {/* Step 1: Upload BRD */}
+      {step === 'upload' && (
+        <div className="step-content">
+          <div className="step-header">
+            <Layers size={32} className="step-icon" />
+            <h2>Generate EPIC from BRD</h2>
+            <p>Upload your BRD document or use one from a previous generation</p>
+          </div>
+
+          <div className="upload-options">
+            {brdContent && (
+              <div className="existing-brd">
+                <div className="brd-preview-card">
+                  <FileText size={24} />
+                  <div>
+                    <h3>BRD from Previous Step</h3>
+                    <p>Use the BRD you just generated</p>
+                  </div>
+                  <button className="btn btn-primary" onClick={handleUseBRD}>
+                    Use This BRD
+                    <ArrowRight size={16} />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="upload-zone" onClick={() => fileInputRef.current?.click()}>
+              <Upload size={48} />
+              <h3>Upload BRD Document</h3>
+              <p>Drag and drop or click to browse</p>
+              <span className="file-types">Supports: .md, .txt, .docx</span>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".md,.txt,.docx"
+                onChange={handleFileUpload}
+                style={{ display: 'none' }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Step 2: Chat Interface */}
+      {step === 'chat' && (
+        <div className="chat-step">
+          <div className="chat-header">
+            <h2>Refine EPIC Requirements</h2>
+            <button className="btn btn-primary" onClick={handleGenerateEPIC} disabled={isLoading}>
+              {isLoading ? <Loader2 className="spin" size={16} /> : <Layers size={16} />}
+              Generate EPIC
+            </button>
+          </div>
+
+          <div className="chat-messages">
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className={`message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`}
+              >
+                <div className="message-avatar">
+                  {message.role === 'user' ? <User size={18} /> : <Bot size={18} />}
+                </div>
+                <div className="message-content">{message.content}</div>
+              </div>
+            ))}
+            {isLoading && (
+              <div className="message assistant-message">
+                <div className="message-avatar">
+                  <Bot size={18} />
+                </div>
+                <div className="message-content typing">
+                  <Loader2 className="spin" size={16} />
+                  <span>Thinking...</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="chat-input">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+              placeholder="Add more context or ask questions..."
+              disabled={isLoading}
+            />
+            <button
+              className="send-btn"
+              onClick={handleSendMessage}
+              disabled={!input.trim() || isLoading}
+            >
+              <Send size={20} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 3: Review */}
+      {step === 'review' && (
+        <div className="review-step">
+          <div className="review-header">
+            <h2>Review Your EPIC</h2>
+            <div className="review-actions">
+              <button className="btn btn-outline" onClick={() => setStep('chat')}>
+                <RefreshCw size={16} />
+                Refine
+              </button>
+              <button className="btn btn-secondary" onClick={handleDownload}>
+                <Download size={16} />
+                Download
+              </button>
+              {!jiraCreated ? (
+                <button className="btn btn-primary" onClick={handleCreateInJira} disabled={isLoading}>
+                  {isLoading ? <Loader2 className="spin" size={16} /> : <ExternalLink size={16} />}
+                  Create in JIRA
+                </button>
+              ) : (
+                <button className="btn btn-primary" onClick={handleCreateBacklogs}>
+                  Create Backlogs
+                  <ArrowRight size={16} />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {jiraCreated && (
+            <div className="jira-success">
+              <CheckCircle size={20} />
+              <span>EPIC created in JIRA: <a href="#" target="_blank">PROJ-123</a></span>
+            </div>
+          )}
+
+          <div className="epic-preview card">
+            <div className="markdown-content">
+              <pre>{epicContent}</pre>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

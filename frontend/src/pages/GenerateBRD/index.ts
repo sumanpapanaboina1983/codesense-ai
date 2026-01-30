@@ -1,0 +1,1 @@
+export { GenerateBRD } from './GenerateBRD';

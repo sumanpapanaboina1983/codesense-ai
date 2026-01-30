@@ -1,0 +1,171 @@
+.graph-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.stats-summary {
+  display: flex;
+  gap: 32px;
+}
+
+.summary-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.summary-item svg {
+  color: #646cff;
+}
+
+.summary-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+.summary-label {
+  font-size: 0.875rem;
+  color: #888;
+}
+
+.refresh-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: #1a1a2e;
+  border: 1px solid #2d2d44;
+  border-radius: 8px;
+  color: #a0a0b0;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  background: #2d2d44;
+  color: #fff;
+}
+
+.refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.graph-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 24px;
+}
+
+@media (max-width: 900px) {
+  .graph-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.graph-card {
+  background: #1a1a2e;
+  border: 1px solid #2d2d44;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px;
+  background: #16162a;
+  border-bottom: 1px solid #2d2d44;
+}
+
+.card-header svg {
+  color: #646cff;
+}
+
+.card-header h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0;
+  color: #fff;
+}
+
+.card-content {
+  padding: 20px;
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 32px;
+  color: #888;
+}
+
+.distribution-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.distribution-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dist-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dist-label {
+  font-size: 0.875rem;
+  color: #fff;
+  font-weight: 500;
+}
+
+.dist-count {
+  font-size: 0.875rem;
+  color: #888;
+  font-family: monospace;
+}
+
+.dist-bar {
+  height: 8px;
+  background: #2d2d44;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.dist-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.dist-fill.node-fill {
+  background: linear-gradient(90deg, #646cff, #535bf2);
+}
+
+.dist-fill.rel-fill {
+  background: linear-gradient(90deg, #10b981, #059669);
+}
+
+.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}

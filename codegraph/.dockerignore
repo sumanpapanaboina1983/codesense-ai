@@ -1,0 +1,42 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Build output
+dist
+
+# Test files
+**/*.spec.ts
+**/*.test.ts
+**/__tests__
+coverage
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Git
+.git
+.gitignore
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+!README.md
+
+# Test fixtures
+test_fixtures

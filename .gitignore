@@ -102,3 +102,14 @@ Thumbs.db
 /codebase/
 /data/
 *.bak
+
+# Large files (GitHub limit: 100MB)
+*.zip
+codegraph.zip
+
+# Node modules
+node_modules/
+
+# Output directories
+output/
+backend/output/

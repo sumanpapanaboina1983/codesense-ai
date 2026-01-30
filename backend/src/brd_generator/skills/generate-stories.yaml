@@ -1,0 +1,83 @@
+name: generate-stories
+description: |
+  Generate User Stories (backlog items) from approved Epics.
+  Creates detailed stories with acceptance criteria and file references.
+
+# Trigger patterns
+triggers:
+  - "generate stories"
+  - "create stories"
+  - "generate backlog"
+  - "create backlog"
+  - "user stories from epic"
+  - "break down epic"
+
+# MCP servers needed
+mcp_servers:
+  - neo4j-code-graph
+  - filesystem
+
+# Tools available
+tools:
+  - name: query_code_structure
+    description: Find specific classes/methods to modify
+  - name: read_file
+    description: Read code to understand implementation details
+  - name: search_files
+    description: Find files that need modification
+  - name: list_directory
+    description: Explore project structure
+
+# Instructions
+instructions: |
+  You are generating User Stories from approved Epics.
+
+  ## Process
+
+  1. **Analyze the Epic**
+     - Understand the scope and components involved
+     - Identify discrete user-facing capabilities
+
+  2. **Query the Codebase** (USE THE TOOLS!)
+     - Find exact files that need modification
+     - Read existing code to understand current implementation
+     - Identify test files that need updates
+
+  3. **Generate Stories**
+     For each user capability, create a Story with:
+     - User story format: "As a [role], I want [feature], so that [benefit]"
+     - Acceptance criteria (testable)
+     - Files to modify (actual paths from codebase)
+     - Files to create (if needed)
+     - Technical notes
+     - Story points estimate
+
+  ## Output Format
+
+  ```json
+  {
+    "stories": [
+      {
+        "id": "STORY-001",
+        "epic_id": "EPIC-001",
+        "title": "Add payment validation",
+        "as_a": "customer",
+        "i_want": "payment validation before order submission",
+        "so_that": "I don't submit orders with invalid payment",
+        "acceptance_criteria": [
+          "Given invalid card, when submitting, then show error",
+          "Given valid card, when submitting, then proceed to confirmation"
+        ],
+        "files_to_modify": [
+          "src/services/payment_service.py",
+          "src/api/orders.py"
+        ],
+        "files_to_create": [
+          "src/validators/payment_validator.py"
+        ],
+        "estimated_points": 5,
+        "priority": "high"
+      }
+    ]
+  }
+  ```

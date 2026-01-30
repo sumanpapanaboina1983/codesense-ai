@@ -1,0 +1,11 @@
+{
+  "feature_description": "Implement a REST API rate limiting system with configurable limits per endpoint and user tier (free, pro, enterprise)",
+  "scope": "standard",
+  "affected_components": [
+    "api",
+    "middleware",
+    "redis"
+  ],
+  "include_similar_features": true,
+  "output_format": "markdown"
+}
