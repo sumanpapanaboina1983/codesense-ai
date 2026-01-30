@@ -31,6 +31,7 @@ from .repository import (
     AnalysisRunCreate,
     AnalysisRunSummary,
     RepositoryCredentials,
+    LocalRepositoryCreate,
 )
 
 __all__ = [
@@ -61,4 +62,5 @@ __all__ = [
     "AnalysisRunCreate",
     "AnalysisRunSummary",
     "RepositoryCredentials",
+    "LocalRepositoryCreate",
 ]

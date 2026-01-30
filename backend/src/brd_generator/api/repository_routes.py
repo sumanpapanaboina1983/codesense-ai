@@ -27,6 +27,7 @@ from ..models.repository import (
     AnalysisRun,
     AnalysisRunCreate,
     AnalysisRunSummary,
+    LocalRepositoryCreate,
 )
 from ..services.repository_service import RepositoryService
 from ..utils.logger import get_logger
@@ -148,6 +149,46 @@ async def create_repository(
         raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         logger.exception("Failed to create repository")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/local",
+    response_model=RepositoryResponse,
+    responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+    summary="Onboard a local repository",
+    description="""
+    Onboard a local repository by providing its path.
+
+    This is used for repositories that are already present on the filesystem
+    (e.g., mounted volumes in Docker). No cloning is performed.
+
+    This will:
+    1. Validate the path exists and is a directory
+    2. Extract git info if available (branch, commit)
+    3. Store the repository in the database with status `cloned`
+
+    The repository will be immediately ready for analysis.
+
+    **Note:** Call POST /repositories/{id}/analyze to trigger code analysis.
+    """,
+)
+async def create_local_repository(
+    request: LocalRepositoryCreate,
+    service: RepositoryService = Depends(get_repository_service),
+    session: AsyncSession = Depends(get_db_session),
+) -> RepositoryResponse:
+    """Onboard a local repository."""
+    try:
+        repository = await service.create_local_repository(request, session)
+        return RepositoryResponse(data=repository)
+
+    except ValueError as e:
+        if "already exists" in str(e):
+            raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Failed to create local repository")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -11,6 +11,33 @@
       "tools": ["*"],
       "timeout": 30000
     },
+    "github": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "tools": ["*"],
+      "timeout": 60000,
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "gitlab": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "${GITLAB_MCP_URL:-https://gitlab.com/api/v4/mcp}"
+      ],
+      "tools": ["*"],
+      "timeout": 60000,
+      "env": {
+        "GITLAB_TOKEN": "${GITLAB_TOKEN}"
+      }
+    },
     "neo4j-code-graph": {
       "type": "stdio",
       "command": "npx",

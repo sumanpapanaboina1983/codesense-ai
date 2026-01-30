@@ -35,6 +35,7 @@ from ..models.repository import (
     AnalysisRunCreate,
     AnalysisRunSummary,
     RepositoryCredentials,
+    LocalRepositoryCreate,
 )
 from .git_client import GitClient
 from .platform_client import PlatformClient, create_platform_client
@@ -183,6 +184,92 @@ class RepositoryService:
         self._background_tasks[f"clone-{repo_id}"] = task
 
         return Repository.model_validate(db_repo)
+
+    async def create_local_repository(
+        self,
+        data: LocalRepositoryCreate,
+        session: AsyncSession,
+    ) -> Repository:
+        """Onboard a local repository (no cloning needed).
+
+        Args:
+            data: Local repository data with path.
+            session: Database session.
+
+        Returns:
+            Created repository.
+
+        Raises:
+            ValueError: If repository already exists or path is invalid.
+        """
+        local_path = Path(data.path)
+
+        # Validate path exists
+        if not local_path.exists():
+            raise ValueError(f"Path does not exist: {data.path}")
+
+        if not local_path.is_dir():
+            raise ValueError(f"Path is not a directory: {data.path}")
+
+        # Check for existing repository with same path
+        existing = await self._get_by_local_path(str(local_path), session)
+        if existing:
+            raise ValueError(f"Repository already exists at path: {data.path}")
+
+        # Determine repository name
+        repo_name = data.name or local_path.name
+
+        # Try to get git info if it's a git repository
+        current_branch = None
+        current_commit = None
+        try:
+            git_status = await self.git_client.get_status(local_path)
+            current_branch = git_status.branch
+            current_commit = git_status.commit_sha
+        except Exception:
+            # Not a git repo or git not available - that's okay for local repos
+            pass
+
+        # Create repository record
+        repo_id = str(uuid4())
+
+        from ..database.models import RepositoryPlatform as DBRepositoryPlatform
+
+        db_repo = RepositoryDB(
+            id=repo_id,
+            name=repo_name,
+            full_name=f"local/{repo_name}",
+            url=f"file://{local_path}",
+            clone_url=f"file://{local_path}",
+            platform=DBRepositoryPlatform.LOCAL,
+            description=f"Local repository at {local_path}",
+            default_branch=current_branch or "main",
+            is_private=True,  # Local repos are always private
+            local_path=str(local_path),
+            current_branch=current_branch,
+            current_commit=current_commit,
+            status=DBRepositoryStatus.CLONED,  # Already "cloned" - files are present
+            cloned_at=datetime.utcnow(),
+            analysis_status=DBAnalysisStatus.NOT_ANALYZED,
+        )
+
+        session.add(db_repo)
+        await session.flush()
+
+        logger.info(f"Created local repository: {repo_name} ({repo_id}) at {local_path}")
+
+        return Repository.model_validate(db_repo)
+
+    async def _get_by_local_path(
+        self,
+        local_path: str,
+        session: AsyncSession,
+    ) -> Optional[RepositoryDB]:
+        """Get repository by local path."""
+        result = await session.execute(
+            select(RepositoryDB).where(RepositoryDB.local_path == local_path)
+        )
+        return result.scalar_one_or_none()
 
     async def get_repository(
         self,

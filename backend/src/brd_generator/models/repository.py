@@ -18,6 +18,7 @@ class RepositoryPlatform(str, Enum):
     """Supported repository platforms."""
     GITHUB = "github"
     GITLAB = "gitlab"
+    LOCAL = "local"
 
 
 class RepositoryStatus(str, Enum):
@@ -67,6 +68,27 @@ class RepositoryCreate(RepositoryBase):
                 "url": "https://github.com/owner/repo",
                 "token": "ghp_xxxxxxxxxxxx",
                 "branch": "main"
+            }]
+        }
+    )
+
+
+class LocalRepositoryCreate(BaseModel):
+    """Request model for onboarding a local repository (no cloning needed)."""
+    path: str = Field(
+        ...,
+        description="Absolute path to the local repository directory"
+    )
+    name: Optional[str] = Field(
+        None,
+        description="Repository name (defaults to directory name)"
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [{
+                "path": "/data/repositories/my-project",
+                "name": "my-project"
             }]
         }
     )

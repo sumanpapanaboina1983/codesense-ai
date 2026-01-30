@@ -32,6 +32,7 @@ class RepositoryPlatform(str, enum.Enum):
     """Supported repository platforms."""
     GITHUB = "github"
     GITLAB = "gitlab"
+    LOCAL = "local"
 
 
 class RepositoryStatus(str, enum.Enum):

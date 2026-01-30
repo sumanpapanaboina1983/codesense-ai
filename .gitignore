@@ -101,6 +101,7 @@ Thumbs.db
 # Project specific
 /codebase/
 /data/
+/repos/
 *.bak
 
 # Large files (GitHub limit: 100MB)

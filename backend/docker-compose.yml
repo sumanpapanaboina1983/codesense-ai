@@ -43,10 +43,18 @@ services:
       - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4-5}
       - COPILOT_CLI_PATH=/usr/local/bin/github-copilot-cli
       - COPILOT_LOG_LEVEL=info
+      # GitLab Configuration
+      - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      - GITLAB_URL=${GITLAB_URL:-https://gitlab.com}
+      - GITLAB_MCP_URL=${GITLAB_MCP_URL:-https://gitlab.com/api/v4/mcp}
       # MCP Server Configuration
       - MCP_FILESYSTEM_ENABLED=true
       - MCP_NEO4J_ENABLED=true
+      - MCP_GITHUB_ENABLED=${MCP_GITHUB_ENABLED:-true}
+      - MCP_GITLAB_ENABLED=${MCP_GITLAB_ENABLED:-true}
       - MCP_ATLASSIAN_ENABLED=${MCP_ATLASSIAN_ENABLED:-false}
+      - MCP_USE_GITHUB_FOR_SOURCE=${MCP_USE_GITHUB_FOR_SOURCE:-false}
+      - MCP_USE_GITLAB_FOR_SOURCE=${MCP_USE_GITLAB_FOR_SOURCE:-false}
       - MCP_SKILLS_DIR=/home/appuser/.github/skills
       # Atlassian/JIRA Configuration (for Phase 3: Create JIRA issues)
       - ATLASSIAN_URL=${ATLASSIAN_URL:-}
@@ -97,10 +105,18 @@ services:
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4-5}
+      # GitLab Configuration
+      - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      - GITLAB_URL=${GITLAB_URL:-https://gitlab.com}
+      - GITLAB_MCP_URL=${GITLAB_MCP_URL:-https://gitlab.com/api/v4/mcp}
       # MCP Server Configuration
       - MCP_FILESYSTEM_ENABLED=true
       - MCP_NEO4J_ENABLED=true
+      - MCP_GITHUB_ENABLED=${MCP_GITHUB_ENABLED:-true}
+      - MCP_GITLAB_ENABLED=${MCP_GITLAB_ENABLED:-true}
       - MCP_ATLASSIAN_ENABLED=${MCP_ATLASSIAN_ENABLED:-false}
+      - MCP_USE_GITHUB_FOR_SOURCE=${MCP_USE_GITHUB_FOR_SOURCE:-false}
+      - MCP_USE_GITLAB_FOR_SOURCE=${MCP_USE_GITLAB_FOR_SOURCE:-false}
       - MCP_SKILLS_DIR=/home/appuser/.github/skills
       # Atlassian/JIRA Configuration (for Phase 3: Create JIRA issues)
       - ATLASSIAN_URL=${ATLASSIAN_URL:-}

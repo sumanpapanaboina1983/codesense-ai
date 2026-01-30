@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from ..models.request import BRDRequest
 from ..models.output import BRDOutput, BRDDocument, EpicsOutput, BacklogsOutput, JiraCreationResult, Epic, UserStory
-from ..models.repository import Repository, RepositoryStatus, AnalysisStatus
+from ..models.repository import Repository, RepositoryStatus, AnalysisStatus, RepositoryPlatform, RepositoryCredentials
 from ..mcp_clients.neo4j_client import Neo4jMCPClient
 from ..mcp_clients.filesystem_client import FilesystemMCPClient
 from .aggregator import ContextAggregator
@@ -259,6 +259,14 @@ class BRDGenerator:
                     "streaming": True,
                     "mcp_servers": mcp_servers,
                 }
+
+                # Add tools from tool_registry to session config for SDK auto-execution
+                # When tools are passed to create_session(), SDK handles tool calling automatically
+                if self.tool_registry is not None:
+                    tools = self.tool_registry.get_tool_definitions()
+                    if tools:
+                        session_config["tools"] = tools
+                        logger.info(f"Registered {len(tools)} tools with session for auto-execution")
 
                 # Add skills directory for Copilot SDK native skill loading
                 # skill_directories: List[str] - directories to load skills from
@@ -640,6 +648,7 @@ class BRDGenerator:
         repository: Repository,
         request: BRDRequest,
         mcp_servers: Optional[dict[str, Any]] = None,
+        credentials: Optional[RepositoryCredentials] = None,
         use_skill: bool = True,
     ) -> BRDOutput:
         """
@@ -653,6 +662,8 @@ class BRDGenerator:
             request: BRD generation request.
             mcp_servers: Optional custom MCP server configuration.
                         If not provided, uses default configuration.
+            credentials: Optional repository credentials. Used for GitHub MCP
+                        server when MCP_USE_GITHUB_FOR_SOURCE=true.
             use_skill: If True, use Copilot skills with MCP tools.
 
         Returns:
@@ -689,7 +700,7 @@ class BRDGenerator:
 
         # Build repository-specific MCP servers if not provided
         if mcp_servers is None:
-            mcp_servers = self._build_repository_mcp_config(repository)
+            mcp_servers = self._build_repository_mcp_config(repository, credentials)
 
         # Create a temporary session with repository-specific MCP config if available
         session = self._copilot_session
@@ -705,6 +716,12 @@ class BRDGenerator:
                 # skill_directories: List[str] - directories to load skills from
                 if self.skills_dir and self.skills_dir.exists():
                     session_config["skill_directories"] = [str(self.skills_dir)]
+
+                # Add tools from tool_registry for SDK auto-execution
+                if self.tool_registry is not None:
+                    tools = self.tool_registry.get_tool_definitions()
+                    if tools:
+                        session_config["tools"] = tools
 
                 session = await self._copilot_client.create_session(session_config)
                 logger.info(
@@ -784,20 +801,60 @@ class BRDGenerator:
         )
         return output
 
-    def _build_repository_mcp_config(self, repository: Repository) -> dict[str, Any]:
+    def _build_repository_mcp_config(
+        self,
+        repository: Repository,
+        credentials: Optional[RepositoryCredentials] = None,
+    ) -> dict[str, Any]:
         """
         Build MCP server configuration for a repository.
 
         Args:
             repository: The repository to build config for.
+            credentials: Optional credentials for GitHub MCP server.
 
         Returns:
             Dictionary of MCP server configurations.
         """
         mcp_servers: dict[str, Any] = {}
 
-        # Filesystem MCP for local clone
-        if repository.local_path:
+        # Check if we should use GitHub MCP for source files
+        use_github_mcp = os.getenv("MCP_USE_GITHUB_FOR_SOURCE", "false").lower() == "true"
+
+        if use_github_mcp and repository.platform == RepositoryPlatform.GITHUB:
+            # Use GitHub MCP to read files directly from GitHub
+            token = credentials.token if credentials else os.getenv("GH_TOKEN", "")
+            if token:
+                mcp_servers[f"github-{repository.id[:8]}"] = {
+                    "type": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-github"],
+                    "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": token},
+                    "tools": ["*"],
+                    "timeout": 60000,
+                }
+                logger.info(f"Added GitHub MCP for: {repository.full_name}")
+            else:
+                logger.warning(
+                    "MCP_USE_GITHUB_FOR_SOURCE=true but no token available. "
+                    "Falling back to filesystem MCP."
+                )
+                # Fall back to filesystem MCP
+                if repository.local_path:
+                    mcp_servers[f"filesystem-{repository.id[:8]}"] = {
+                        "type": "stdio",
+                        "command": "npx",
+                        "args": [
+                            "-y",
+                            "@modelcontextprotocol/server-filesystem",
+                            repository.local_path,
+                        ],
+                        "tools": ["*"],
+                        "timeout": 30000,
+                    }
+                    logger.info(f"Added filesystem MCP for: {repository.local_path}")
+        elif repository.local_path:
+            # Default: Use filesystem MCP for local clone
             mcp_servers[f"filesystem-{repository.id[:8]}"] = {
                 "type": "stdio",
                 "command": "npx",

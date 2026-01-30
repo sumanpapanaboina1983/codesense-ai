@@ -1,9 +1,18 @@
 """Base agent class for multi-agent BRD architecture.
 
-Supports AGENTIC TOOL CALLING:
-- Agents can use MCP tools (Neo4j, Filesystem) dynamically
-- The Copilot SDK's agentic loop handles tool calls
-- No hardcoded orchestration - LLM decides what tools to use
+Supports AGENTIC TOOL CALLING with TWO MODES:
+
+1. SDK Native Mode (Preferred):
+   - Tools are passed to create_session() in generator.py
+   - SDK automatically executes tools when LLM requests them
+   - Agent calls send_to_llm() with sdk_auto_execute=True
+
+2. Manual Loop Mode (Fallback):
+   - Tools are passed to send_and_wait() per-message
+   - Agent manually extracts and executes tool calls
+   - Used when SDK auto-execution is not available
+
+The mode is determined by session configuration and can be overridden per-call.
 """
 
 from __future__ import annotations
@@ -132,12 +141,18 @@ class BaseAgent(ABC):
         self.max_tool_iterations = config.get("max_tool_iterations", 10) if config else 10
         self.enable_agentic_tools = config.get("enable_agentic_tools", True) if config else True
 
+        # SDK auto-execution mode (preferred when tools are in session config)
+        # When True, SDK handles tool execution automatically
+        # When False, uses manual agentic loop
+        self.sdk_auto_execute = config.get("sdk_auto_execute", True) if config else True
+
         # Skill instructions (from skill YAML)
         self.skill_instructions = config.get("skill_instructions", "") if config else ""
 
         tools_status = "enabled" if (tool_registry and self.enable_agentic_tools) else "disabled"
         skill_status = "with skill" if self.skill_instructions else "no skill"
-        logger.info(f"Agent initialized: {role.value} (agentic tools: {tools_status}, {skill_status})")
+        exec_mode = "SDK auto" if self.sdk_auto_execute else "manual loop"
+        logger.info(f"Agent initialized: {role.value} (tools: {tools_status}, {skill_status}, mode: {exec_mode})")
 
     @property
     def is_running(self) -> bool:
@@ -296,20 +311,32 @@ class BaseAgent(ABC):
         logger.error(f"Agent {self.role.value} received error: {message.content}")
         self.state.errors.append(str(message.content))
 
-    async def send_to_llm(self, prompt: str, timeout: float = 300, use_tools: bool = True) -> str:
+    async def send_to_llm(
+        self,
+        prompt: str,
+        timeout: float = 300,
+        use_tools: bool = True,
+        sdk_auto_execute: bool = None,
+    ) -> str:
         """
         Send a prompt to the LLM via Copilot SDK with AGENTIC TOOL CALLING.
 
-        When tools are enabled:
-        - Tools (Neo4j, Filesystem) are passed to the LLM
-        - LLM can decide to call tools to gather information
-        - Agentic loop handles tool calls and feeds results back
-        - Loop continues until LLM provides final response
+        Supports two modes:
+        1. SDK Auto-Execution (sdk_auto_execute=True):
+           - Tools are already registered with session via create_session()
+           - SDK handles tool execution automatically
+           - Simple call, SDK manages the agentic loop internally
+
+        2. Manual Loop (sdk_auto_execute=False):
+           - Tools passed to send_and_wait() per-message
+           - Agent manually extracts and executes tool calls
+           - Used as fallback when SDK auto-execution is not available
 
         Args:
             prompt: The prompt to send
             timeout: Timeout in seconds
             use_tools: Whether to enable agentic tool calling
+            sdk_auto_execute: Override for SDK auto-execution mode (None uses default)
 
         Returns:
             The LLM response (after any tool calls are resolved)
@@ -317,6 +344,9 @@ class BaseAgent(ABC):
         if not self.session:
             logger.warning(f"Agent {self.role.value}: No Copilot session, returning mock response")
             return self._generate_mock_response(prompt)
+
+        # Determine execution mode
+        auto_execute = sdk_auto_execute if sdk_auto_execute is not None else self.sdk_auto_execute
 
         # Check if we should use agentic tools
         should_use_tools = (
@@ -327,7 +357,12 @@ class BaseAgent(ABC):
 
         try:
             if should_use_tools:
-                return await self._send_with_agentic_loop(prompt, timeout)
+                if auto_execute:
+                    # SDK auto-execution mode: tools are in session config
+                    return await self._send_with_sdk_auto_execution(prompt, timeout)
+                else:
+                    # Manual loop mode: tools passed per-message
+                    return await self._send_with_agentic_loop(prompt, timeout)
             else:
                 return await self._send_simple(prompt, timeout)
 
@@ -337,6 +372,63 @@ class BaseAgent(ABC):
         except Exception as e:
             logger.error(f"Agent {self.role.value}: LLM error: {e}")
             return self._generate_mock_response(prompt)
+
+    async def _send_with_sdk_auto_execution(self, prompt: str, timeout: float) -> str:
+        """
+        Send prompt with SDK native auto-execution mode.
+
+        When tools are registered with create_session(), the SDK handles:
+        - Tool calling when LLM requests it
+        - Executing the tool functions
+        - Feeding results back to LLM
+        - Iterating until final response
+
+        This is the preferred mode as it leverages SDK's native capabilities.
+        """
+        logger.info(f"Agent {self.role.value}: Sending to LLM (SDK auto-execute mode, {len(prompt)} chars)")
+
+        # Include skill instructions if available
+        full_prompt = prompt
+        if self.skill_instructions:
+            full_prompt = f"""## Skill Instructions
+{self.skill_instructions}
+
+## Task
+{prompt}"""
+            logger.info(f"Agent {self.role.value}: Using skill instructions")
+
+        # Simple call - SDK handles tool execution automatically
+        # Tools are already registered with session via create_session()
+        message_options = {"prompt": full_prompt}
+
+        if hasattr(self.session, 'send_and_wait'):
+            event = await asyncio.wait_for(
+                self.session.send_and_wait(message_options, timeout=timeout),
+                timeout=timeout
+            )
+            if event:
+                # Check if we got a final response (no pending tool calls)
+                response = self._extract_from_event(event)
+
+                # If response is empty and there are tool calls, SDK may need manual handling
+                # This is a fallback detection mechanism
+                tool_calls = self._extract_tool_calls(event)
+                if not response and tool_calls:
+                    logger.warning(
+                        f"Agent {self.role.value}: SDK returned tool_calls without executing. "
+                        "Falling back to manual loop."
+                    )
+                    # Fall back to manual loop for this request
+                    return await self._send_with_agentic_loop(prompt, timeout)
+
+                logger.info(f"Agent {self.role.value}: SDK auto-execution complete ({len(response)} chars)")
+                return response
+
+        if hasattr(self.session, 'send'):
+            await self.session.send(message_options)
+            return await self._wait_for_response(timeout)
+
+        return self._generate_mock_response(prompt)
 
     async def _send_simple(self, prompt: str, timeout: float) -> str:
         """Send prompt without tool calling (simple mode)."""

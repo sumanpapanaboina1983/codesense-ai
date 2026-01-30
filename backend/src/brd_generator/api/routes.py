@@ -258,6 +258,7 @@ async def health_check() -> HealthResponse:
             "filesystem": os.getenv("MCP_FILESYSTEM_ENABLED", "true").lower() == "true",
             "neo4j": os.getenv("MCP_NEO4J_ENABLED", "true").lower() == "true",
             "atlassian": os.getenv("MCP_ATLASSIAN_ENABLED", "false").lower() == "true",
+            "github_source": os.getenv("MCP_USE_GITHUB_FOR_SOURCE", "false").lower() == "true",
         },
         copilot_available=True,  # Will be updated after init
     )

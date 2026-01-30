@@ -44,14 +44,17 @@ RUN npm install -g @github/copilot
 # These are installed globally so they can be invoked via npx or directly
 # - filesystem: Read/write files in codebase
 # - neo4j: Query Neo4j code graph database
+# - github: Read files directly from GitHub (optional, controlled by MCP_USE_GITHUB_FOR_SOURCE)
 # Note: Atlassian MCP server can be added when the package becomes available
 RUN npm install -g @modelcontextprotocol/server-filesystem \
-    @neo4j-contrib/mcp-neo4j
+    @neo4j-contrib/mcp-neo4j \
+    @modelcontextprotocol/server-github
 
 # Verify MCP servers are installed
 RUN echo "Verifying MCP server installations..." \
     && npx -y @modelcontextprotocol/server-filesystem --help || true \
-    && npx -y @neo4j-contrib/mcp-neo4j --help || true
+    && npx -y @neo4j-contrib/mcp-neo4j --help || true \
+    && npx -y @modelcontextprotocol/server-github --help || true
 
 # Install Poetry
 RUN pip install poetry==1.7.1

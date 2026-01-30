@@ -328,6 +328,14 @@ class ToolRegistry:
 
         return []
 
+    def get_tools(self) -> list[Any]:
+        """
+        Convenience alias for get_tool_definitions().
+
+        Returns the list of tool functions for SDK session configuration.
+        """
+        return self.get_tool_definitions()
+
     def get_tool_handlers(self) -> dict[str, Callable]:
         """Get mapping of tool names to handlers."""
         return self._tool_handlers

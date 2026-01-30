@@ -99,27 +99,30 @@ class MCPConfigurator:
     def build_gitlab_server(
         self,
         token: str,
-        api_url: str = "https://gitlab.com/api/v4",
+        gitlab_url: str = "https://gitlab.com",
         name: str = "gitlab",
     ) -> MCPServerDefinition:
-        """Build GitLab MCP server configuration.
+        """Build GitLab MCP server configuration using official GitLab MCP.
+
+        Uses mcp-remote to connect to GitLab's native MCP server endpoint.
+        See: https://docs.gitlab.com/user/gitlab_duo/model_context_protocol/mcp_server/
 
         Args:
             token: GitLab personal access token.
-            api_url: GitLab API URL.
+            gitlab_url: GitLab instance URL (default: https://gitlab.com).
             name: Server name.
 
         Returns:
             MCPServerDefinition for GitLab MCP server.
         """
+        mcp_endpoint = f"{gitlab_url.rstrip('/')}/api/v4/mcp"
         return MCPServerDefinition(
             name=name,
             type="stdio",
             command="npx",
-            args=["-y", "@modelcontextprotocol/server-gitlab"],
+            args=["-y", "mcp-remote", mcp_endpoint],
             env={
-                "GITLAB_PERSONAL_ACCESS_TOKEN": token,
-                "GITLAB_API_URL": api_url,
+                "GITLAB_TOKEN": token,
             },
             timeout=60000,
         )
@@ -197,10 +200,14 @@ class MCPConfigurator:
                 name=name,
             )
         elif repository.platform == RepositoryPlatform.GITLAB:
-            api_url = credentials.api_url or "https://gitlab.com/api/v4"
+            # Extract base GitLab URL from api_url if provided
+            gitlab_url = "https://gitlab.com"
+            if credentials.api_url:
+                # api_url is like "https://gitlab.example.com/api/v4"
+                gitlab_url = credentials.api_url.replace("/api/v4", "").rstrip("/")
             return self.build_gitlab_server(
                 token=credentials.token,
-                api_url=api_url,
+                gitlab_url=gitlab_url,
                 name=name,
             )
         else:
