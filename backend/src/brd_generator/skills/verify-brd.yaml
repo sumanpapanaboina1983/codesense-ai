@@ -16,16 +16,21 @@ mcp_servers:
   - neo4j-code-graph
   - filesystem
 
-# Tools available
+# Tools available (actual MCP tool names)
 tools:
-  - name: query_code_structure
+  # Neo4j MCP tools
+  - name: get-neo4j-schema
+    description: Get the database schema to understand available node types
+  - name: read-neo4j-cypher
     description: Query code graph to verify component existence and relationships
-  - name: get_component_dependencies
-    description: Verify dependency claims
+
+  # Filesystem MCP tools
   - name: read_file
     description: Read source files to verify implementation details
   - name: search_files
     description: Find files mentioned in claims
+  - name: list_directory
+    description: List directory contents to verify file structure
 
 # Instructions
 instructions: |
@@ -33,16 +38,24 @@ instructions: |
 
   ## Process
 
-  1. **Extract Claims**
+  1. **Get Schema First**
+     - Call `get-neo4j-schema` to understand available node types
+     - This ensures your queries use valid labels
+
+  2. **Extract Claims**
      - Identify factual claims in the BRD (not opinions or future plans)
      - Focus on claims about: components, workflows, integrations, data flows
 
-  2. **Verify Each Claim** (USE THE TOOLS!)
-     - Query Neo4j to check if claimed components/relationships exist
+  3. **Verify Each Claim** (USE THE TOOLS!)
+     - Use `read-neo4j-cypher` with case-insensitive search:
+       ```cypher
+       MATCH (n) WHERE toLower(n.name) CONTAINS toLower('claimed_component')
+       RETURN labels(n) as type, n.name as name, n.filePath as file
+       ```
      - Read source files to verify implementation details
      - Search for files, classes, or patterns mentioned
 
-  3. **Report Results**
+  4. **Report Results**
      For each claim, report:
      - Status: verified | partially_verified | unverified | contradicted
      - Confidence: 0.0 to 1.0
