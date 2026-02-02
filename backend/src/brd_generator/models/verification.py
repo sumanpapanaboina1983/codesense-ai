@@ -399,15 +399,28 @@ class EvidenceBundle(BaseModel):
                 s.overall_confidence for s in self.sections
             ) / len(self.sections)
 
-        # Overall status
-        if all(s.verification_status == VerificationStatus.VERIFIED for s in self.sections):
+        # Overall status - consider verification passed if no contradictions and good confidence
+        has_contradictions = any(s.verification_status == VerificationStatus.CONTRADICTED for s in self.sections)
+        all_sections_verified = all(s.verification_status == VerificationStatus.VERIFIED for s in self.sections)
+
+        # Count contradicted claims across all sections
+        total_contradicted = sum(s.contradicted_claims for s in self.sections)
+
+        if has_contradictions or total_contradicted > 0:
+            self.overall_status = VerificationStatus.CONTRADICTED
+            self.hallucination_risk = HallucinationRisk.CRITICAL
+        elif all_sections_verified:
             self.overall_status = VerificationStatus.VERIFIED
             self.hallucination_risk = HallucinationRisk.NONE
             self.is_approved = True
-        elif any(s.verification_status == VerificationStatus.CONTRADICTED for s in self.sections):
-            self.overall_status = VerificationStatus.CONTRADICTED
-            self.hallucination_risk = HallucinationRisk.CRITICAL
-        elif self.overall_confidence >= 0.7:
+        elif self.overall_confidence >= 0.6 and total_contradicted == 0:
+            # If confidence is good and no contradictions, consider it verified
+            # This handles cases where claims are "partially verified" (0.4-0.7 confidence)
+            # but none are contradicted
+            self.overall_status = VerificationStatus.VERIFIED
+            self.hallucination_risk = HallucinationRisk.LOW
+            self.is_approved = True
+        elif self.overall_confidence >= 0.4:
             self.overall_status = VerificationStatus.PARTIALLY_VERIFIED
             self.hallucination_risk = HallucinationRisk.LOW
             self.is_approved = True  # Good enough

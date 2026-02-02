@@ -953,20 +953,23 @@ Remember to:
             lines = content.split("\n")
             content = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
 
-        # Remove leading markdown headings (## or #) that match section titles
+        # Remove ALL leading markdown headings (## or #) - they will be added by _combine_sections_to_brd
         # This prevents duplicate headings when sections are combined
         lines = content.strip().split('\n')
-        if lines and lines[0].strip().startswith('#'):
-            # Remove the first line if it's a heading (we'll add proper headings in _combine_sections_to_brd)
-            heading_line = lines[0].strip()
-            # Check if it's a section heading (## or ###)
-            if re.match(r'^#{1,3}\s+', heading_line):
+
+        # Keep removing heading lines until we hit actual content
+        while lines:
+            first_line = lines[0].strip()
+            # Check if it's a heading line (starts with # symbols)
+            if re.match(r'^#{1,4}\s+', first_line):
                 lines = lines[1:]
-                # Also remove any blank line immediately after the heading
+                # Also remove any blank lines after the heading
                 while lines and not lines[0].strip():
                     lines = lines[1:]
-                content = '\n'.join(lines)
+            else:
+                break
 
+        content = '\n'.join(lines)
         return content.strip()
 
     def _parse_section_verification(
