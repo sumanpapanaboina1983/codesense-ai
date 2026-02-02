@@ -37,6 +37,10 @@ from .models import (
     ClaimSummary,
     GetEvidenceTrailRequest,
     GetEvidenceTrailResponse,
+    # Verification report models
+    VerificationReport,
+    SectionVerificationReport,
+    ClaimVerificationDetail,
     # Generation mode
     GenerationMode,
     # Agentic Readiness (Phase 3)
@@ -776,15 +780,71 @@ async def _generate_brd_verified_stream(
         yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
         await asyncio.sleep(0.02)
 
-    # Build evidence trail summary
+    # Build verification report (always included in verified mode)
+    verification_report = None
     evidence_summary = None
     evidence_text = None
 
     if evidence_bundle:
+        from datetime import datetime
+
+        # Build complete verification report with per-section claim details
+        section_reports = []
         sections_summary = []
         claims_summary = []
 
         for section in evidence_bundle.sections:
+            # Build claim details for this section
+            section_claims = []
+            partially_verified = 0
+            contradicted = 0
+
+            for claim in section.claims:
+                # Determine if claim is verified
+                is_verified = claim.status.value == "verified"
+                if claim.status.value == "partially_verified":
+                    partially_verified += 1
+                elif claim.status.value == "contradicted":
+                    contradicted += 1
+
+                # Get evidence types
+                evidence_types = list(set(e.evidence_type.value for e in claim.evidence)) if claim.evidence else []
+
+                section_claims.append(ClaimVerificationDetail(
+                    claim_id=claim.id,
+                    claim_text=claim.text,
+                    section=claim.section,
+                    status=claim.status.value,
+                    confidence=claim.confidence_score,
+                    is_verified=is_verified,
+                    hallucination_risk=claim.hallucination_risk.value,
+                    needs_sme_review=claim.needs_sme_review,
+                    evidence_count=len(claim.evidence),
+                    evidence_types=evidence_types,
+                ))
+
+            # Calculate verification rate for this section
+            section_verification_rate = (
+                (section.verified_claims / section.total_claims * 100)
+                if section.total_claims > 0 else 0.0
+            )
+
+            section_reports.append(SectionVerificationReport(
+                section_name=section.section_name,
+                status=section.verification_status.value,
+                confidence=section.overall_confidence,
+                hallucination_risk=section.hallucination_risk.value,
+                total_claims=section.total_claims,
+                verified_claims=section.verified_claims,
+                partially_verified_claims=partially_verified,
+                unverified_claims=section.unverified_claims,
+                contradicted_claims=contradicted,
+                claims_needing_sme=section.needs_sme_review,
+                verification_rate=round(section_verification_rate, 1),
+                claims=section_claims,
+            ))
+
+            # Also build lightweight summary for evidence_trail
             sections_summary.append(SectionSummary(
                 section_name=section.section_name,
                 status=section.verification_status.value,
@@ -808,6 +868,38 @@ async def _generate_brd_verified_stream(
                         evidence_count=len(claim.evidence),
                     ).model_dump())
 
+        # Calculate overall stats for verification report
+        total_partially_verified = sum(s.partially_verified_claims for s in section_reports)
+        total_contradicted = sum(s.contradicted_claims for s in section_reports)
+        total_unverified = evidence_bundle.total_claims - evidence_bundle.verified_claims - total_partially_verified - total_contradicted
+        overall_verification_rate = (
+            (evidence_bundle.verified_claims / evidence_bundle.total_claims * 100)
+            if evidence_bundle.total_claims > 0 else 0.0
+        )
+
+        verification_report = VerificationReport(
+            brd_id=brd_response.id,
+            brd_title=brd_response.title,
+            generated_at=datetime.now().isoformat(),
+            overall_status=evidence_bundle.overall_status.value,
+            overall_confidence=evidence_bundle.overall_confidence,
+            hallucination_risk=evidence_bundle.hallucination_risk.value,
+            is_approved=evidence_bundle.is_approved,
+            total_claims=evidence_bundle.total_claims,
+            verified_claims=evidence_bundle.verified_claims,
+            partially_verified_claims=total_partially_verified,
+            unverified_claims=total_unverified if total_unverified > 0 else 0,
+            contradicted_claims=total_contradicted,
+            claims_needing_sme=evidence_bundle.claims_needing_sme,
+            verification_rate=round(overall_verification_rate, 1),
+            iterations_used=evidence_bundle.iteration,
+            evidence_sources=evidence_bundle.evidence_sources,
+            queries_executed=evidence_bundle.queries_executed,
+            files_analyzed=evidence_bundle.files_analyzed,
+            sections=section_reports,
+        )
+
+        # Build evidence trail summary (for backward compatibility)
         evidence_summary = EvidenceTrailSummary(
             brd_id=brd_response.id,
             overall_confidence=evidence_bundle.overall_confidence,
@@ -852,6 +944,7 @@ async def _generate_brd_verified_stream(
         confidence_score=evidence_bundle.overall_confidence if evidence_bundle else 0.0,
         hallucination_risk=evidence_bundle.hallucination_risk.value if evidence_bundle else "unknown",
         iterations_used=evidence_bundle.iteration if evidence_bundle else 0,
+        verification_report=verification_report,  # Complete verification report
         evidence_trail=evidence_summary,
         evidence_trail_text=evidence_text,
         needs_sme_review=len(sme_claims) > 0,
@@ -934,6 +1027,14 @@ async def _generate_brd_verified_stream(
     - Hallucination risk level
     - Claims needing SME review
     - Evidence trail (if requested)
+    - **Complete Verification Report** containing:
+      - Overall summary (total claims, verified claims, confidence, verification rate)
+      - Per-section breakdown with:
+        - Section verification status and confidence
+        - All claims extracted from the section
+        - Each claim's verification status (verified/unverified)
+        - Evidence count and types for each claim
+        - Section verification rate percentage
 
     In draft mode, includes:
     - Warning that draft may need review
@@ -984,6 +1085,8 @@ async def get_evidence_trail(
     show_details: bool = True,
 ) -> GetEvidenceTrailResponse:
     """Get evidence trail for a BRD."""
+    from datetime import datetime
+
     if brd_id not in _evidence_bundles:
         raise HTTPException(status_code=404, detail=f"Evidence trail not found for BRD: {brd_id}")
 
@@ -992,9 +1095,58 @@ async def get_evidence_trail(
     if evidence_bundle is None:
         raise HTTPException(status_code=404, detail=f"Evidence bundle is empty for BRD: {brd_id}")
 
-    # Build summary
+    # Build complete verification report
+    section_reports = []
     sections_summary = []
+
     for section in evidence_bundle.sections:
+        # Build claim details for this section
+        section_claims = []
+        partially_verified = 0
+        contradicted = 0
+
+        for claim in section.claims:
+            is_verified = claim.status.value == "verified"
+            if claim.status.value == "partially_verified":
+                partially_verified += 1
+            elif claim.status.value == "contradicted":
+                contradicted += 1
+
+            evidence_types = list(set(e.evidence_type.value for e in claim.evidence)) if claim.evidence else []
+
+            section_claims.append(ClaimVerificationDetail(
+                claim_id=claim.id,
+                claim_text=claim.text,
+                section=claim.section,
+                status=claim.status.value,
+                confidence=claim.confidence_score,
+                is_verified=is_verified,
+                hallucination_risk=claim.hallucination_risk.value,
+                needs_sme_review=claim.needs_sme_review,
+                evidence_count=len(claim.evidence),
+                evidence_types=evidence_types,
+            ))
+
+        section_verification_rate = (
+            (section.verified_claims / section.total_claims * 100)
+            if section.total_claims > 0 else 0.0
+        )
+
+        section_reports.append(SectionVerificationReport(
+            section_name=section.section_name,
+            status=section.verification_status.value,
+            confidence=section.overall_confidence,
+            hallucination_risk=section.hallucination_risk.value,
+            total_claims=section.total_claims,
+            verified_claims=section.verified_claims,
+            partially_verified_claims=partially_verified,
+            unverified_claims=section.unverified_claims,
+            contradicted_claims=contradicted,
+            claims_needing_sme=section.needs_sme_review,
+            verification_rate=round(section_verification_rate, 1),
+            claims=section_claims if show_details else [],
+        ))
+
         sections_summary.append(SectionSummary(
             section_name=section.section_name,
             status=section.verification_status.value,
@@ -1004,6 +1156,37 @@ async def get_evidence_trail(
             unverified_claims=section.unverified_claims,
             hallucination_risk=section.hallucination_risk.value,
         ))
+
+    # Calculate overall stats
+    total_partially_verified = sum(s.partially_verified_claims for s in section_reports)
+    total_contradicted = sum(s.contradicted_claims for s in section_reports)
+    total_unverified = evidence_bundle.total_claims - evidence_bundle.verified_claims - total_partially_verified - total_contradicted
+    overall_verification_rate = (
+        (evidence_bundle.verified_claims / evidence_bundle.total_claims * 100)
+        if evidence_bundle.total_claims > 0 else 0.0
+    )
+
+    verification_report = VerificationReport(
+        brd_id=brd_id,
+        brd_title=evidence_bundle.brd_title,
+        generated_at=evidence_bundle.created_at.isoformat() if evidence_bundle.created_at else datetime.now().isoformat(),
+        overall_status=evidence_bundle.overall_status.value,
+        overall_confidence=evidence_bundle.overall_confidence,
+        hallucination_risk=evidence_bundle.hallucination_risk.value,
+        is_approved=evidence_bundle.is_approved,
+        total_claims=evidence_bundle.total_claims,
+        verified_claims=evidence_bundle.verified_claims,
+        partially_verified_claims=total_partially_verified,
+        unverified_claims=total_unverified if total_unverified > 0 else 0,
+        contradicted_claims=total_contradicted,
+        claims_needing_sme=evidence_bundle.claims_needing_sme,
+        verification_rate=round(overall_verification_rate, 1),
+        iterations_used=evidence_bundle.iteration,
+        evidence_sources=evidence_bundle.evidence_sources,
+        queries_executed=evidence_bundle.queries_executed,
+        files_analyzed=evidence_bundle.files_analyzed,
+        sections=section_reports,
+    )
 
     evidence_summary = EvidenceTrailSummary(
         brd_id=brd_id,
@@ -1026,6 +1209,7 @@ async def get_evidence_trail(
         brd_id=brd_id,
         evidence_trail=evidence_summary,
         evidence_trail_text=evidence_text,
+        verification_report=verification_report,
     )
 
 

@@ -512,6 +512,12 @@ class GenerateBRDResponse(BaseModel):
         description="Number of generator-verifier iterations (VERIFIED mode only)"
     )
 
+    # Complete verification report (VERIFIED mode only)
+    verification_report: Optional["VerificationReport"] = Field(
+        None,
+        description="Complete verification report with per-section claim details (VERIFIED mode only)"
+    )
+
     # Evidence trail (only in VERIFIED mode if requested)
     evidence_trail: Optional["EvidenceTrailSummary"] = Field(
         None,
@@ -810,8 +816,100 @@ class ClaimSummary(BaseModel):
     evidence_count: int
 
 
+class ClaimVerificationDetail(BaseModel):
+    """Detailed verification information for a single claim."""
+
+    claim_id: str
+    claim_text: str
+    section: str
+    status: str  # verified, partially_verified, unverified, contradicted
+    confidence: float
+    is_verified: bool  # True if status is 'verified'
+    hallucination_risk: str
+    needs_sme_review: bool
+    evidence_count: int
+    evidence_types: list[str] = Field(default_factory=list)  # Types of evidence found
+
+
+class SectionVerificationReport(BaseModel):
+    """Complete verification report for a single BRD section."""
+
+    section_name: str
+    status: str  # verified, partially_verified, unverified, contradicted
+    confidence: float
+    hallucination_risk: str
+
+    # Claim counts
+    total_claims: int
+    verified_claims: int
+    partially_verified_claims: int = 0
+    unverified_claims: int
+    contradicted_claims: int = 0
+    claims_needing_sme: int = 0
+
+    # Verification rate
+    verification_rate: float = Field(
+        0.0,
+        description="Percentage of claims that are verified (0-100)"
+    )
+
+    # All claims in this section with their verification status
+    claims: list[ClaimVerificationDetail] = Field(
+        default_factory=list,
+        description="All claims extracted from this section with verification details"
+    )
+
+
+class VerificationReport(BaseModel):
+    """Complete verification report for the entire BRD.
+
+    This provides a comprehensive view of verification results including:
+    - Overall summary statistics
+    - Per-section breakdown with all claims
+    - Verification rates and confidence scores
+    """
+
+    brd_id: str
+    brd_title: str
+    generated_at: str
+
+    # Overall summary
+    overall_status: str  # verified, partially_verified, unverified
+    overall_confidence: float
+    hallucination_risk: str
+    is_approved: bool
+
+    # Aggregate claim statistics
+    total_claims: int
+    verified_claims: int
+    partially_verified_claims: int = 0
+    unverified_claims: int = 0
+    contradicted_claims: int = 0
+    claims_needing_sme: int
+
+    # Overall verification rate
+    verification_rate: float = Field(
+        0.0,
+        description="Percentage of claims verified (0-100)"
+    )
+
+    # Iteration info
+    iterations_used: int
+
+    # Evidence gathering stats
+    evidence_sources: list[str] = Field(default_factory=list)
+    queries_executed: int = 0
+    files_analyzed: int = 0
+
+    # Per-section reports
+    sections: list[SectionVerificationReport] = Field(
+        default_factory=list,
+        description="Detailed verification report for each BRD section"
+    )
+
+
 class SectionSummary(BaseModel):
-    """Summary of a verified section."""
+    """Summary of a verified section (lightweight version)."""
 
     section_name: str
     status: str
@@ -914,6 +1012,10 @@ class GetEvidenceTrailResponse(BaseModel):
     evidence_trail_text: str = Field(
         ...,
         description="Full formatted evidence trail"
+    )
+    verification_report: Optional["VerificationReport"] = Field(
+        None,
+        description="Complete verification report with per-section claim details"
     )
 
 
