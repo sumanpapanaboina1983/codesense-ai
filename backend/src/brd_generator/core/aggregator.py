@@ -165,7 +165,7 @@ class ContextAggregator:
             neo4j_client: Neo4j MCP client
             filesystem_client: Filesystem MCP client
             copilot_session: Copilot SDK session for agentic queries
-            max_tokens: Maximum tokens for context
+            max_tokens: Maximum tokens for context (used for dynamic limiting)
         """
         self.neo4j = neo4j_client
         self.filesystem = filesystem_client
@@ -174,6 +174,21 @@ class ContextAggregator:
 
         # Cache for discovered schema
         self._schema_cache: Optional[dict[str, Any]] = None
+
+    def _calculate_dynamic_limit(self, estimated_tokens_per_item: int = 100) -> int:
+        """Calculate dynamic limit based on token budget.
+
+        Args:
+            estimated_tokens_per_item: Estimated tokens per result item
+
+        Returns:
+            Dynamic limit that fits within token budget
+        """
+        # Reserve 30% of tokens for other content (prompts, file contents, etc.)
+        available_tokens = int(self.max_tokens * 0.7)
+        # Calculate how many items we can fit
+        dynamic_limit = max(10, available_tokens // estimated_tokens_per_item)
+        return dynamic_limit
 
     async def build_context(
         self,
@@ -387,8 +402,12 @@ class ContextAggregator:
 
             logger.info(f"[ARCH-DIRECT] Searching across {len(schema.component_labels)} label types")
 
-            # Extract keywords from request
-            keywords = [word.lower() for word in request.split() if len(word) > 3][:5]
+            # Extract keywords from request - use all meaningful keywords (no artificial limit)
+            keywords = [word.lower() for word in request.split() if len(word) > 3]
+
+            # Calculate dynamic limit based on token budget
+            component_limit = self._calculate_dynamic_limit(estimated_tokens_per_item=150)
+            logger.info(f"[ARCH-DIRECT] Dynamic component limit: {component_limit}")
 
             if affected_components:
                 # Search for specific components
@@ -397,7 +416,7 @@ class ContextAggregator:
                     MATCH (n)
                     WHERE ({label_filter}) AND ({name_conditions})
                     RETURN n.name as name, labels(n)[0] as type, n.filePath as path, n.description as description
-                    LIMIT 30
+                    LIMIT {component_limit}
                 """
             elif keywords:
                 # Search by keywords from request
@@ -406,7 +425,7 @@ class ContextAggregator:
                     MATCH (n)
                     WHERE ({label_filter}) AND ({keyword_conditions})
                     RETURN n.name as name, labels(n)[0] as type, n.filePath as path, n.description as description
-                    LIMIT 30
+                    LIMIT {component_limit}
                 """
             else:
                 # Get a sample of components
@@ -414,7 +433,7 @@ class ContextAggregator:
                     MATCH (n)
                     WHERE {label_filter}
                     RETURN n.name as name, labels(n)[0] as type, n.filePath as path, n.description as description
-                    LIMIT 20
+                    LIMIT {component_limit}
                 """
 
             logger.info(f"[ARCH-DIRECT] Executing query: {query[:200]}...")
@@ -426,25 +445,27 @@ class ContextAggregator:
                     components.append(ComponentInfo(
                         name=name,
                         type=node.get("type", "component"),
-                        path=node.get("path", ""),
-                        description=node.get("description", ""),
+                        path=node.get("path") or "",
+                        description=node.get("description") or "",  # Handle None values
                         dependencies=[],
                         dependents=[],
                     ))
 
             logger.info(f"[ARCH-DIRECT] Found {len(components)} components")
 
-            # Get dependencies for found components
+            # Get dependencies for found components - use all relationships and components
             if components and schema.dependency_relationships:
-                rel_filter = " OR ".join([f"type(r) = '{rel}'" for rel in schema.dependency_relationships[:3]])
-                comp_names = [c.name for c in components[:10]]
+                rel_filter = " OR ".join([f"type(r) = '{rel}'" for rel in schema.dependency_relationships])
+                comp_names = [c.name for c in components]
                 name_filter = " OR ".join([f"c1.name = '{name}'" for name in comp_names])
 
+                # Dynamic limit for dependencies
+                dep_limit = self._calculate_dynamic_limit(estimated_tokens_per_item=50)
                 dep_query = f"""
                     MATCH (c1)-[r]->(c2)
                     WHERE ({name_filter}) AND ({rel_filter})
                     RETURN c1.name as source, type(r) as rel, c2.name as target
-                    LIMIT 50
+                    LIMIT {dep_limit}
                 """
 
                 dep_result = await self.neo4j.query_code_structure(dep_query)
@@ -464,10 +485,11 @@ class ContextAggregator:
             # Try to find API endpoints
             api_labels = [l for l in schema.node_labels if any(kw in l.lower() for kw in ['endpoint', 'api', 'route', 'controller'])]
             if api_labels:
+                api_limit = self._calculate_dynamic_limit(estimated_tokens_per_item=100)
                 api_query = f"""
                     MATCH (n:{api_labels[0]})
                     RETURN n.path as endpoint, n.method as method, n.name as name
-                    LIMIT 10
+                    LIMIT {api_limit}
                 """
                 try:
                     api_result = await self.neo4j.query_code_structure(api_query)
@@ -547,8 +569,8 @@ class ContextAggregator:
     ) -> list[str]:
         """Find similar features using direct queries."""
         try:
-            # Extract keywords
-            keywords = [word.lower() for word in request.split() if len(word) > 3][:3]
+            # Extract keywords - use all meaningful keywords (no artificial limit)
+            keywords = [word.lower() for word in request.split() if len(word) > 3]
             if not keywords:
                 return []
 
@@ -557,18 +579,19 @@ class ContextAggregator:
             if not label_filter:
                 return []
 
-            # Search for similar-named components
+            # Search for similar-named components with dynamic limit
+            similar_limit = self._calculate_dynamic_limit(estimated_tokens_per_item=30)
             keyword_filter = " OR ".join([f"toLower(n.name) CONTAINS '{kw}'" for kw in keywords])
             query = f"""
                 MATCH (n)
                 WHERE ({label_filter}) AND ({keyword_filter})
                 RETURN DISTINCT n.name as name
-                LIMIT 5
+                LIMIT {similar_limit}
             """
 
             result = await self.neo4j.query_code_structure(query)
             similar = [r.get("name", "") for r in result.get("nodes", []) if r.get("name")]
-            return similar[:5]
+            return similar
 
         except Exception as e:
             logger.debug(f"[SIMILAR-DIRECT] Search failed: {e}")
@@ -1121,6 +1144,9 @@ Return ONLY the JSON array, no other text."""
             label_filter = " OR ".join([f"n:{label}" for label in component_labels])
             logger.info(f"[AGENTIC] Searching across {len(component_labels)} label types")
 
+            # Calculate dynamic limit based on token budget
+            component_limit = self._calculate_dynamic_limit(estimated_tokens_per_item=150)
+
             if affected_components:
                 # Search for specific components
                 name_filter = " OR ".join([f"toLower(n.name) CONTAINS toLower('{comp}')" for comp in affected_components])
@@ -1128,25 +1154,25 @@ Return ONLY the JSON array, no other text."""
                     MATCH (n)
                     WHERE ({label_filter}) AND ({name_filter})
                     RETURN n.name as name, labels(n)[0] as type, n.filePath as path
-                    LIMIT 20
+                    LIMIT {component_limit}
                 """
             else:
-                # Extract keywords from request
-                keywords = [word.lower() for word in request.split() if len(word) > 3][:5]
+                # Extract keywords from request - use all meaningful keywords
+                keywords = [word.lower() for word in request.split() if len(word) > 3]
                 if keywords:
                     keyword_filter = " OR ".join([f"toLower(n.name) CONTAINS '{kw}'" for kw in keywords])
                     query = f"""
                         MATCH (n)
                         WHERE ({label_filter}) AND ({keyword_filter})
                         RETURN n.name as name, labels(n)[0] as type, n.filePath as path
-                        LIMIT 20
+                        LIMIT {component_limit}
                     """
                 else:
                     query = f"""
                         MATCH (n)
                         WHERE {label_filter}
                         RETURN n.name as name, labels(n)[0] as type, n.filePath as path
-                        LIMIT 20
+                        LIMIT {component_limit}
                     """
 
             await report("neo4j", "Executing component query...")
@@ -1186,8 +1212,9 @@ Return ONLY the JSON array, no other text."""
             if progress_callback:
                 await progress_callback(step, detail)
 
-        # Read files for components with paths
-        for component in architecture.components[:5]:
+        # Read files for components with paths - limit based on token budget
+        max_files_to_read = self._calculate_dynamic_limit(estimated_tokens_per_item=1000)
+        for component in architecture.components[:max_files_to_read]:
             if component.path:
                 try:
                     await report("filesystem", f"Reading: {component.path.split('/')[-1]}")
@@ -1243,21 +1270,24 @@ Return ONLY the JSON array, no other text."""
                 )
                 file_ctx.content = file_ctx.summary
 
-        # Strategy 2: Reduce number of components
-        if len(context.architecture.components) > 10:
-            context.architecture.components = context.architecture.components[:10]
+        # Strategy 2: Reduce number of components based on token budget
+        max_components = self._calculate_dynamic_limit(estimated_tokens_per_item=150)
+        if len(context.architecture.components) > max_components:
+            context.architecture.components = context.architecture.components[:max_components]
 
-        # Strategy 3: Reduce number of files
-        if len(context.implementation.key_files) > 10:
+        # Strategy 3: Reduce number of files based on token budget
+        max_files = self._calculate_dynamic_limit(estimated_tokens_per_item=500)
+        if len(context.implementation.key_files) > max_files:
             sorted_files = sorted(
                 context.implementation.key_files,
                 key=lambda f: f.relevance_score,
                 reverse=True,
             )
-            context.implementation.key_files = sorted_files[:10]
+            context.implementation.key_files = sorted_files[:max_files]
 
         # Strategy 4: Remove similar features if still over budget
         if context.estimated_tokens > self.max_tokens:
-            context.similar_features = context.similar_features[:3]
+            max_similar = self._calculate_dynamic_limit(estimated_tokens_per_item=30)
+            context.similar_features = context.similar_features[:max_similar]
 
         return context
