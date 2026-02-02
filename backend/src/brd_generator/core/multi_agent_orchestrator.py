@@ -135,6 +135,8 @@ class MultiAgentOrchestrator:
         custom_sections: Optional[list[dict]] = None,
         verification_limits: Optional[dict] = None,
         progress_callback: Optional[ProgressCallback] = None,
+        temperature: float = 0.3,
+        seed: Optional[int] = None,
     ):
         """
         Initialize the orchestrator.
@@ -148,6 +150,8 @@ class MultiAgentOrchestrator:
             show_evidence_by_default: Include evidence in output
             parsed_template: Custom BRD template
             progress_callback: Optional callback for streaming progress updates
+            temperature: LLM temperature (0.0-1.0, lower = more consistent). Default 0.3.
+            seed: Optional seed for reproducible outputs
             sufficiency_criteria: Custom criteria for what makes a complete analysis.
                 Structure:
                 {
@@ -208,6 +212,11 @@ class MultiAgentOrchestrator:
 
         # Progress callback for streaming updates to UI
         self._progress_callback = progress_callback
+
+        # Consistency controls for reproducible outputs
+        self.temperature = max(0.0, min(1.0, temperature))  # Clamp to 0-1
+        self.seed = seed
+        logger.info(f"Consistency settings: temperature={self.temperature}, seed={self.seed}")
 
         # Get sections from template, custom_sections, or defaults (from best practices)
         if custom_sections:
@@ -926,7 +935,7 @@ Remember to:
 - Reference actual components and files found"""
 
     def _extract_section_content(self, response: str) -> str:
-        """Extract section content from LLM response, removing thinking tags."""
+        """Extract section content from LLM response, removing thinking tags and duplicate headings."""
         import re
 
         content = response.strip()
@@ -943,6 +952,20 @@ Remember to:
         if content.startswith("```"):
             lines = content.split("\n")
             content = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+
+        # Remove leading markdown headings (## or #) that match section titles
+        # This prevents duplicate headings when sections are combined
+        lines = content.strip().split('\n')
+        if lines and lines[0].strip().startswith('#'):
+            # Remove the first line if it's a heading (we'll add proper headings in _combine_sections_to_brd)
+            heading_line = lines[0].strip()
+            # Check if it's a section heading (## or ###)
+            if re.match(r'^#{1,3}\s+', heading_line):
+                lines = lines[1:]
+                # Also remove any blank line immediately after the heading
+                while lines and not lines[0].strip():
+                    lines = lines[1:]
+                content = '\n'.join(lines)
 
         return content.strip()
 
@@ -1148,11 +1171,16 @@ Remember to:
             brd_title=brd_title,
             sections=section_results,  # Correct field name
         )
-        bundle.overall_confidence = overall_confidence
+
+        # Call calculate_overall_metrics to properly set overall_status based on section results
+        bundle.calculate_overall_metrics()
+
+        # Override with our calculated values if needed (for consistency)
+        if bundle.overall_confidence < overall_confidence:
+            bundle.overall_confidence = overall_confidence
         bundle.hallucination_risk = risk
-        bundle.is_approved = overall_confidence >= self.verification_config.min_confidence_for_approval
-        bundle.total_claims = total_claims
-        bundle.verified_claims = verified_claims
+        if overall_confidence >= self.verification_config.min_confidence_for_approval:
+            bundle.is_approved = True
 
         return bundle
 
@@ -1166,15 +1194,23 @@ Remember to:
         return items[:10]  # Limit to 10 items
 
     async def _call_llm(self, prompt: str, timeout: float = 300) -> str:
-        """Call LLM via Copilot SDK session."""
+        """Call LLM via Copilot SDK session with consistency controls."""
         if not self.session:
             logger.warning("No Copilot session - returning mock response")
             return self._generate_mock_response(prompt)
 
         try:
-            logger.debug(f"[LLM] Sending prompt ({len(prompt)} chars)")
+            logger.debug(f"[LLM] Sending prompt ({len(prompt)} chars), temp={self.temperature}")
 
-            message_options = {"prompt": prompt}
+            # Build message options with consistency controls
+            message_options = {
+                "prompt": prompt,
+                "temperature": self.temperature,
+            }
+
+            # Add seed if specified for reproducibility
+            if self.seed is not None:
+                message_options["seed"] = self.seed
 
             if hasattr(self.session, 'send_and_wait'):
                 event = await asyncio.wait_for(
@@ -1409,6 +1445,8 @@ class VerifiedBRDGenerator:
         custom_sections: Optional[list[dict]] = None,
         verification_limits: Optional[dict] = None,
         progress_callback: Optional[ProgressCallback] = None,
+        temperature: float = 0.3,
+        seed: Optional[int] = None,
     ):
         self.orchestrator = MultiAgentOrchestrator(
             copilot_session=copilot_session,
@@ -1422,6 +1460,8 @@ class VerifiedBRDGenerator:
             custom_sections=custom_sections,
             verification_limits=verification_limits,
             progress_callback=progress_callback,
+            temperature=temperature,
+            seed=seed,
         )
         self._last_output: Optional[BRDOutput] = None
 

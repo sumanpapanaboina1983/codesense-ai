@@ -20,14 +20,23 @@ import {
   Layout,
   Server,
   TrendingUp,
+  FileCode,
+  Boxes,
+  GitBranch,
+  Network,
+  Layers,
+  PieChart,
+  BarChart3,
 } from 'lucide-react';
 import {
   getRepository,
   getReadinessReport,
+  getCodebaseStatistics,
   enrichDocumentation,
   enrichTests,
   type RepositoryDetail as RepoDetail,
   type AgenticReadinessResponse,
+  type CodebaseStatisticsResponse,
   type EnrichmentResponse,
 } from '../../services/api';
 import { analyzeRepository } from '../../api/client';
@@ -56,12 +65,14 @@ export function RepositoryDetail() {
   const { id } = useParams<{ id: string }>();
   const [repository, setRepository] = useState<RepoDetail | null>(null);
   const [readinessReport, setReadinessReport] = useState<AgenticReadinessResponse | null>(null);
+  const [statistics, setStatistics] = useState<CodebaseStatisticsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [readinessLoading, setReadinessLoading] = useState(false);
+  const [statisticsLoading, setStatisticsLoading] = useState(false);
   const [enrichmentLoading, setEnrichmentLoading] = useState<string | null>(null);
   const [enrichmentResult, setEnrichmentResult] = useState<EnrichmentResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['overview', 'readiness']));
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['overview', 'statistics', 'readiness']));
 
   const toggleSection = (section: string) => {
     setExpandedSections((prev) => {
@@ -98,6 +109,19 @@ export function RepositoryDetail() {
       console.error('Failed to fetch readiness report:', err);
     } finally {
       setReadinessLoading(false);
+    }
+  };
+
+  const fetchStatistics = async () => {
+    if (!id) return;
+    setStatisticsLoading(true);
+    try {
+      const stats = await getCodebaseStatistics(id);
+      setStatistics(stats);
+    } catch (err) {
+      console.error('Failed to fetch codebase statistics:', err);
+    } finally {
+      setStatisticsLoading(false);
     }
   };
 
@@ -163,6 +187,7 @@ export function RepositoryDetail() {
   useEffect(() => {
     if (repository?.analysis_status === 'completed') {
       fetchReadinessReport();
+      fetchStatistics();
     }
   }, [repository?.analysis_status]);
 
@@ -299,6 +324,220 @@ export function RepositoryDetail() {
           </div>
         )}
       </section>
+
+      {/* Codebase Statistics Section */}
+      {isAnalyzed && (
+        <section className="detail-section">
+          <div
+            className="section-header"
+            onClick={() => toggleSection('statistics')}
+          >
+            <div className="section-title">
+              <BarChart3 size={20} />
+              <h2>Codebase Statistics</h2>
+            </div>
+            {expandedSections.has('statistics') ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
+          </div>
+          {expandedSections.has('statistics') && (
+            <div className="section-content">
+              {statisticsLoading ? (
+                <div className="loading-inline">
+                  <RefreshCw size={20} className="spin" />
+                  <span>Loading codebase statistics...</span>
+                </div>
+              ) : statistics ? (
+                <div className="statistics-content">
+                  {/* Primary Stats Row */}
+                  <div className="stats-grid primary-stats">
+                    <div className="stat-card highlight">
+                      <div className="stat-icon">
+                        <FileCode size={24} />
+                      </div>
+                      <div className="stat-info">
+                        <span className="stat-value">{statistics.statistics.total_files.toLocaleString()}</span>
+                        <span className="stat-label">Total Files</span>
+                      </div>
+                    </div>
+                    <div className="stat-card highlight">
+                      <div className="stat-icon">
+                        <Code2 size={24} />
+                      </div>
+                      <div className="stat-info">
+                        <span className="stat-value">{statistics.statistics.total_lines_of_code.toLocaleString()}</span>
+                        <span className="stat-label">Lines of Code</span>
+                      </div>
+                    </div>
+                    <div className="stat-card highlight">
+                      <div className="stat-icon">
+                        <Boxes size={24} />
+                      </div>
+                      <div className="stat-info">
+                        <span className="stat-value">{statistics.statistics.total_classes.toLocaleString()}</span>
+                        <span className="stat-label">Classes</span>
+                      </div>
+                    </div>
+                    <div className="stat-card highlight">
+                      <div className="stat-icon">
+                        <GitBranch size={24} />
+                      </div>
+                      <div className="stat-info">
+                        <span className="stat-value">{statistics.statistics.total_functions.toLocaleString()}</span>
+                        <span className="stat-label">Functions</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Secondary Stats Grid */}
+                  <div className="stats-categories">
+                    {/* APIs & Endpoints */}
+                    <div className="stats-category">
+                      <h4><Network size={16} /> APIs & Endpoints</h4>
+                      <div className="category-stats">
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.rest_endpoints}</span>
+                          <span className="mini-label">REST Endpoints</span>
+                        </div>
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.graphql_operations}</span>
+                          <span className="mini-label">GraphQL Ops</span>
+                        </div>
+                        <div className="mini-stat total">
+                          <span className="mini-value">{statistics.statistics.total_api_endpoints}</span>
+                          <span className="mini-label">Total APIs</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* UI Components */}
+                    <div className="stats-category">
+                      <h4><Layout size={16} /> UI & Components</h4>
+                      <div className="category-stats">
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.ui_components}</span>
+                          <span className="mini-label">Components</span>
+                        </div>
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.ui_routes}</span>
+                          <span className="mini-label">Routes/Pages</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Testing */}
+                    <div className="stats-category">
+                      <h4><TestTube size={16} /> Testing</h4>
+                      <div className="category-stats">
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.total_test_files}</span>
+                          <span className="mini-label">Test Files</span>
+                        </div>
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.total_test_cases}</span>
+                          <span className="mini-label">Test Cases</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Architecture */}
+                    <div className="stats-category">
+                      <h4><Layers size={16} /> Architecture</h4>
+                      <div className="category-stats">
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.services_count}</span>
+                          <span className="mini-label">Services</span>
+                        </div>
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.controllers_count}</span>
+                          <span className="mini-label">Controllers</span>
+                        </div>
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.repositories_count}</span>
+                          <span className="mini-label">Repositories</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Data & Dependencies */}
+                    <div className="stats-category">
+                      <h4><Database size={16} /> Data & Dependencies</h4>
+                      <div className="category-stats">
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.total_database_models}</span>
+                          <span className="mini-label">DB Models</span>
+                        </div>
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.total_dependencies}</span>
+                          <span className="mini-label">Dependencies</span>
+                        </div>
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.config_files}</span>
+                          <span className="mini-label">Config Files</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Code Quality */}
+                    <div className="stats-category">
+                      <h4><TrendingUp size={16} /> Code Quality</h4>
+                      <div className="category-stats">
+                        <div className="mini-stat">
+                          <span className="mini-value">
+                            {statistics.statistics.avg_cyclomatic_complexity?.toFixed(1) ?? 'N/A'}
+                          </span>
+                          <span className="mini-label">Avg Complexity</span>
+                        </div>
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.documented_entities}</span>
+                          <span className="mini-label">Documented</span>
+                        </div>
+                        <div className="mini-stat">
+                          <span className="mini-value">{statistics.statistics.documentation_coverage.toFixed(0)}%</span>
+                          <span className="mini-label">Doc Coverage</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Language Breakdown */}
+                  {statistics.statistics.languages.length > 0 && (
+                    <div className="language-breakdown">
+                      <h4><PieChart size={16} /> Language Breakdown</h4>
+                      <div className="language-bars">
+                        {statistics.statistics.languages.slice(0, 6).map((lang, index) => (
+                          <div key={lang.language} className="language-item">
+                            <div className="language-header">
+                              <span className="language-name">{lang.language}</span>
+                              <span className="language-stats">
+                                {lang.file_count} files • {lang.lines_of_code.toLocaleString()} LOC
+                              </span>
+                            </div>
+                            <div className="language-bar">
+                              <div
+                                className={`language-fill lang-${index}`}
+                                style={{ width: `${lang.percentage}%` }}
+                              />
+                              <span className="language-percentage">{lang.percentage.toFixed(1)}%</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="empty-state-inline">
+                  <BarChart3 size={32} />
+                  <p>Click refresh to load codebase statistics</p>
+                  <button className="btn btn-primary" onClick={fetchStatistics}>
+                    <RefreshCw size={16} />
+                    Load Statistics
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Agentic Readiness Section */}
       {isAnalyzed && (

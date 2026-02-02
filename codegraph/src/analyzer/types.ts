@@ -76,7 +76,7 @@ export interface AstNode {
     isGenerator?: boolean;  // Optional: Indicates if a function is a generator
     isRestParameter?: boolean; // Optional: Indicates if a parameter is a rest parameter
     isConstant?: boolean;   // Optional: Indicates if a variable is constant
-    visibility?: 'public' | 'private' | 'protected' | 'internal' | 'package'; // Optional: Visibility modifier
+    visibility?: 'public' | 'private' | 'protected' | 'internal' | 'package' | 'default'; // Optional: Visibility modifier
     returnType?: string;    // Optional: Return type of a function/method
     implementsInterfaces?: string[]; // Optional: List of implemented interface names
     modifierFlags?: string[]; // Optional: List of modifier keywords (e.g., 'export', 'async', 'static')
@@ -350,7 +350,9 @@ export interface JavaFieldNode extends AstNode {
     kind: 'JavaField';
     language: 'Java';
     parentId?: string;
-    // TODO: Add type, modifiers
+    fieldType?: string;
+    visibility?: 'public' | 'private' | 'protected' | 'package';
+    isStatic?: boolean;
 }
 
 export interface JavaEnumNode extends AstNode {

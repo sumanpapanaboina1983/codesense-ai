@@ -86,6 +86,26 @@ class Neo4jMCPClient(MCPClient):
             logger.warning(f"Neo4j health check failed: {e}")
             return False
 
+    async def query_code_structure(
+        self,
+        cypher_query: str,
+        parameters: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """
+        Execute Cypher query against code graph.
+
+        This is a public method that can be called directly without going
+        through the MCP tool interface.
+
+        Args:
+            cypher_query: The Cypher query to execute
+            parameters: Optional query parameters
+
+        Returns:
+            Dict with 'nodes' key containing query results
+        """
+        return await self._query_code_structure(cypher_query, parameters)
+
     async def call_tool(
         self,
         tool_name: str,
@@ -124,7 +144,11 @@ class Neo4jMCPClient(MCPClient):
         logger.info(f"[MCP-TOOL] Result: {str(result)[:500]}...")
         return result
 
-    async def _query_code_structure(self, cypher_query: str) -> dict[str, Any]:
+    async def _query_code_structure(
+        self,
+        cypher_query: str,
+        parameters: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         """Execute Cypher query against code graph."""
         if not self._driver:
             raise MCPToolError("Neo4j not connected")
@@ -132,10 +156,12 @@ class Neo4jMCPClient(MCPClient):
         # Log the Cypher query
         logger.info(f"[NEO4J-QUERY] Executing Cypher query:")
         logger.info(f"[NEO4J-QUERY] {cypher_query}")
+        if parameters:
+            logger.info(f"[NEO4J-QUERY] Parameters: {parameters}")
 
         try:
             async with self._driver.session(database=self.neo4j_database) as session:
-                result = await session.run(cypher_query)
+                result = await session.run(cypher_query, parameters or {})
                 records = await result.data()
                 logger.info(f"[NEO4J-QUERY] Query returned {len(records)} records")
                 if records:
@@ -233,12 +259,7 @@ class Neo4jMCPClient(MCPClient):
         return unique_results[:limit]
 
     # Convenience methods that map to tool calls
-
-    async def query_code_structure(self, cypher_query: str) -> dict[str, Any]:
-        """Execute Cypher query against code graph."""
-        return await self.call_tool("query_code_structure", {
-            "cypher_query": cypher_query,
-        })
+    # Note: query_code_structure is defined above with parameter support
 
     async def get_component_dependencies(
         self,

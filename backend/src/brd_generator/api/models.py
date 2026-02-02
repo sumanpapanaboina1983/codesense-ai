@@ -434,6 +434,38 @@ class GenerateBRDRequest(BaseModel):
         """
     )
 
+    # Consistency controls for reproducible outputs
+    temperature: float = Field(
+        0.3,
+        ge=0.0,
+        le=1.0,
+        description="""
+        LLM temperature for generation consistency.
+
+        - 0.0: Most deterministic, always picks highest probability token
+        - 0.3 (default): Balanced, consistent outputs with some variation
+        - 0.7: More creative, higher variance
+        - 1.0: Maximum creativity, high variance
+
+        Lower values produce more consistent BRDs across runs.
+        """
+    )
+
+    seed: Optional[int] = Field(
+        None,
+        description="""
+        Random seed for reproducible outputs.
+
+        When set, running the same request with the same seed will produce
+        identical (or very similar) outputs. Useful for:
+        - Testing and debugging
+        - Creating reproducible documentation
+        - A/B comparisons
+
+        If not set, outputs may vary between runs.
+        """
+    )
+
 
 class RequirementResponse(BaseModel):
     """Requirement in BRD response."""
@@ -816,6 +848,15 @@ class ClaimSummary(BaseModel):
     evidence_count: int
 
 
+class CodeReferenceItem(BaseModel):
+    """A code reference with file path and line numbers."""
+
+    file_path: str
+    start_line: int
+    end_line: int
+    snippet: Optional[str] = None  # Optional code snippet
+
+
 class ClaimVerificationDetail(BaseModel):
     """Detailed verification information for a single claim."""
 
@@ -829,6 +870,7 @@ class ClaimVerificationDetail(BaseModel):
     needs_sme_review: bool
     evidence_count: int
     evidence_types: list[str] = Field(default_factory=list)  # Types of evidence found
+    code_references: list[CodeReferenceItem] = Field(default_factory=list)  # Code locations for hyperlinks
 
 
 class SectionVerificationReport(BaseModel):
@@ -1252,3 +1294,86 @@ class EnrichmentResponse(BaseModel):
     generated_content: list[GeneratedContent] = Field(default_factory=list)
     errors: list[EnrichmentError] = Field(default_factory=list)
     enrichment_type: str
+
+
+# =============================================================================
+# Codebase Statistics - Request/Response Models
+# =============================================================================
+
+class LanguageBreakdown(BaseModel):
+    """Language statistics for a repository."""
+    language: str
+    file_count: int
+    lines_of_code: int
+    percentage: float = Field(ge=0, le=100)
+
+
+class CodebaseStatistics(BaseModel):
+    """Comprehensive codebase statistics."""
+
+    # Basic counts
+    total_files: int = Field(0, description="Total number of files")
+    total_lines_of_code: int = Field(0, description="Total lines of code")
+
+    # Code structure counts
+    total_classes: int = Field(0, description="Total number of classes")
+    total_interfaces: int = Field(0, description="Total number of interfaces")
+    total_functions: int = Field(0, description="Total number of functions/methods")
+    total_components: int = Field(0, description="Total number of UI components (React, Vue, etc.)")
+
+    # API and endpoints
+    total_api_endpoints: int = Field(0, description="Total REST/GraphQL endpoints")
+    rest_endpoints: int = Field(0, description="Number of REST endpoints")
+    graphql_operations: int = Field(0, description="Number of GraphQL operations")
+
+    # Testing
+    total_test_files: int = Field(0, description="Number of test files")
+    total_test_cases: int = Field(0, description="Number of test cases")
+
+    # Dependencies
+    total_dependencies: int = Field(0, description="Number of external dependencies")
+
+    # Database/Models
+    total_database_models: int = Field(0, description="Number of database models/entities")
+
+    # Complexity metrics
+    avg_cyclomatic_complexity: Optional[float] = Field(None, description="Average cyclomatic complexity")
+    max_cyclomatic_complexity: Optional[int] = Field(None, description="Maximum cyclomatic complexity")
+    avg_file_size: Optional[float] = Field(None, description="Average file size in lines")
+
+    # Language breakdown
+    languages: list[LanguageBreakdown] = Field(default_factory=list)
+    primary_language: Optional[str] = Field(None, description="Most used language")
+
+    # Architecture breakdown
+    services_count: int = Field(0, description="Number of services/modules")
+    controllers_count: int = Field(0, description="Number of controllers")
+    repositories_count: int = Field(0, description="Number of repository patterns")
+
+    # UI specific (for frontend repos)
+    ui_routes: int = Field(0, description="Number of UI routes/pages")
+    ui_components: int = Field(0, description="Number of UI components")
+
+    # Config and infrastructure
+    config_files: int = Field(0, description="Number of configuration files")
+
+    # Code quality indicators
+    documented_entities: int = Field(0, description="Number of documented functions/classes")
+    documentation_coverage: float = Field(0, ge=0, le=100, description="Documentation coverage percentage")
+
+
+class CodebaseStatisticsResponse(BaseModel):
+    """Response model for codebase statistics endpoint."""
+
+    success: bool = True
+    repository_id: str
+    repository_name: str
+    generated_at: datetime
+
+    statistics: CodebaseStatistics
+
+    # Quick summary for display
+    summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Quick summary stats for dashboard display"
+    )

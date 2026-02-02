@@ -381,7 +381,7 @@ export class TestDetector {
         let currentSuite: string | undefined;
 
         for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
+            const line = lines[i]!;
             const lineNum = i + 1;
 
             for (const pattern of TEST_CASE_PATTERNS) {
@@ -392,21 +392,26 @@ export class TestDetector {
 
                 const match = line.match(pattern.pattern);
                 if (match) {
-                    if (pattern.suiteGroup && match[pattern.suiteGroup]) {
-                        currentSuite = match[pattern.suiteGroup];
-                        suites.add(currentSuite);
+                    if (pattern.suiteGroup) {
+                        const suiteMatch = match[pattern.suiteGroup];
+                        if (suiteMatch) {
+                            currentSuite = suiteMatch;
+                            suites.add(currentSuite);
+                        }
                     }
 
-                    if (pattern.nameGroup && match[pattern.nameGroup]) {
+                    if (pattern.nameGroup) {
                         const testName = match[pattern.nameGroup];
-                        testCases.push({
-                            id: this.generateEntityId('test_case', `${filePath}:${testName}:${lineNum}`),
-                            name: testName,
-                            suite: currentSuite,
-                            line: lineNum,
-                            isSkipped: this.isSkipped(line, lines[i - 1]),
-                            isFocused: this.isFocused(line),
-                        });
+                        if (testName) {
+                            testCases.push({
+                                id: this.generateEntityId('test_case', `${filePath}:${testName}:${lineNum}`),
+                                name: testName,
+                                suite: currentSuite,
+                                line: lineNum,
+                                isSkipped: this.isSkipped(line, lines[i - 1]),
+                                isFocused: this.isFocused(line),
+                            });
+                        }
                     }
                 }
             }

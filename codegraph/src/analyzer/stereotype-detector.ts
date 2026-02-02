@@ -432,8 +432,9 @@ export class StereotypeDetector {
         // Sort by confidence and return the best match
         candidates.sort((a, b) => b.confidence - a.confidence);
 
-        if (candidates.length > 0 && candidates[0].confidence >= 0.5) {
-            return candidates[0];
+        const bestCandidate = candidates[0];
+        if (bestCandidate && bestCandidate.confidence >= 0.5) {
+            return bestCandidate;
         }
 
         return {

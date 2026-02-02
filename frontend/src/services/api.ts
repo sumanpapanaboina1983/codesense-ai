@@ -135,6 +135,13 @@ export interface BRDSection {
 // Verification Report Types
 // =============================================================================
 
+export interface CodeReferenceItem {
+  file_path: string;
+  start_line: number;
+  end_line: number;
+  snippet?: string;
+}
+
 export interface ClaimVerificationDetail {
   claim_id: string;
   claim_text: string;
@@ -146,6 +153,7 @@ export interface ClaimVerificationDetail {
   needs_sme_review: boolean;
   evidence_count: number;
   evidence_types: string[];
+  code_references: CodeReferenceItem[];
 }
 
 export interface SectionVerificationReport {
@@ -217,6 +225,10 @@ export interface GenerateBRDRequest {
 
   // Verification query limits (VERIFIED mode only)
   verification_limits?: VerificationLimits;
+
+  // Consistency controls for reproducible outputs
+  temperature?: number;  // default: 0.3, range: 0-1 (lower = more consistent)
+  seed?: number;  // optional, for reproducible outputs
 }
 
 export interface StreamEvent {
@@ -595,6 +607,96 @@ export async function enrichTests(
   const response = await backendApi.post<EnrichmentResponse>(
     `/repositories/${repositoryId}/enrich/tests`,
     request
+  );
+  return response.data;
+}
+
+// =============================================================================
+// Codebase Statistics API
+// =============================================================================
+
+export interface LanguageBreakdown {
+  language: string;
+  file_count: number;
+  lines_of_code: number;
+  percentage: number;
+}
+
+export interface CodebaseStatistics {
+  // Basic counts
+  total_files: number;
+  total_lines_of_code: number;
+
+  // Code structure counts
+  total_classes: number;
+  total_interfaces: number;
+  total_functions: number;
+  total_components: number;
+
+  // API and endpoints
+  total_api_endpoints: number;
+  rest_endpoints: number;
+  graphql_operations: number;
+
+  // Testing
+  total_test_files: number;
+  total_test_cases: number;
+
+  // Dependencies
+  total_dependencies: number;
+
+  // Database/Models
+  total_database_models: number;
+
+  // Complexity metrics
+  avg_cyclomatic_complexity?: number;
+  max_cyclomatic_complexity?: number;
+  avg_file_size?: number;
+
+  // Language breakdown
+  languages: LanguageBreakdown[];
+  primary_language?: string;
+
+  // Architecture breakdown
+  services_count: number;
+  controllers_count: number;
+  repositories_count: number;
+
+  // UI specific
+  ui_routes: number;
+  ui_components: number;
+
+  // Config and infrastructure
+  config_files: number;
+
+  // Code quality indicators
+  documented_entities: number;
+  documentation_coverage: number;
+}
+
+export interface CodebaseStatisticsResponse {
+  success: boolean;
+  repository_id: string;
+  repository_name: string;
+  generated_at: string;
+  statistics: CodebaseStatistics;
+  summary: {
+    files: number;
+    loc: number;
+    classes: number;
+    functions: number;
+    apis: number;
+    components: number;
+    tests: number;
+    languages: number;
+    primary_language?: string;
+  };
+}
+
+// Get Codebase Statistics
+export async function getCodebaseStatistics(repositoryId: string): Promise<CodebaseStatisticsResponse> {
+  const response = await backendApi.get<CodebaseStatisticsResponse>(
+    `/repositories/${repositoryId}/statistics`
   );
   return response.data;
 }

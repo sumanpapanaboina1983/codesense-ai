@@ -596,3 +596,179 @@
 .error-state p {
   color: var(--color-text-secondary);
 }
+
+/* =============================================================================
+   Codebase Statistics Styles
+   ============================================================================= */
+
+.statistics-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xl);
+}
+
+/* Primary Stats - Highlighted */
+.primary-stats {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+@media (max-width: 900px) {
+  .primary-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 500px) {
+  .primary-stats {
+    grid-template-columns: 1fr;
+  }
+}
+
+.stat-card.highlight {
+  background: linear-gradient(135deg, var(--color-bg-secondary) 0%, var(--color-bg-tertiary) 100%);
+  border: 1px solid var(--color-border);
+}
+
+.stat-card.highlight .stat-value {
+  font-size: var(--font-size-2xl);
+  color: var(--color-primary);
+}
+
+.stat-card.highlight .stat-icon {
+  background: var(--color-primary);
+  color: white;
+}
+
+/* Stats Categories Grid */
+.stats-categories {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--spacing-md);
+}
+
+.stats-category {
+  background: var(--color-bg-secondary);
+  border-radius: var(--border-radius);
+  padding: var(--spacing-md);
+}
+
+.stats-category h4 {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  margin: 0 0 var(--spacing-md) 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.category-stats {
+  display: flex;
+  gap: var(--spacing-lg);
+  flex-wrap: wrap;
+}
+
+.mini-stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 70px;
+}
+
+.mini-stat.total {
+  padding-left: var(--spacing-md);
+  border-left: 2px solid var(--color-border);
+}
+
+.mini-value {
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+  color: var(--color-text-primary);
+  line-height: 1.2;
+}
+
+.mini-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+/* Language Breakdown */
+.language-breakdown {
+  background: var(--color-bg-secondary);
+  border-radius: var(--border-radius-lg);
+  padding: var(--spacing-lg);
+}
+
+.language-breakdown h4 {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  margin: 0 0 var(--spacing-lg) 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.language-bars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.language-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.language-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.language-name {
+  font-weight: 600;
+  font-size: var(--font-size-sm);
+}
+
+.language-stats {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.language-bar {
+  position: relative;
+  height: 24px;
+  background: var(--color-bg-tertiary);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+}
+
+.language-fill {
+  height: 100%;
+  border-radius: var(--border-radius);
+  transition: width 0.5s ease;
+}
+
+/* Language colors */
+.language-fill.lang-0 { background: linear-gradient(90deg, #3178c6, #235a97); } /* TypeScript/JavaScript blue */
+.language-fill.lang-1 { background: linear-gradient(90deg, #f1e05a, #d4c447); } /* JavaScript yellow */
+.language-fill.lang-2 { background: linear-gradient(90deg, #3572A5, #2a5a87); } /* Python blue */
+.language-fill.lang-3 { background: linear-gradient(90deg, #b07219, #8d5a14); } /* Java orange */
+.language-fill.lang-4 { background: linear-gradient(90deg, #00ADD8, #008fb3); } /* Go cyan */
+.language-fill.lang-5 { background: linear-gradient(90deg, #178600, #126a00); } /* C# green */
+
+.language-percentage {
+  position: absolute;
+  right: var(--spacing-sm);
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.9);
+  padding: 2px 6px;
+  border-radius: var(--border-radius-sm);
+}

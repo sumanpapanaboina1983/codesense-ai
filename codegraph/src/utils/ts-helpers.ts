@@ -351,7 +351,7 @@ function parseJsDocTag(tag: JSDocTag, tagName: string): DocTag | null {
             default: {
                 // Generic tag handling
                 const genericMatch = tagText.match(/@(\w+)\s*(.*)$/s);
-                if (genericMatch) {
+                if (genericMatch && genericMatch[1]) {
                     return {
                         tag: genericMatch[1],
                         description: genericMatch[2]?.trim() || undefined,

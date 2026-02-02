@@ -168,7 +168,8 @@ const FILE_ROUTE_PATTERNS: FileRoutePattern[] = [
         routerType: 'app-router',
         filePattern: /[\/\\]app[\/\\](.+)[\/\\](page|layout|loading|error|not-found)\.(tsx?|jsx?)$/,
         extractRoute: (filePath, match) => {
-            const segments = match[1].split(/[\/\\]/);
+            const matchGroup = match[1] || '';
+            const segments = matchGroup.split(/[\/\\]/);
             return '/' + segments
                 .filter(s => s !== '(.)' && !s.startsWith('(') && !s.startsWith('@'))
                 .map(s => s.replace(/^\[\.\.\.(.+)\]$/, '*$1').replace(/^\[(.+)\]$/, ':$1'))
@@ -193,7 +194,7 @@ const FILE_ROUTE_PATTERNS: FileRoutePattern[] = [
         routerType: 'pages-router',
         filePattern: /[\/\\]pages[\/\\](.+)\.(tsx?|jsx?)$/,
         extractRoute: (filePath, match) => {
-            let route = match[1];
+            let route = match[1] || '';
             // Handle index routes
             if (route.endsWith('/index') || route === 'index') {
                 route = route.replace(/\/?index$/, '') || '/';
@@ -218,7 +219,8 @@ const FILE_ROUTE_PATTERNS: FileRoutePattern[] = [
         routerType: 'app-router',
         filePattern: /[\/\\]app[\/\\](.+)[\/\\]route\.(tsx?|jsx?)$/,
         extractRoute: (filePath, match) => {
-            const segments = match[1].split(/[\/\\]/);
+            const matchGroup = match[1] || '';
+            const segments = matchGroup.split(/[\/\\]/);
             return '/api/' + segments
                 .filter(s => !s.startsWith('(') && !s.startsWith('@'))
                 .map(s => s.replace(/^\[\.\.\.(.+)\]$/, '*$1').replace(/^\[(.+)\]$/, ':$1'))
@@ -234,7 +236,7 @@ const FILE_ROUTE_PATTERNS: FileRoutePattern[] = [
         routerType: 'nuxt-pages',
         filePattern: /[\/\\]pages[\/\\](.+)\.vue$/,
         extractRoute: (filePath, match) => {
-            let route = match[1];
+            let route = match[1] || '';
             if (route.endsWith('/index') || route === 'index') {
                 route = route.replace(/\/?index$/, '') || '/';
             }
@@ -248,7 +250,8 @@ const FILE_ROUTE_PATTERNS: FileRoutePattern[] = [
         routerType: 'svelte-routes',
         filePattern: /[\/\\]src[\/\\]routes[\/\\](.+)[\/\\]\+page\.svelte$/,
         extractRoute: (filePath, match) => {
-            const segments = match[1].split(/[\/\\]/);
+            const matchGroup = match[1] || '';
+            const segments = matchGroup.split(/[\/\\]/);
             return '/' + segments
                 .filter(s => !s.startsWith('('))
                 .map(s => s.replace(/^\[\.\.\.(.+)\]$/, '*$1').replace(/^\[(.+)\]$/, ':$1'))
@@ -265,7 +268,7 @@ const FILE_ROUTE_PATTERNS: FileRoutePattern[] = [
         routerType: 'remix-routes',
         filePattern: /[\/\\]app[\/\\]routes[\/\\](.+)\.(tsx?|jsx?)$/,
         extractRoute: (filePath, match) => {
-            let route = match[1];
+            let route = match[1] || '';
             // Remix uses dots for nesting
             route = route
                 .replace(/\./g, '/')
@@ -318,7 +321,7 @@ export class UIRouteParser {
             for (const pattern of allPatterns) {
                 const matches = sourceText.matchAll(new RegExp(pattern.pattern, 'gi'));
                 for (const match of matches) {
-                    const routePath = pattern.pathGroup ? match[pattern.pathGroup] : '/';
+                    const routePath = pattern.pathGroup ? (match[pattern.pathGroup] || '/') : '/';
                     const componentName = pattern.componentGroup ? match[pattern.componentGroup] : undefined;
 
                     const routeNode = this.createRouteNode(
@@ -584,10 +587,11 @@ export class UIRouteParser {
     private inferRouteName(routePath: string): string {
         if (routePath === '/' || routePath === '') return 'Home';
         const segments = routePath.split('/').filter(Boolean);
-        const lastSegment = segments[segments.length - 1];
+        if (segments.length === 0) return 'Home';
+        const lastSegment = segments[segments.length - 1]!;
         if (lastSegment.startsWith(':') || lastSegment.startsWith('[')) {
             return segments.length > 1
-                ? this.capitalize(segments[segments.length - 2]) + 'Detail'
+                ? this.capitalize(segments[segments.length - 2]!) + 'Detail'
                 : 'Detail';
         }
         return this.capitalize(lastSegment.replace(/-/g, ' '));
@@ -716,7 +720,7 @@ export class UIRouteParser {
             for (const gp of guardPatterns) {
                 if (gp.pattern.test(sourceText)) {
                     guards.push({
-                        name: gp.pattern.source.split('|')[0].replace(/[^a-zA-Z]/g, ''),
+                        name: (gp.pattern.source.split('|')[0] || 'Unknown').replace(/[^a-zA-Z]/g, ''),
                         type: gp.type,
                     });
                     if (gp.type === 'auth') {

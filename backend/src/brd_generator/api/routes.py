@@ -41,6 +41,7 @@ from .models import (
     VerificationReport,
     SectionVerificationReport,
     ClaimVerificationDetail,
+    CodeReferenceItem,
     # Generation mode
     GenerationMode,
     # Agentic Readiness (Phase 3)
@@ -55,6 +56,10 @@ from .models import (
     DocumentationEnrichmentRequest,
     TestEnrichmentRequest,
     EnrichmentResponse,
+    # Codebase Statistics
+    CodebaseStatistics,
+    CodebaseStatisticsResponse,
+    LanguageBreakdown,
 )
 from ..core.generator import BRDGenerator
 from ..core.synthesizer import TemplateConfig
@@ -727,6 +732,8 @@ async def _generate_brd_verified_stream(
                 custom_sections=custom_sections_verified,  # Pass custom sections
                 verification_limits=verification_limits_dict,  # Pass verification limits
                 progress_callback=progress_callback,  # Pass progress callback for streaming updates
+                temperature=request.temperature,  # Consistency control
+                seed=request.seed,  # Reproducibility control
             )
 
             # Run multi-agent generation
@@ -848,6 +855,17 @@ async def _generate_brd_verified_stream(
                 # Get evidence types
                 evidence_types = list(set(e.evidence_type.value for e in claim.evidence)) if claim.evidence else []
 
+                # Extract code references from evidence
+                code_refs = []
+                for ev in claim.evidence:
+                    for ref in ev.code_references:
+                        code_refs.append(CodeReferenceItem(
+                            file_path=ref.file_path,
+                            start_line=ref.start_line,
+                            end_line=ref.end_line,
+                            snippet=ref.snippet[:200] if ref.snippet else None,
+                        ))
+
                 section_claims.append(ClaimVerificationDetail(
                     claim_id=claim.id,
                     claim_text=claim.text,
@@ -859,6 +877,7 @@ async def _generate_brd_verified_stream(
                     needs_sme_review=claim.needs_sme_review,
                     evidence_count=len(claim.evidence),
                     evidence_types=evidence_types,
+                    code_references=code_refs[:10],  # Limit to 10 refs per claim
                 ))
 
             # Calculate verification rate for this section
@@ -1152,6 +1171,17 @@ async def get_evidence_trail(
 
             evidence_types = list(set(e.evidence_type.value for e in claim.evidence)) if claim.evidence else []
 
+            # Extract code references from evidence
+            code_refs = []
+            for ev in claim.evidence:
+                for ref in ev.code_references:
+                    code_refs.append(CodeReferenceItem(
+                        file_path=ref.file_path,
+                        start_line=ref.start_line,
+                        end_line=ref.end_line,
+                        snippet=ref.snippet[:200] if ref.snippet else None,
+                    ))
+
             section_claims.append(ClaimVerificationDetail(
                 claim_id=claim.id,
                 claim_text=claim.text,
@@ -1163,6 +1193,7 @@ async def get_evidence_trail(
                 needs_sme_review=claim.needs_sme_review,
                 evidence_count=len(claim.evidence),
                 evidence_types=evidence_types,
+                code_references=code_refs[:10],  # Limit to 10 refs per claim
             ))
 
         section_verification_rate = (
@@ -1622,6 +1653,462 @@ async def get_readiness_report(
         raise
     except Exception as e:
         logger.exception("Failed to generate Agentic Readiness Report")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Codebase Statistics
+# =============================================================================
+
+@router.get(
+    "/repositories/{repository_id}/statistics",
+    response_model=CodebaseStatisticsResponse,
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    tags=["Repository Statistics"],
+    summary="Get Codebase Statistics",
+    description="""
+    Get comprehensive codebase statistics for a repository.
+
+    This endpoint returns detailed metrics about the codebase including:
+
+    ## Basic Metrics
+    - Total files and lines of code
+    - Language breakdown with percentages
+
+    ## Code Structure
+    - Classes, interfaces, and functions count
+    - UI components count (React, Vue, Angular)
+    - Services, controllers, and repository patterns
+
+    ## API & Endpoints
+    - REST endpoints count
+    - GraphQL operations count
+
+    ## Testing
+    - Test files and test cases count
+    - Test coverage indicators
+
+    ## Dependencies & Architecture
+    - External dependencies count
+    - Database models/entities count
+    - Configuration files count
+
+    ## Code Quality
+    - Complexity metrics (cyclomatic complexity)
+    - Documentation coverage percentage
+
+    Requires the repository to be analyzed first.
+    """,
+)
+async def get_codebase_statistics(
+    repository_id: str,
+    generator: BRDGenerator = Depends(get_generator),
+) -> CodebaseStatisticsResponse:
+    """Get comprehensive codebase statistics for a repository."""
+    from datetime import datetime
+    from sqlalchemy import select
+
+    try:
+        logger.info(f"[API] Getting codebase statistics for repository: {repository_id}")
+
+        # Get repository info
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(RepositoryDB).where(RepositoryDB.id == repository_id)
+            )
+            db_repo = result.scalar_one_or_none()
+
+            if not db_repo:
+                raise HTTPException(status_code=404, detail=f"Repository not found: {repository_id}")
+
+            if db_repo.analysis_status != DBAnalysisStatus.COMPLETED:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Repository not analyzed. Current status: {db_repo.analysis_status.value}"
+                )
+
+            repository_name = db_repo.name
+
+        # Ensure generator is initialized (for Neo4j client access)
+        if not generator._initialized:
+            await generator.initialize()
+
+        # Initialize statistics with defaults
+        stats = CodebaseStatistics()
+        languages = []
+
+        # Query Neo4j for statistics if client is available
+        if generator.neo4j_client:
+            try:
+                # Query 1: Basic file and LOC statistics
+                file_stats_query = """
+                MATCH (f:File)
+                WHERE f.repositoryId = $repository_id
+                RETURN
+                    count(f) as total_files,
+                    sum(COALESCE(f.loc, f.lineCount, 0)) as total_loc,
+                    avg(COALESCE(f.loc, f.lineCount, 0)) as avg_file_size
+                """
+                file_result = await generator.neo4j_client.query_code_structure(
+                    file_stats_query,
+                    {"repository_id": repository_id}
+                )
+                if file_result and file_result.get("nodes"):
+                    node = file_result["nodes"][0]
+                    stats.total_files = int(node.get("total_files", 0) or 0)
+                    stats.total_lines_of_code = int(node.get("total_loc", 0) or 0)
+                    stats.avg_file_size = float(node.get("avg_file_size", 0) or 0)
+
+                # Query 2: Language breakdown
+                lang_query = """
+                MATCH (f:File)
+                WHERE f.repositoryId = $repository_id AND f.language IS NOT NULL
+                RETURN
+                    f.language as language,
+                    count(f) as file_count,
+                    sum(COALESCE(f.loc, f.lineCount, 0)) as loc
+                ORDER BY loc DESC
+                """
+                lang_result = await generator.neo4j_client.query_code_structure(
+                    lang_query,
+                    {"repository_id": repository_id}
+                )
+                if lang_result and lang_result.get("nodes"):
+                    total_loc = stats.total_lines_of_code or 1
+                    for node in lang_result["nodes"]:
+                        lang_loc = int(node.get("loc", 0) or 0)
+                        languages.append(LanguageBreakdown(
+                            language=node.get("language", "Unknown"),
+                            file_count=int(node.get("file_count", 0) or 0),
+                            lines_of_code=lang_loc,
+                            percentage=round((lang_loc / total_loc) * 100, 1) if total_loc > 0 else 0
+                        ))
+                    if languages:
+                        stats.primary_language = languages[0].language
+
+                # Query 3: Classes and interfaces
+                class_query = """
+                MATCH (c)
+                WHERE c.repositoryId = $repository_id
+                    AND (c:Class OR c:JavaClass OR c:CSharpClass OR c:CppClass OR c:PythonClass)
+                RETURN count(c) as count
+                """
+                class_result = await generator.neo4j_client.query_code_structure(
+                    class_query,
+                    {"repository_id": repository_id}
+                )
+                if class_result and class_result.get("nodes"):
+                    stats.total_classes = int(class_result["nodes"][0].get("count", 0) or 0)
+
+                interface_query = """
+                MATCH (i)
+                WHERE i.repositoryId = $repository_id
+                    AND (i:Interface OR i:JavaInterface OR i:CSharpInterface OR i:GoInterface)
+                RETURN count(i) as count
+                """
+                interface_result = await generator.neo4j_client.query_code_structure(
+                    interface_query,
+                    {"repository_id": repository_id}
+                )
+                if interface_result and interface_result.get("nodes"):
+                    stats.total_interfaces = int(interface_result["nodes"][0].get("count", 0) or 0)
+
+                # Query 4: Functions/Methods
+                func_query = """
+                MATCH (f)
+                WHERE f.repositoryId = $repository_id
+                    AND (f:Function OR f:Method OR f:PythonFunction OR f:PythonMethod
+                         OR f:JavaMethod OR f:CSharpMethod OR f:GoFunction OR f:GoMethod OR f:CFunction)
+                RETURN count(f) as count
+                """
+                func_result = await generator.neo4j_client.query_code_structure(
+                    func_query,
+                    {"repository_id": repository_id}
+                )
+                if func_result and func_result.get("nodes"):
+                    stats.total_functions = int(func_result["nodes"][0].get("count", 0) or 0)
+
+                # Query 5: UI Components
+                component_query = """
+                MATCH (c:Component)
+                WHERE c.repositoryId = $repository_id
+                RETURN count(c) as count
+                """
+                comp_result = await generator.neo4j_client.query_code_structure(
+                    component_query,
+                    {"repository_id": repository_id}
+                )
+                if comp_result and comp_result.get("nodes"):
+                    stats.total_components = int(comp_result["nodes"][0].get("count", 0) or 0)
+                    stats.ui_components = stats.total_components
+
+                # Query 6: REST Endpoints (check RestEndpoint or SpringController)
+                rest_query = """
+                MATCH (e)
+                WHERE e.repositoryId = $repository_id
+                    AND (e:RestEndpoint OR e:SpringController)
+                RETURN count(e) as count
+                """
+                rest_result = await generator.neo4j_client.query_code_structure(
+                    rest_query,
+                    {"repository_id": repository_id}
+                )
+                if rest_result and rest_result.get("nodes"):
+                    stats.rest_endpoints = int(rest_result["nodes"][0].get("count", 0) or 0)
+
+                # Query 7: GraphQL Operations
+                graphql_query = """
+                MATCH (g:GraphQLOperation)
+                WHERE g.repositoryId = $repository_id
+                RETURN count(g) as count
+                """
+                gql_result = await generator.neo4j_client.query_code_structure(
+                    graphql_query,
+                    {"repository_id": repository_id}
+                )
+                if gql_result and gql_result.get("nodes"):
+                    stats.graphql_operations = int(gql_result["nodes"][0].get("count", 0) or 0)
+
+                stats.total_api_endpoints = stats.rest_endpoints + stats.graphql_operations
+
+                # Query 8: Test Files (by name pattern or TestFile label)
+                test_query = """
+                MATCH (f:File)
+                WHERE f.repositoryId = $repository_id
+                    AND (f.name CONTAINS 'Test' OR f.name CONTAINS 'test'
+                         OR f.filePath CONTAINS '/test/' OR f.filePath CONTAINS '/tests/')
+                RETURN count(f) as file_count
+                """
+                test_result = await generator.neo4j_client.query_code_structure(
+                    test_query,
+                    {"repository_id": repository_id}
+                )
+                if test_result and test_result.get("nodes"):
+                    stats.total_test_files = int(test_result["nodes"][0].get("file_count", 0) or 0)
+                    # Estimate test cases (avg 5 tests per test file)
+                    stats.total_test_cases = stats.total_test_files * 5
+
+                # Query 9: Dependencies (external imports/dependencies)
+                dep_query = """
+                MATCH (d)
+                WHERE d.repositoryId = $repository_id
+                    AND (d:GradleDependency OR d:MavenDependency OR d:NpmDependency)
+                RETURN count(d) as count
+                """
+                dep_result = await generator.neo4j_client.query_code_structure(
+                    dep_query,
+                    {"repository_id": repository_id}
+                )
+                if dep_result and dep_result.get("nodes"):
+                    stats.total_dependencies = int(dep_result["nodes"][0].get("count", 0) or 0)
+
+                # If no explicit dependencies, count unique external imports (top-level packages)
+                if stats.total_dependencies == 0:
+                    import_query = """
+                    MATCH (i:ImportDeclaration)
+                    WHERE i.repositoryId = $repository_id
+                        AND i.importPath IS NOT NULL
+                    WITH split(i.importPath, '.')[0] as topPackage
+                    WHERE topPackage IS NOT NULL
+                        AND NOT topPackage STARTS WITH 'com'
+                        AND NOT topPackage STARTS WITH 'org'
+                    RETURN count(DISTINCT topPackage) as count
+                    """
+                    import_result = await generator.neo4j_client.query_code_structure(
+                        import_query,
+                        {"repository_id": repository_id}
+                    )
+                    if import_result and import_result.get("nodes"):
+                        dep_count = int(import_result["nodes"][0].get("count", 0) or 0)
+                        # If still 0, just count unique import packages
+                        if dep_count == 0:
+                            fallback_query = """
+                            MATCH (i:ImportDeclaration)
+                            WHERE i.repositoryId = $repository_id
+                                AND i.importPath IS NOT NULL
+                            WITH split(i.importPath, '.')[0] + '.' + split(i.importPath, '.')[1] as pkg
+                            RETURN count(DISTINCT pkg) as count
+                            """
+                            fallback_result = await generator.neo4j_client.query_code_structure(
+                                fallback_query,
+                                {"repository_id": repository_id}
+                            )
+                            if fallback_result and fallback_result.get("nodes"):
+                                dep_count = int(fallback_result["nodes"][0].get("count", 0) or 0)
+                        stats.total_dependencies = dep_count
+
+                # Query 10: Database Models (SQL tables, Entity classes, or classes with Entity/Table annotation)
+                db_query = """
+                MATCH (m)
+                WHERE m.repositoryId = $repository_id
+                    AND (m:SQLTable OR m:Entity
+                         OR m.stereotype = 'Entity'
+                         OR (m:JavaClass AND (m.name ENDS WITH 'Entity' OR m.name ENDS WITH 'Model')))
+                RETURN count(m) as count
+                """
+                db_result = await generator.neo4j_client.query_code_structure(
+                    db_query,
+                    {"repository_id": repository_id}
+                )
+                if db_result and db_result.get("nodes"):
+                    stats.total_database_models = int(db_result["nodes"][0].get("count", 0) or 0)
+
+                # Query 11: Complexity Metrics
+                complexity_query = """
+                MATCH (f)
+                WHERE f.repositoryId = $repository_id
+                    AND f.complexity IS NOT NULL
+                    AND (f:Function OR f:Method)
+                RETURN
+                    avg(f.complexity) as avg_complexity,
+                    max(f.complexity) as max_complexity
+                """
+                complexity_result = await generator.neo4j_client.query_code_structure(
+                    complexity_query,
+                    {"repository_id": repository_id}
+                )
+                if complexity_result and complexity_result.get("nodes"):
+                    node = complexity_result["nodes"][0]
+                    avg_c = node.get("avg_complexity")
+                    max_c = node.get("max_complexity")
+                    if avg_c is not None:
+                        stats.avg_cyclomatic_complexity = round(float(avg_c), 2)
+                    if max_c is not None:
+                        stats.max_cyclomatic_complexity = int(max_c)
+
+                # Query 12: Services, Controllers, Repositories
+                service_query = """
+                MATCH (s)
+                WHERE s.repositoryId = $repository_id
+                    AND (s:SpringService OR s.stereotype = 'Service')
+                RETURN count(s) as count
+                """
+                svc_result = await generator.neo4j_client.query_code_structure(
+                    service_query,
+                    {"repository_id": repository_id}
+                )
+                if svc_result and svc_result.get("nodes"):
+                    stats.services_count = int(svc_result["nodes"][0].get("count", 0) or 0)
+
+                controller_query = """
+                MATCH (c)
+                WHERE c.repositoryId = $repository_id
+                    AND (c:SpringController OR c.stereotype = 'Controller')
+                RETURN count(c) as count
+                """
+                ctrl_result = await generator.neo4j_client.query_code_structure(
+                    controller_query,
+                    {"repository_id": repository_id}
+                )
+                if ctrl_result and ctrl_result.get("nodes"):
+                    stats.controllers_count = int(ctrl_result["nodes"][0].get("count", 0) or 0)
+
+                repo_query = """
+                MATCH (r)
+                WHERE r.repositoryId = $repository_id
+                    AND r.stereotype = 'Repository'
+                RETURN count(r) as count
+                """
+                repo_result = await generator.neo4j_client.query_code_structure(
+                    repo_query,
+                    {"repository_id": repository_id}
+                )
+                if repo_result and repo_result.get("nodes"):
+                    stats.repositories_count = int(repo_result["nodes"][0].get("count", 0) or 0)
+
+                # Query 13: UI Routes/Pages (check UIRoute, UIPage, JSPPage, Component)
+                route_query = """
+                MATCH (r)
+                WHERE r.repositoryId = $repository_id
+                    AND (r:UIRoute OR r:UIPage OR r:JSPPage OR r:Component)
+                RETURN count(r) as count
+                """
+                route_result = await generator.neo4j_client.query_code_structure(
+                    route_query,
+                    {"repository_id": repository_id}
+                )
+                if route_result and route_result.get("nodes"):
+                    count = int(route_result["nodes"][0].get("count", 0) or 0)
+                    stats.ui_routes = count
+                    stats.ui_components = count
+
+                # Query 14: Documentation Coverage
+                doc_query = """
+                MATCH (f)
+                WHERE f.repositoryId = $repository_id
+                    AND (f:Function OR f:Method OR f:JavaMethod OR f:Class OR f:JavaClass)
+                RETURN
+                    count(f) as total,
+                    sum(CASE WHEN f.hasDocumentation = true
+                             OR (f.javadoc IS NOT NULL AND f.javadoc <> '')
+                             OR (f.docstring IS NOT NULL AND f.docstring <> '')
+                        THEN 1 ELSE 0 END) as documented
+                """
+                doc_result = await generator.neo4j_client.query_code_structure(
+                    doc_query,
+                    {"repository_id": repository_id}
+                )
+                if doc_result and doc_result.get("nodes"):
+                    node = doc_result["nodes"][0]
+                    total = int(node.get("total", 0) or 0)
+                    documented = int(node.get("documented", 0) or 0)
+                    stats.documented_entities = documented
+                    if total > 0:
+                        stats.documentation_coverage = round((documented / total) * 100, 1)
+
+                # Query 15: Config Files (XML, properties, yaml, json, etc.)
+                config_query = """
+                MATCH (f:File)
+                WHERE f.repositoryId = $repository_id
+                    AND (f.name ENDS WITH '.xml' OR f.name ENDS WITH '.properties'
+                         OR f.name ENDS WITH '.yaml' OR f.name ENDS WITH '.yml'
+                         OR f.name ENDS WITH '.json' OR f.name ENDS WITH '.toml'
+                         OR f.name ENDS WITH '.env' OR f.name ENDS WITH '.config.js'
+                         OR f.name ENDS WITH '.config.ts' OR f.name = 'package.json'
+                         OR f.name = 'tsconfig.json' OR f.name = 'pom.xml'
+                         OR f.name = 'build.gradle' OR f.name = 'settings.gradle'
+                         OR f.filePath CONTAINS '/config/' OR f.filePath CONTAINS '/resources/')
+                RETURN count(f) as count
+                """
+                config_result = await generator.neo4j_client.query_code_structure(
+                    config_query,
+                    {"repository_id": repository_id}
+                )
+                if config_result and config_result.get("nodes"):
+                    stats.config_files = int(config_result["nodes"][0].get("count", 0) or 0)
+
+            except Exception as neo4j_error:
+                logger.warning(f"Neo4j query failed, using default statistics: {neo4j_error}")
+
+        # Update languages in stats
+        stats.languages = languages
+
+        # Build summary for quick display
+        summary = {
+            "files": stats.total_files,
+            "loc": stats.total_lines_of_code,
+            "classes": stats.total_classes,
+            "functions": stats.total_functions,
+            "apis": stats.total_api_endpoints,
+            "components": stats.total_components,
+            "tests": stats.total_test_files,
+            "languages": len(languages),
+            "primary_language": stats.primary_language,
+        }
+
+        return CodebaseStatisticsResponse(
+            success=True,
+            repository_id=repository_id,
+            repository_name=repository_name,
+            generated_at=datetime.now(),
+            statistics=stats,
+            summary=summary,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to get codebase statistics")
         raise HTTPException(status_code=500, detail=str(e))
 
 

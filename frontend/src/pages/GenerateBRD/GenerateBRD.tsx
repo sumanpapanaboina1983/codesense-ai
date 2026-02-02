@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import ReactMarkdown from 'react-markdown';
 import {
   FileText,
   ArrowRight,
@@ -19,11 +20,12 @@ import {
   FileCode,
   Shield,
   ShieldCheck,
-  ShieldAlert,
   Zap,
   Settings,
   Info,
   Eye,
+  Thermometer,
+  Hash,
 } from 'lucide-react';
 import {
   getAnalyzedRepositories,
@@ -75,6 +77,8 @@ const DEFAULT_OPTIONS = {
   max_iterations: 3,
   min_confidence: 0.7,
   show_evidence: false,
+  temperature: 0.3,  // Lower = more consistent outputs
+  seed: undefined as number | undefined,  // For reproducible outputs
 };
 
 export function GenerateBRD() {
@@ -95,6 +99,8 @@ export function GenerateBRD() {
   const [maxIterations, setMaxIterations] = useState(DEFAULT_OPTIONS.max_iterations);
   const [minConfidence, setMinConfidence] = useState(DEFAULT_OPTIONS.min_confidence);
   const [showEvidence, setShowEvidence] = useState(DEFAULT_OPTIONS.show_evidence);
+  const [temperature, setTemperature] = useState(DEFAULT_OPTIONS.temperature);
+  const [seed, setSeed] = useState<number | undefined>(DEFAULT_OPTIONS.seed);
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
   const [showVerificationReport, setShowVerificationReport] = useState(false);
 
@@ -255,6 +261,8 @@ export function GenerateBRD() {
       max_iterations: maxIterations,
       min_confidence: minConfidence,
       show_evidence: showEvidence,
+      temperature: temperature,
+      seed: seed,
     };
 
     // Add template config if template is provided
@@ -588,16 +596,6 @@ export function GenerateBRD() {
                   <span className="label">Confidence</span>
                   <span className="value">{(verificationInfo.confidence_score * 100).toFixed(0)}%</span>
                 </div>
-                <div className="metadata-item">
-                  <span className="label">Hallucination Risk</span>
-                  <span className={`value risk-${verificationInfo.hallucination_risk}`}>
-                    {verificationInfo.hallucination_risk}
-                  </span>
-                </div>
-                <div className="metadata-item">
-                  <span className="label">Iterations</span>
-                  <span className="value">{verificationInfo.iterations_used}</span>
-                </div>
               </>
             )}
           </div>
@@ -635,13 +633,6 @@ export function GenerateBRD() {
                     <div className="summary-card">
                       <span className="summary-label">Verification Rate</span>
                       {renderConfidenceBar(report.verification_rate / 100)}
-                    </div>
-                    <div className="summary-card">
-                      <span className="summary-label">Hallucination Risk</span>
-                      <span className={`risk-badge risk-${report.hallucination_risk}`}>
-                        {report.hallucination_risk === 'low' ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
-                        {report.hallucination_risk}
-                      </span>
                     </div>
                     <div className="summary-card">
                       <span className="summary-label">SME Review Needed</span>
@@ -749,28 +740,8 @@ export function GenerateBRD() {
               <FileText size={20} />
               <span>Business Requirements Document</span>
             </div>
-            <div className="editor-content">
-              <pre className="markdown-preview">{generatedBRD.markdown}</pre>
-            </div>
-          </div>
-
-          {/* Quick Stats */}
-          <div className="brd-stats">
-            <div className="stat-item">
-              <span className="stat-value">{generatedBRD.functional_requirements.length}</span>
-              <span className="stat-label">Functional Requirements</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-value">{generatedBRD.technical_requirements.length}</span>
-              <span className="stat-label">Technical Requirements</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-value">{generatedBRD.objectives.length}</span>
-              <span className="stat-label">Objectives</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-value">{generatedBRD.risks.length}</span>
-              <span className="stat-label">Identified Risks</span>
+            <div className="editor-content markdown-body">
+              <ReactMarkdown>{generatedBRD.markdown}</ReactMarkdown>
             </div>
           </div>
         </div>
@@ -1193,6 +1164,49 @@ export function GenerateBRD() {
                     <span className="option-hint">
                       Search for similar features in codebase for reference
                     </span>
+                  </div>
+
+                  {/* Consistency Settings */}
+                  <div className="consistency-options">
+                    <h4>Consistency Settings</h4>
+
+                    {/* Temperature */}
+                    <div className="option-group">
+                      <label>
+                        <Thermometer size={14} />
+                        Temperature
+                        <span className="value-display">{temperature.toFixed(1)}</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="10"
+                        value={temperature * 10}
+                        onChange={(e) => setTemperature(Number(e.target.value) / 10)}
+                        className="option-range"
+                      />
+                      <span className="option-hint">
+                        Lower = more consistent, Higher = more creative (0.0-1.0)
+                      </span>
+                    </div>
+
+                    {/* Seed */}
+                    <div className="option-group">
+                      <label>
+                        <Hash size={14} />
+                        Seed (optional)
+                      </label>
+                      <input
+                        type="number"
+                        value={seed ?? ''}
+                        onChange={(e) => setSeed(e.target.value ? Number(e.target.value) : undefined)}
+                        placeholder="Leave empty for random"
+                        className="option-input"
+                      />
+                      <span className="option-hint">
+                        Set a seed for reproducible outputs
+                      </span>
+                    </div>
                   </div>
 
                   {/* Verified Mode Options */}

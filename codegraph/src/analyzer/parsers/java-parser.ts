@@ -120,7 +120,7 @@ function extractJavaParameters(node: Parser.SyntaxNode): ParameterInfo[] {
             for (const c of child.namedChildren) {
                 if (c.type === 'marker_annotation' || c.type === 'annotation') {
                     const annoText = getNodeText(c);
-                    const annoName = annoText.replace(/^@/, '').split('(')[0];
+                    const annoName = annoText.replace(/^@/, '').split('(')[0] || 'Unknown';
                     annotations.push({
                         name: annoName,
                         text: annoText,
@@ -178,7 +178,7 @@ function extractJavaAnnotations(node: Parser.SyntaxNode): AnnotationInfo[] {
             for (const modifier of child.namedChildren) {
                 if (modifier.type === 'marker_annotation' || modifier.type === 'annotation') {
                     const annoText = getNodeText(modifier);
-                    const annoName = annoText.replace(/^@/, '').split('(')[0];
+                    const annoName = annoText.replace(/^@/, '').split('(')[0] || 'Unknown';
 
                     // Try to extract arguments
                     const args: Record<string, string | number | boolean> = {};

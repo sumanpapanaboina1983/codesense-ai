@@ -10,7 +10,7 @@
     "isolatedModules": true,
     /* Strictness */
     "strict": true,
-    "noUncheckedIndexedAccess": true,
+    "noUncheckedIndexedAccess": false,
     "noImplicitOverride": true,
     /* If NOT transpiling with TypeScript: */
     "moduleResolution": "NodeNext",

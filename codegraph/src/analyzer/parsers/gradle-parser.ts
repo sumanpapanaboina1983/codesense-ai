@@ -350,7 +350,7 @@ export class GradleParser {
 
         // Parse plugins {} block
         const pluginsBlockMatch = content.match(/plugins\s*\{([\s\S]*?)\n\}/);
-        if (pluginsBlockMatch) {
+        if (pluginsBlockMatch && pluginsBlockMatch[1]) {
             const pluginsBlock = pluginsBlockMatch[1];
 
             // id 'java' or id("java")
@@ -360,29 +360,35 @@ export class GradleParser {
 
             let match;
             while ((match = idPattern.exec(pluginsBlock)) !== null) {
-                plugins.push({
-                    id: match[1],
-                    version: match[2],
-                    appliedVia: 'plugins-block',
-                });
+                if (match[1]) {
+                    plugins.push({
+                        id: match[1],
+                        version: match[2],
+                        appliedVia: 'plugins-block',
+                    });
+                }
             }
 
             // kotlin("jvm") syntax
             const kotlinPattern = /kotlin\s*\(\s*"([^"]+)"\s*\)/g;
             while ((match = kotlinPattern.exec(pluginsBlock)) !== null) {
-                plugins.push({
-                    id: `org.jetbrains.kotlin.${match[1]}`,
-                    appliedVia: 'plugins-block',
-                });
+                if (match[1]) {
+                    plugins.push({
+                        id: `org.jetbrains.kotlin.${match[1]}`,
+                        appliedVia: 'plugins-block',
+                    });
+                }
             }
 
             // java or java-library without id()
             const simplePluginPattern = /^\s*(java|java-library|application|war|ear)\s*$/gm;
             while ((match = simplePluginPattern.exec(pluginsBlock)) !== null) {
-                plugins.push({
-                    id: match[1],
-                    appliedVia: 'plugins-block',
-                });
+                if (match[1]) {
+                    plugins.push({
+                        id: match[1],
+                        appliedVia: 'plugins-block',
+                    });
+                }
             }
         }
 
@@ -390,10 +396,12 @@ export class GradleParser {
         const applyPattern = /apply\s+plugin:\s*['"]([^'"]+)['"]/g;
         let match;
         while ((match = applyPattern.exec(content)) !== null) {
-            plugins.push({
-                id: match[1],
-                appliedVia: 'apply-statement',
-            });
+            if (match[1]) {
+                plugins.push({
+                    id: match[1],
+                    appliedVia: 'apply-statement',
+                });
+            }
         }
 
         return plugins;
@@ -408,7 +416,7 @@ export class GradleParser {
 
         // Find dependencies block
         const depsBlockMatch = content.match(/dependencies\s*\{([\s\S]*?)\n\}/);
-        if (!depsBlockMatch) {
+        if (!depsBlockMatch || !depsBlockMatch[1]) {
             return { external, project };
         }
 
@@ -427,11 +435,13 @@ export class GradleParser {
             while ((match = pattern.exec(depsBlock)) !== null) {
                 const configuration = match[1];
                 const projectPath = match[2];
-                project.push({
-                    configuration,
-                    projectPath: `:${projectPath}`,
-                    moduleName: projectPath.replace(/:/g, '-'),
-                });
+                if (configuration && projectPath) {
+                    project.push({
+                        configuration,
+                        projectPath: `:${projectPath}`,
+                        moduleName: projectPath.replace(/:/g, '-'),
+                    });
+                }
             }
         }
 
@@ -450,7 +460,7 @@ export class GradleParser {
             while ((match = pattern.exec(depsBlock)) !== null) {
                 const configuration = match[1];
                 // Skip if this is a project dependency we already captured
-                if (configuration === 'project') continue;
+                if (configuration === 'project' || !configuration || !match[2] || !match[3] || !match[4]) continue;
 
                 external.push({
                     group: match[2],
@@ -472,14 +482,16 @@ export class GradleParser {
         for (const pattern of platformPatterns) {
             let match;
             while ((match = pattern.exec(depsBlock)) !== null) {
-                external.push({
-                    group: match[2],
-                    artifact: match[3],
-                    version: match[4],
-                    configuration: match[1],
-                    isProjectDependency: false,
-                    isPlatform: true,
-                });
+                if (match[1] && match[2] && match[3] && match[4]) {
+                    external.push({
+                        group: match[2],
+                        artifact: match[3],
+                        version: match[4],
+                        configuration: match[1],
+                        isProjectDependency: false,
+                        isPlatform: true,
+                    });
+                }
             }
         }
 
@@ -494,14 +506,16 @@ export class GradleParser {
 
         // ext { key = 'value' } or extra["key"] = "value"
         const extBlockMatch = content.match(/ext\s*\{([\s\S]*?)\n\}/);
-        if (extBlockMatch) {
+        if (extBlockMatch && extBlockMatch[1]) {
             const extBlock = extBlockMatch[1];
 
             // key = 'value' or key = "value"
             const propPattern = /(\w+)\s*=\s*['"]([^'"]+)['"]/g;
             let match;
             while ((match = propPattern.exec(extBlock)) !== null) {
-                props[match[1]] = match[2];
+                if (match[1] && match[2]) {
+                    props[match[1]] = match[2];
+                }
             }
         }
 
@@ -556,7 +570,7 @@ export class GradleParser {
         const repos: string[] = [];
 
         const reposBlockMatch = content.match(/repositories\s*\{([\s\S]*?)\n\}/);
-        if (reposBlockMatch) {
+        if (reposBlockMatch && reposBlockMatch[1]) {
             const reposBlock = reposBlockMatch[1];
 
             // Common repository shortcuts
@@ -569,7 +583,9 @@ export class GradleParser {
             const mavenUrlPattern = /maven\s*\{\s*url\s*[=:]?\s*['"]([^'"]+)['"]/g;
             let match;
             while ((match = mavenUrlPattern.exec(reposBlock)) !== null) {
-                repos.push(match[1]);
+                if (match[1]) {
+                    repos.push(match[1]);
+                }
             }
         }
 

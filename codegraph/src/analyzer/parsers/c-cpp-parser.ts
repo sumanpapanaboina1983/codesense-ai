@@ -277,7 +277,7 @@ function extractDoxygenDocumentationInfo(node: Parser.SyntaxNode, sourceText: st
     const since = tags.find(t => t.tag === 'since')?.description;
 
     return {
-        summary: summary || undefined,
+        summary: summary || '',
         rawComment: docComment.rawComment,
         tags,
         format: 'doxygen',

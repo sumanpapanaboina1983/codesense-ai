@@ -194,7 +194,7 @@ function extractCSharpDocumentationInfo(node: Parser.SyntaxNode, sourceText: str
     const remarks = tags.filter(t => t.tag === 'remarks').map(t => t.description).filter(Boolean) as string[];
 
     return {
-        summary: summary || undefined,
+        summary: summary || '',
         rawComment: docComment.rawComment,
         tags,
         format: 'xmldoc',

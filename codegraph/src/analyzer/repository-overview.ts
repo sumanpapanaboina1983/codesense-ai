@@ -343,7 +343,16 @@ export class RepositoryOverviewService {
                     publicApiDocCoverage: docCoverage.coverage, // Simplified
                     hotspots,
                     smellsBySeverity,
-                    smellsByCategory: {}, // Would need additional query
+                    smellsByCategory: {
+                        complexity: 0,
+                        size: 0,
+                        coupling: 0,
+                        naming: 0,
+                        duplication: 0,
+                        architecture: 0,
+                        maintainability: 0,
+                        performance: 0,
+                    } as Record<CodeSmellCategory, number>, // Would need additional query
                 },
 
                 testing: testCoverage,
@@ -900,7 +909,7 @@ export class RepositoryOverviewService {
 
         // Add recommendations to address hotspots
         if (hotspots.length > 0) {
-            const worstHotspot = hotspots[0];
+            const worstHotspot = hotspots[0]!;
             recommendations.push({
                 type: 'documentation',
                 entityId: worstHotspot.entityId,
