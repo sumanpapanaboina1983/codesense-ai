@@ -29,9 +29,6 @@ from ..mcp_clients.filesystem_client import FilesystemMCPClient
 from ..utils.logger import get_logger
 from .base import BaseAgent, AgentMessage, AgentRole, MessageType
 
-if TYPE_CHECKING:
-    from ..core.tool_registry import ToolRegistry
-
 logger = get_logger(__name__)
 
 
@@ -52,7 +49,6 @@ class BRDVerifierAgent(BaseAgent):
     def __init__(
         self,
         copilot_session: Any = None,
-        tool_registry: Optional["ToolRegistry"] = None,
         neo4j_client: Optional[Neo4jMCPClient] = None,
         filesystem_client: Optional[FilesystemMCPClient] = None,
         config: Optional[dict[str, Any]] = None,
@@ -61,11 +57,13 @@ class BRDVerifierAgent(BaseAgent):
         Initialize the BRD Verifier Agent.
 
         Args:
-            copilot_session: Copilot SDK session for LLM-based verification
-            tool_registry: Registry of MCP tools for agentic calling
+            copilot_session: Copilot SDK session for LLM-based verification (with MCP tools)
             neo4j_client: Neo4j MCP client (fallback for direct queries)
             filesystem_client: Filesystem MCP client (fallback for direct queries)
             config: Verification configuration dict
+
+        Note: MCP tools are available via the Copilot SDK session's mcp_servers config.
+        The local MCP clients are used as fallback when the SDK is unavailable.
         """
         # Handle config - could be VerificationConfig object or dict
         config_dict = config if isinstance(config, dict) else (config.model_dump() if config else {})
@@ -73,7 +71,6 @@ class BRDVerifierAgent(BaseAgent):
         super().__init__(
             role=AgentRole.VERIFIER,
             copilot_session=copilot_session,
-            tool_registry=tool_registry,  # Pass to base for agentic loop
             config=config_dict,
         )
 
@@ -89,6 +86,14 @@ class BRDVerifierAgent(BaseAgent):
         # Current verification state
         self.current_bundle: Optional[EvidenceBundle] = None
         self.section_results: dict[str, SectionVerificationResult] = {}
+
+        # Log initialization
+        neo4j_status = "available" if neo4j_client else "not available"
+        fs_status = "available" if filesystem_client else "not available"
+        logger.info(f"BRDVerifierAgent initialized")
+        logger.debug(f"  Neo4j client: {neo4j_status}")
+        logger.debug(f"  Filesystem client: {fs_status}")
+        logger.debug(f"  Min confidence for approval: {self.verification_config.min_confidence_for_approval}")
 
     def set_clients(
         self,
@@ -123,40 +128,62 @@ class BRDVerifierAgent(BaseAgent):
         4. Determine if section passes verification
         5. Send approval or feedback
         """
+        import time
+        start_time = time.time()
+
         section_name = message.section_name or "unknown"
         section_content = message.content
         iteration = message.iteration
 
-        logger.info(f"BRD Verifier: Verifying section '{section_name}' (iteration {iteration})")
+        logger.info(f"=" * 50)
+        logger.info(f"[VERIFIER] Verifying section '{section_name}' (iteration {iteration})")
+        logger.info(f"=" * 50)
+        logger.debug(f"[VERIFIER] Section content length: {len(section_content)} chars")
+        logger.debug(f"[VERIFIER] Content preview: {section_content[:200]}...")
 
         # Initialize section result
         result = SectionVerificationResult(section_name=section_name)
 
         # Step 1: Extract claims from the section
+        logger.info(f"[VERIFIER] Step 1: Extracting claims from '{section_name}'")
         claims = await self._extract_claims(section_content, section_name)
-        logger.info(f"BRD Verifier: Extracted {len(claims)} claims from '{section_name}'")
+        logger.info(f"[VERIFIER] Extracted {len(claims)} claims from '{section_name}'")
+        for i, claim in enumerate(claims, 1):
+            logger.debug(f"[VERIFIER]   Claim {i}: {claim.text[:80]}... (type: {claim.claim_type})")
 
         # Step 2: Verify each claim
-        for claim in claims:
+        logger.info(f"[VERIFIER] Step 2: Verifying {len(claims)} claims")
+        for i, claim in enumerate(claims, 1):
+            logger.debug(f"[VERIFIER] Verifying claim {i}/{len(claims)}: {claim.text[:50]}...")
             await self._verify_claim(claim)
             result.claims.append(claim)
+            logger.debug(f"[VERIFIER] Claim {i} result: status={claim.status.value}, confidence={claim.confidence_score:.2f}")
 
         # Step 3: Calculate section-level metrics
+        logger.info(f"[VERIFIER] Step 3: Calculating section metrics")
         result.calculate_stats()
 
         # Step 4: Generate feedback if needed
         if result.verification_status != VerificationStatus.VERIFIED:
+            logger.debug(f"[VERIFIER] Generating feedback for unverified section")
             self._generate_section_feedback(result)
 
         # Store result
         self.section_results[section_name] = result
 
+        elapsed = time.time() - start_time
+        logger.info(f"[VERIFIER] Section '{section_name}' verification complete ({elapsed:.2f}s)")
+        logger.info(f"[VERIFIER]   Status: {result.verification_status.value}")
+        logger.info(f"[VERIFIER]   Overall confidence: {result.overall_confidence:.2f}")
+        logger.info(f"[VERIFIER]   Hallucination risk: {result.hallucination_risk.value}")
+        logger.info(f"[VERIFIER]   Issues: {len(result.issues)}")
+
         # Step 5: Send response to generator
         if result.overall_confidence >= self.verification_config.min_confidence_for_approval:
             # Section approved
             logger.info(
-                f"BRD Verifier: Section '{section_name}' APPROVED "
-                f"(confidence: {result.overall_confidence:.2f})"
+                f"[VERIFIER] ✓ Section '{section_name}' APPROVED "
+                f"(confidence: {result.overall_confidence:.2f} >= {self.verification_config.min_confidence_for_approval})"
             )
             await self.send(AgentMessage(
                 message_type=MessageType.APPROVED,
@@ -168,10 +195,11 @@ class BRDVerifierAgent(BaseAgent):
         else:
             # Section needs regeneration
             logger.info(
-                f"BRD Verifier: Section '{section_name}' NEEDS REVISION "
-                f"(confidence: {result.overall_confidence:.2f})"
+                f"[VERIFIER] ✗ Section '{section_name}' NEEDS REVISION "
+                f"(confidence: {result.overall_confidence:.2f} < {self.verification_config.min_confidence_for_approval})"
             )
             feedback = self._compile_feedback(result)
+            logger.debug(f"[VERIFIER] Feedback: {feedback[:200]}...")
             await self.send(AgentMessage(
                 message_type=MessageType.FEEDBACK,
                 recipient=AgentRole.GENERATOR,
@@ -182,6 +210,7 @@ class BRDVerifierAgent(BaseAgent):
                     "confidence": result.overall_confidence,
                     "issues_count": len(result.issues),
                     "hallucination_risk": result.hallucination_risk.value,
+                    "verification_time_s": elapsed,
                 },
             ))
 
@@ -553,21 +582,24 @@ Extract 3-8 key business claims from this section.
         Verify a business-level claim by gathering evidence from multiple sources.
 
         AGENTIC MODE (preferred):
-        - Uses Copilot SDK's agentic loop with MCP tools
+        - Uses Copilot SDK with MCP tools (Neo4j, Filesystem)
         - LLM decides what queries to run to verify the claim
-        - No hardcoded verification logic
 
-        FALLBACK MODE (when tools unavailable):
+        FALLBACK MODE (when SDK unavailable):
         - Uses direct Neo4j/Filesystem queries with hardcoded patterns
         """
-        logger.debug(f"Verifying business claim: {claim.text[:50]}...")
+        logger.debug(f"[VERIFIER] Verifying claim: {claim.text[:80]}...")
+        logger.debug(f"[VERIFIER]   Type: {claim.claim_type}")
+        logger.debug(f"[VERIFIER]   Keywords: {claim.keywords[:5] if claim.keywords else 'none'}")
 
-        # Try agentic verification first (LLM decides what tools to use)
-        if self.tool_registry and self.enable_agentic_tools:
+        # Try agentic verification first if Copilot session is available
+        if self.session and self.enable_agentic_tools:
+            logger.debug(f"[VERIFIER]   Mode: Agentic (SDK with MCP tools)")
             await self._verify_claim_agentic(claim)
             return
 
         # Fallback to hardcoded verification logic
+        logger.debug(f"[VERIFIER]   Mode: Fallback (direct queries)")
         await self._verify_claim_fallback(claim)
 
     async def _verify_claim_agentic(self, claim: Claim) -> None:

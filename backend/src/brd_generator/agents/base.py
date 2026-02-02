@@ -1,38 +1,24 @@
 """Base agent class for multi-agent BRD architecture.
 
-Supports AGENTIC TOOL CALLING with TWO MODES:
-
-1. SDK Native Mode (Preferred):
-   - Tools are passed to create_session() in generator.py
-   - SDK automatically executes tools when LLM requests them
-   - Agent calls send_to_llm() with sdk_auto_execute=True
-
-2. Manual Loop Mode (Fallback):
-   - Tools are passed to send_and_wait() per-message
-   - Agent manually extracts and executes tool calls
-   - Used when SDK auto-execution is not available
-
-The mode is determined by session configuration and can be overridden per-call.
+The Copilot SDK handles tool calling natively:
+- MCP servers are configured via mcp_servers in session config
+- Skills are loaded via skill_directories in session config
+- SDK automatically executes tools when LLM requests them
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from ..utils.logger import get_logger, get_progress_logger
-
-if TYPE_CHECKING:
-    from ..core.tool_registry import ToolRegistry
+from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
-progress = get_progress_logger(__name__, "Agent")
 
 
 class AgentRole(str, Enum):
@@ -98,10 +84,9 @@ class BaseAgent(ABC):
     """
     Base class for agents in the multi-agent BRD system.
 
-    Supports AGENTIC TOOL CALLING:
-    - Agents can use MCP tools (Neo4j, Filesystem) via tool_registry
-    - The agentic loop handles tool calls automatically
-    - LLM decides what tools to use based on the task
+    MCP tools are available via the Copilot SDK session:
+    - MCP servers configured via mcp_servers in session config
+    - SDK handles tool execution automatically
 
     All agents communicate through messages and coordinate via the orchestrator.
     """
@@ -110,7 +95,6 @@ class BaseAgent(ABC):
         self,
         role: AgentRole,
         copilot_session: Any = None,
-        tool_registry: Optional["ToolRegistry"] = None,
         config: dict[str, Any] = None,
     ):
         """
@@ -118,13 +102,11 @@ class BaseAgent(ABC):
 
         Args:
             role: The role of this agent
-            copilot_session: Copilot SDK session for LLM access
-            tool_registry: Registry of MCP tools for agentic calling
+            copilot_session: Copilot SDK session for LLM access (with MCP tools)
             config: Agent-specific configuration
         """
         self.role = role
         self.session = copilot_session
-        self.tool_registry = tool_registry
         self.config = config or {}
 
         # State
@@ -138,22 +120,16 @@ class BaseAgent(ABC):
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
-        # Agentic loop settings
-        self.max_tool_iterations = config.get("max_tool_iterations", 10) if config else 10
+        # SDK handles tool execution via mcp_servers in session config
         self.enable_agentic_tools = config.get("enable_agentic_tools", True) if config else True
 
-        # SDK auto-execution mode (preferred when tools are in session config)
-        # When True, SDK handles tool execution automatically
-        # When False, uses manual agentic loop
-        self.sdk_auto_execute = config.get("sdk_auto_execute", True) if config else True
-
-        # Skill instructions (from skill YAML)
-        self.skill_instructions = config.get("skill_instructions", "") if config else ""
-
-        tools_status = "enabled" if (tool_registry and self.enable_agentic_tools) else "disabled"
-        skill_status = "with skill" if self.skill_instructions else "no skill"
-        exec_mode = "SDK auto" if self.sdk_auto_execute else "manual loop"
-        logger.info(f"Agent initialized: {role.value} (tools: {tools_status}, {skill_status}, mode: {exec_mode})")
+        # Log initialization details
+        session_status = "connected" if copilot_session else "not available (mock mode)"
+        tools_status = "enabled" if self.enable_agentic_tools else "disabled"
+        logger.info(f"Agent initialized: {role.value}")
+        logger.debug(f"  Session: {session_status}")
+        logger.debug(f"  Agentic tools: {tools_status}")
+        logger.debug(f"  Config: {config}")
 
     @property
     def is_running(self) -> bool:
@@ -317,56 +293,27 @@ class BaseAgent(ABC):
         prompt: str,
         timeout: float = 300,
         use_tools: bool = True,
-        sdk_auto_execute: bool = None,
     ) -> str:
         """
-        Send a prompt to the LLM via Copilot SDK with AGENTIC TOOL CALLING.
+        Send a prompt to the LLM via Copilot SDK.
 
-        Supports two modes:
-        1. SDK Auto-Execution (sdk_auto_execute=True):
-           - Tools are already registered with session via create_session()
-           - SDK handles tool execution automatically
-           - Simple call, SDK manages the agentic loop internally
-
-        2. Manual Loop (sdk_auto_execute=False):
-           - Tools passed to send_and_wait() per-message
-           - Agent manually extracts and executes tool calls
-           - Used as fallback when SDK auto-execution is not available
+        MCP tools are available via the SDK session's mcp_servers config.
+        The SDK handles tool execution automatically.
 
         Args:
             prompt: The prompt to send
             timeout: Timeout in seconds
-            use_tools: Whether to enable agentic tool calling
-            sdk_auto_execute: Override for SDK auto-execution mode (None uses default)
+            use_tools: Whether to enable tool calling (SDK handles automatically)
 
         Returns:
-            The LLM response (after any tool calls are resolved)
+            The LLM response (after any tool calls are resolved by SDK)
         """
         if not self.session:
             logger.warning(f"Agent {self.role.value}: No Copilot session, returning mock response")
             return self._generate_mock_response(prompt)
 
-        # Determine execution mode
-        auto_execute = sdk_auto_execute if sdk_auto_execute is not None else self.sdk_auto_execute
-
-        # Check if we should use agentic tools
-        should_use_tools = (
-            use_tools and
-            self.enable_agentic_tools and
-            self.tool_registry is not None
-        )
-
         try:
-            if should_use_tools:
-                if auto_execute:
-                    # SDK auto-execution mode: tools are in session config
-                    return await self._send_with_sdk_auto_execution(prompt, timeout)
-                else:
-                    # Manual loop mode: tools passed per-message
-                    return await self._send_with_agentic_loop(prompt, timeout)
-            else:
-                return await self._send_simple(prompt, timeout)
-
+            return await self._send_to_sdk(prompt, timeout)
         except asyncio.TimeoutError:
             logger.warning(f"Agent {self.role.value}: LLM timeout after {timeout}s")
             return self._generate_mock_response(prompt)
@@ -374,339 +321,112 @@ class BaseAgent(ABC):
             logger.error(f"Agent {self.role.value}: LLM error: {e}")
             return self._generate_mock_response(prompt)
 
-    async def _send_with_sdk_auto_execution(self, prompt: str, timeout: float) -> str:
+    async def _send_to_sdk(self, prompt: str, timeout: float) -> str:
         """
-        Send prompt with SDK native auto-execution mode.
+        Send prompt to Copilot SDK.
 
-        When tools are registered with create_session(), the SDK handles:
-        - Tool calling when LLM requests it
+        The SDK handles:
+        - Tool calling when LLM requests it (via mcp_servers)
         - Executing the tool functions
         - Feeding results back to LLM
         - Iterating until final response
-
-        This is the preferred mode as it leverages SDK's native capabilities.
         """
-        logger.info(f"Agent {self.role.value}: Sending to LLM (SDK auto-execute mode, {len(prompt)} chars)")
+        import time
+        start_time = time.time()
 
-        # Include skill instructions if available
-        full_prompt = prompt
-        if self.skill_instructions:
-            full_prompt = f"""## Skill Instructions
-{self.skill_instructions}
+        prompt_preview = prompt[:100] + "..." if len(prompt) > 100 else prompt
+        logger.info(f"[{self.role.value.upper()}] Sending to LLM ({len(prompt)} chars)")
+        logger.debug(f"[{self.role.value.upper()}] Prompt preview: {prompt_preview}")
+        logger.debug(f"[{self.role.value.upper()}] Timeout: {timeout}s")
 
-## Task
-{prompt}"""
-            logger.info(f"Agent {self.role.value}: Using skill instructions")
-
-        # Simple call - SDK handles tool execution automatically
-        # Tools are already registered with session via create_session()
-        message_options = {"prompt": full_prompt}
-
-        if hasattr(self.session, 'send_and_wait'):
-            event = await asyncio.wait_for(
-                self.session.send_and_wait(message_options, timeout=timeout),
-                timeout=timeout
-            )
-            if event:
-                # Check if we got a final response (no pending tool calls)
-                response = self._extract_from_event(event)
-
-                # If response is empty and there are tool calls, SDK may need manual handling
-                # This is a fallback detection mechanism
-                tool_calls = self._extract_tool_calls(event)
-                if not response and tool_calls:
-                    logger.warning(
-                        f"Agent {self.role.value}: SDK returned tool_calls without executing. "
-                        "Falling back to manual loop."
-                    )
-                    # Fall back to manual loop for this request
-                    return await self._send_with_agentic_loop(prompt, timeout)
-
-                logger.info(f"Agent {self.role.value}: SDK auto-execution complete ({len(response)} chars)")
-                return response
-
-        if hasattr(self.session, 'send'):
-            await self.session.send(message_options)
-            return await self._wait_for_response(timeout)
-
-        return self._generate_mock_response(prompt)
-
-    async def _send_simple(self, prompt: str, timeout: float) -> str:
-        """Send prompt without tool calling (simple mode)."""
         message_options = {"prompt": prompt}
-        logger.info(f"Agent {self.role.value}: Sending to LLM (simple mode, {len(prompt)} chars)")
 
         if hasattr(self.session, 'send_and_wait'):
+            logger.debug(f"[{self.role.value.upper()}] Using send_and_wait method")
             event = await asyncio.wait_for(
                 self.session.send_and_wait(message_options, timeout=timeout),
                 timeout=timeout
             )
+            elapsed = time.time() - start_time
             if event:
-                return self._extract_from_event(event)
+                response = self._extract_from_event(event)
+                response_preview = response[:100] + "..." if len(response) > 100 else response
+                logger.info(f"[{self.role.value.upper()}] Response received ({len(response)} chars, {elapsed:.2f}s)")
+                logger.debug(f"[{self.role.value.upper()}] Response preview: {response_preview}")
+                return response
+            else:
+                logger.warning(f"[{self.role.value.upper()}] No event returned from SDK ({elapsed:.2f}s)")
 
         if hasattr(self.session, 'send'):
+            logger.debug(f"[{self.role.value.upper()}] Using send method (polling for response)")
             await self.session.send(message_options)
-            return await self._wait_for_response(timeout)
+            response = await self._wait_for_response(timeout)
+            elapsed = time.time() - start_time
+            logger.info(f"[{self.role.value.upper()}] Response received via polling ({len(response)} chars, {elapsed:.2f}s)")
+            return response
 
+        logger.warning(f"[{self.role.value.upper()}] Session has no send methods, using mock response")
         return self._generate_mock_response(prompt)
-
-    async def _send_with_agentic_loop(self, prompt: str, timeout: float) -> str:
-        """
-        Send prompt with AGENTIC TOOL CALLING loop.
-
-        This is the core of the agentic architecture:
-        1. Send prompt with available tools and skill instructions
-        2. If LLM wants to call a tool, execute it and feed result back
-        3. Repeat until LLM provides final response
-        """
-        role = self.role.value.upper()
-        progress.start_operation(f"{role} Agentic Loop", "Starting tool-augmented generation")
-
-        # Get tool definitions
-        tools = self.tool_registry.get_tool_definitions()
-        tool_names = [t.get('function', {}).get('name', 'unknown') if isinstance(t, dict) else getattr(t, '__name__', 'unknown') for t in tools]
-        logger.info(f"  [{role}] Available tools ({len(tools)}): {tool_names}")
-
-        # Include skill instructions if available
-        full_prompt = prompt
-        if self.skill_instructions:
-            full_prompt = f"""## Skill Instructions
-{self.skill_instructions}
-
-## Task
-{prompt}"""
-            logger.info(f"  [{role}] Using skill instructions")
-
-        # Build initial message with tools
-        message_options = {
-            "prompt": full_prompt,
-            "tools": tools,
-        }
-
-        iteration = 0
-        total_tool_calls = 0
-        start_time = asyncio.get_event_loop().time()
-
-        while iteration < self.max_tool_iterations:
-            iteration += 1
-            elapsed = asyncio.get_event_loop().time() - start_time
-            remaining_timeout = timeout - elapsed
-
-            if remaining_timeout <= 0:
-                progress.end_operation(f"{role} Agentic Loop", success=False, details="Timeout")
-                logger.warning(f"  [{role}] Agentic loop timeout after {elapsed:.1f}s")
-                break
-
-            logger.info(f"  [{role}] Iteration {iteration}/{self.max_tool_iterations} (elapsed: {elapsed:.1f}s)")
-
-            # Send to LLM
-            event = await asyncio.wait_for(
-                self.session.send_and_wait(message_options, timeout=remaining_timeout),
-                timeout=remaining_timeout
-            )
-
-            if not event:
-                logger.warning(f"  [{role}] No response from LLM")
-                break
-
-            # Check if LLM wants to call tools
-            tool_calls = self._extract_tool_calls(event)
-
-            if tool_calls:
-                # Execute tool calls and prepare results
-                total_tool_calls += len(tool_calls)
-                logger.info(f"  [{role}] LLM requesting {len(tool_calls)} tool call(s):")
-                for tc in tool_calls:
-                    tc_name = tc.get('name', 'unknown')
-                    tc_args = str(tc.get('arguments', {}))[:100]
-                    logger.info(f"    -> {tc_name}({tc_args}...)")
-
-                tool_results = await self._execute_tool_calls(tool_calls)
-
-                # Log tool results summary
-                for tr in tool_results:
-                    result_preview = str(tr.get('result', ''))[:100]
-                    logger.debug(f"    <- {tr.get('tool_call_id', 'unknown')}: {result_preview}...")
-
-                # Build next message with tool results
-                message_options = {
-                    "tool_results": tool_results,
-                }
-            else:
-                # No tool calls - LLM has final response
-                response = self._extract_from_event(event)
-                elapsed = asyncio.get_event_loop().time() - start_time
-                progress.end_operation(
-                    f"{role} Agentic Loop",
-                    success=True,
-                    details=f"{iteration} iterations, {total_tool_calls} tool calls, {elapsed:.1f}s"
-                )
-                logger.info(f"  [{role}] Response received ({len(response)} chars)")
-                return response
-
-        # Max iterations reached
-        elapsed = asyncio.get_event_loop().time() - start_time
-        progress.end_operation(f"{role} Agentic Loop", success=False, details="Max iterations reached")
-        logger.warning(f"  [{role}] Max tool iterations ({self.max_tool_iterations}) reached after {elapsed:.1f}s")
-        return self._extract_from_event(event) if event else ""
-
-    def _extract_tool_calls(self, event: Any) -> list[dict[str, Any]]:
-        """Extract tool calls from LLM response event."""
-        tool_calls = []
-
-        try:
-            # Check various possible locations for tool calls
-            if hasattr(event, 'data'):
-                data = event.data
-
-                # Check for tool_calls in message
-                if hasattr(data, 'message'):
-                    msg = data.message
-                    if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                        for tc in msg.tool_calls:
-                            tool_calls.append({
-                                "id": getattr(tc, 'id', f"tc_{len(tool_calls)}"),
-                                "name": getattr(tc, 'name', None) or getattr(tc.function, 'name', None),
-                                "arguments": self._parse_tool_arguments(tc),
-                            })
-
-                # Check for tool_calls directly on data
-                if hasattr(data, 'tool_calls') and data.tool_calls:
-                    for tc in data.tool_calls:
-                        tool_calls.append({
-                            "id": getattr(tc, 'id', f"tc_{len(tool_calls)}"),
-                            "name": getattr(tc, 'name', None) or getattr(tc.function, 'name', None),
-                            "arguments": self._parse_tool_arguments(tc),
-                        })
-
-            # Check for tool_calls directly on event
-            if hasattr(event, 'tool_calls') and event.tool_calls:
-                for tc in event.tool_calls:
-                    tool_calls.append({
-                        "id": getattr(tc, 'id', f"tc_{len(tool_calls)}"),
-                        "name": getattr(tc, 'name', None),
-                        "arguments": self._parse_tool_arguments(tc),
-                    })
-
-        except Exception as e:
-            logger.error(f"Error extracting tool calls: {e}")
-
-        return tool_calls
-
-    def _parse_tool_arguments(self, tool_call: Any) -> dict[str, Any]:
-        """Parse tool call arguments from various formats."""
-        try:
-            # Try function.arguments (OpenAI format)
-            if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
-                args = tool_call.function.arguments
-                if isinstance(args, str):
-                    return json.loads(args)
-                return args
-
-            # Try arguments directly
-            if hasattr(tool_call, 'arguments'):
-                args = tool_call.arguments
-                if isinstance(args, str):
-                    return json.loads(args)
-                return args
-
-            # Try input (Anthropic format)
-            if hasattr(tool_call, 'input'):
-                return tool_call.input
-
-            return {}
-        except Exception as e:
-            logger.error(f"Error parsing tool arguments: {e}")
-            return {}
-
-    async def _execute_tool_calls(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Execute tool calls and return results."""
-        results = []
-        role = self.role.value.upper()
-
-        for i, tc in enumerate(tool_calls, 1):
-            tool_name = tc.get("name")
-            tool_args = tc.get("arguments", {})
-            tool_id = tc.get("id", "unknown")
-
-            # Log tool execution start
-            args_preview = str(tool_args)[:150]
-            logger.info(f"      [{role}] Tool {i}/{len(tool_calls)}: {tool_name}")
-            logger.debug(f"        Args: {args_preview}...")
-
-            import time
-            start_time = time.time()
-
-            try:
-                # Execute via tool registry
-                result = await self.tool_registry.execute_tool(tool_name, tool_args)
-
-                elapsed = time.time() - start_time
-                result_preview = str(result)[:200] if result else "(empty)"
-
-                results.append({
-                    "tool_call_id": tool_id,
-                    "role": "tool",
-                    "name": tool_name,
-                    "content": result,
-                })
-
-                logger.info(f"      [{role}] Tool {tool_name} completed ({elapsed:.2f}s)")
-                logger.debug(f"        Result: {result_preview}...")
-
-            except Exception as e:
-                elapsed = time.time() - start_time
-                logger.error(f"      [{role}] Tool {tool_name} FAILED ({elapsed:.2f}s): {e}")
-                results.append({
-                    "tool_call_id": tool_id,
-                    "role": "tool",
-                    "name": tool_name,
-                    "content": json.dumps({"error": str(e)}),
-                })
-
-        return results
 
     def _extract_from_event(self, event: Any) -> str:
         """Extract text content from a Copilot event."""
         try:
+            logger.debug(f"[{self.role.value.upper()}] Extracting from event type: {type(event).__name__}")
+
             if hasattr(event, 'data'):
                 data = event.data
+                logger.debug(f"[{self.role.value.upper()}] Event has data attribute, type: {type(data).__name__}")
+
                 if hasattr(data, 'message') and hasattr(data.message, 'content'):
+                    logger.debug(f"[{self.role.value.upper()}] Extracted from data.message.content")
                     return str(data.message.content)
                 if hasattr(data, 'content'):
+                    logger.debug(f"[{self.role.value.upper()}] Extracted from data.content")
                     return str(data.content)
                 if hasattr(data, 'text'):
+                    logger.debug(f"[{self.role.value.upper()}] Extracted from data.text")
                     return str(data.text)
 
             if hasattr(event, 'content'):
+                logger.debug(f"[{self.role.value.upper()}] Extracted from event.content")
                 return str(event.content)
             if hasattr(event, 'text'):
+                logger.debug(f"[{self.role.value.upper()}] Extracted from event.text")
                 return str(event.text)
 
+            logger.debug(f"[{self.role.value.upper()}] Using str(event) as fallback")
             return str(event)
         except Exception as e:
-            logger.error(f"Error extracting from event: {e}")
+            logger.error(f"[{self.role.value.upper()}] Error extracting from event: {e}", exc_info=True)
             return ""
 
     async def _wait_for_response(self, timeout: float) -> str:
         """Wait for LLM response by polling messages."""
         start_time = asyncio.get_event_loop().time()
         poll_interval = 1.0
+        poll_count = 0
+
+        logger.debug(f"[{self.role.value.upper()}] Waiting for response (timeout: {timeout}s)")
 
         while True:
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed > timeout:
+                logger.warning(f"[{self.role.value.upper()}] Polling timeout after {elapsed:.1f}s ({poll_count} polls)")
                 return ""
 
             try:
+                poll_count += 1
                 messages = self.session.get_messages()
+                logger.debug(f"[{self.role.value.upper()}] Poll {poll_count}: {len(messages)} messages")
+
                 for msg in reversed(messages):
                     if hasattr(msg, 'data'):
                         data = msg.data
                         if hasattr(data, 'role') and data.role == 'assistant':
+                            logger.debug(f"[{self.role.value.upper()}] Found assistant response after {poll_count} polls")
                             return self._extract_from_event(msg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[{self.role.value.upper()}] Poll error: {e}")
 
             await asyncio.sleep(poll_interval)
 

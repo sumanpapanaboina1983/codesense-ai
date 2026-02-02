@@ -119,7 +119,7 @@ services:
       # GitHub Copilot Configuration
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4-5}
+      - COPILOT_MODEL=${COPILOT_MODEL:-gpt-4o}  # gpt-4o works on all Copilot tiers; claude-sonnet-4.5 requires Copilot Pro+
       - COPILOT_LOG_LEVEL=info
       # GitLab Configuration
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}

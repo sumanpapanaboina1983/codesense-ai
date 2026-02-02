@@ -21,7 +21,6 @@ from .base import BaseAgent, AgentMessage, AgentRole, MessageType
 
 if TYPE_CHECKING:
     from ..core.template_parser import ParsedBRDTemplate, BRDSection
-    from ..core.tool_registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -46,7 +45,6 @@ class BRDGeneratorAgent(BaseAgent):
     def __init__(
         self,
         copilot_session: Any = None,
-        tool_registry: Optional["ToolRegistry"] = None,
         context: Optional[AggregatedContext] = None,
         parsed_template: Optional["ParsedBRDTemplate"] = None,
         config: dict[str, Any] = None,
@@ -55,16 +53,16 @@ class BRDGeneratorAgent(BaseAgent):
         Initialize the BRD Generator Agent.
 
         Args:
-            copilot_session: Copilot SDK session for LLM access
-            tool_registry: Registry of MCP tools for agentic calling
+            copilot_session: Copilot SDK session for LLM access (with MCP tools)
             context: Aggregated context from code analysis
             parsed_template: The PARSED BRD template that defines sections
             config: Agent configuration
+
+        Note: MCP tools are available via the Copilot SDK session's mcp_servers config.
         """
         super().__init__(
             role=AgentRole.GENERATOR,
             copilot_session=copilot_session,
-            tool_registry=tool_registry,  # Pass to base for agentic loop
             config=config or {},
         )
 
@@ -75,6 +73,12 @@ class BRDGeneratorAgent(BaseAgent):
         self.sections_approved: set[str] = set()
         self.regeneration_count: dict[str, int] = {}
         self.max_regenerations = config.get("max_regenerations", 3) if config else 3
+
+        # Log initialization
+        logger.info(f"BRDGeneratorAgent initialized")
+        logger.debug(f"  Max regenerations: {self.max_regenerations}")
+        logger.debug(f"  Template: {'set' if parsed_template else 'default'}")
+        logger.debug(f"  Context: {'set' if context else 'not set'}")
 
     def set_context(self, context: AggregatedContext) -> None:
         """Set the code analysis context."""
@@ -115,7 +119,9 @@ class BRDGeneratorAgent(BaseAgent):
 
     async def _start_generation(self, message: AgentMessage) -> None:
         """Start the BRD generation process."""
+        logger.info("=" * 60)
         logger.info("BRD Generator: Starting generation")
+        logger.info("=" * 60)
 
         if not self.context:
             logger.error("No context set for BRD generation")
@@ -126,18 +132,29 @@ class BRDGeneratorAgent(BaseAgent):
             ))
             return
 
+        # Log context summary
+        logger.info(f"Context summary:")
+        logger.info(f"  Request: {self.context.request[:80]}...")
+        if self.context.architecture:
+            logger.info(f"  Components: {len(self.context.architecture.components)}")
+        if self.context.implementation:
+            logger.info(f"  Key files: {len(self.context.implementation.key_files)}")
+
         # Reset state
         self.sections_generated = {}
         self.sections_approved = set()
         self.regeneration_count = {}
         self.current_brd = None
+        logger.debug("Generation state reset")
 
         # Get sections from parsed template (template-driven!)
         section_names = self.get_section_names()
         logger.info(f"BRD Generator: Will generate {len(section_names)} sections from template")
+        logger.info(f"  Sections: {section_names}")
 
         # Generate sections one by one based on template
-        for section_name in section_names:
+        for i, section_name in enumerate(section_names, 1):
+            logger.info(f"Generating section {i}/{len(section_names)}: {section_name}")
             await self._generate_section(section_name, message.iteration)
 
     async def _generate_section(
@@ -154,21 +171,36 @@ class BRDGeneratorAgent(BaseAgent):
             iteration: Current iteration number
             feedback: Optional feedback from previous verification
         """
-        logger.info(f"BRD Generator: Generating section '{section_name}' (iteration {iteration})")
+        import time
+        start_time = time.time()
+
+        regen_count = self.regeneration_count.get(section_name, 0) + 1
+        logger.info(f"[GENERATOR] Section '{section_name}' (iteration {iteration}, regen #{regen_count})")
+
+        if feedback:
+            logger.info(f"[GENERATOR] Regenerating with feedback: {feedback[:100]}...")
 
         # Track regeneration count
-        self.regeneration_count[section_name] = self.regeneration_count.get(section_name, 0) + 1
+        self.regeneration_count[section_name] = regen_count
 
         # Build the prompt
+        logger.debug(f"[GENERATOR] Building prompt for '{section_name}'")
         prompt = self._build_section_prompt(section_name, feedback)
+        logger.debug(f"[GENERATOR] Prompt length: {len(prompt)} chars")
 
         # Generate using LLM
+        logger.info(f"[GENERATOR] Calling LLM for '{section_name}'...")
         response = await self.send_to_llm(prompt)
+
+        elapsed = time.time() - start_time
+        logger.info(f"[GENERATOR] Section '{section_name}' generated ({len(response)} chars, {elapsed:.2f}s)")
+        logger.debug(f"[GENERATOR] Response preview: {response[:200]}...")
 
         # Store the generated section
         self.sections_generated[section_name] = response
 
         # Send to verifier for validation
+        logger.info(f"[GENERATOR] Sending '{section_name}' to verifier")
         await self.send(AgentMessage(
             message_type=MessageType.BRD_SECTION,
             recipient=AgentRole.VERIFIER,
@@ -178,6 +210,7 @@ class BRDGeneratorAgent(BaseAgent):
             metadata={
                 "feature_description": self.context.request if self.context else "",
                 "regeneration_count": self.regeneration_count[section_name],
+                "generation_time_s": elapsed,
             },
         ))
 
@@ -253,8 +286,12 @@ Generate the {section_name} section now:
 """
 
     def _build_tool_instructions(self) -> str:
-        """Build instructions about available tools for the agentic loop."""
-        if not self.tool_registry:
+        """Build instructions about available MCP tools.
+
+        MCP tools are available via the Copilot SDK session's mcp_servers config.
+        The SDK handles tool execution automatically.
+        """
+        if not self.session:
             return ""
 
         return """

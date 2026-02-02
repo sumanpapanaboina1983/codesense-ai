@@ -415,12 +415,22 @@ async def _generate_brd_draft_stream(
 
                 await progress_callback("context", f"Context ready: {len(context.architecture.components)} components, {len(context.implementation.key_files)} files")
 
-                await progress_callback("generate", "📝 Generating BRD with gathered context...")
+                await progress_callback("generate", f"📝 Generating BRD with gathered context (detail: {request.detail_level.value})...")
+
+                # Convert sections to dict format if provided
+                custom_sections = None
+                if request.sections:
+                    custom_sections = [
+                        {"name": s.name, "description": s.description, "required": s.required}
+                        for s in request.sections
+                    ]
 
                 # Generate BRD with explicit context
                 brd = await generator.synthesizer.generate_brd_with_context(
                     context=context,
                     feature_request=request.feature_description,
+                    detail_level=request.detail_level.value,
+                    custom_sections=custom_sections,
                 )
 
                 await repo_filesystem_client.disconnect()
@@ -652,6 +662,24 @@ async def _generate_brd_verified_stream(
                 }
                 await progress_callback("config", f"Custom sufficiency criteria: {len(request.sufficiency_criteria.dimensions)} dimensions")
 
+            # Convert sections to dict format if provided
+            custom_sections_verified = None
+            if request.sections:
+                custom_sections_verified = [
+                    {"name": s.name, "description": s.description, "required": s.required}
+                    for s in request.sections
+                ]
+
+            # Convert verification limits to dict if provided
+            verification_limits_dict = None
+            if request.verification_limits:
+                verification_limits_dict = {
+                    "max_entities_per_claim": request.verification_limits.max_entities_per_claim,
+                    "max_patterns_per_claim": request.verification_limits.max_patterns_per_claim,
+                    "results_per_query": request.verification_limits.results_per_query,
+                    "code_refs_per_evidence": request.verification_limits.code_refs_per_evidence,
+                }
+
             verified_generator = VerifiedBRDGenerator(
                 copilot_session=generator._copilot_session,
                 neo4j_client=generator.neo4j_client,
@@ -659,6 +687,9 @@ async def _generate_brd_verified_stream(
                 max_iterations=request.max_iterations,
                 parsed_template=parsed_template,  # Pass parsed template
                 sufficiency_criteria=sufficiency_dict,  # Pass sufficiency criteria
+                detail_level=request.detail_level.value,  # Pass detail level
+                custom_sections=custom_sections_verified,  # Pass custom sections
+                verification_limits=verification_limits_dict,  # Pass verification limits
             )
 
             # Run multi-agent generation

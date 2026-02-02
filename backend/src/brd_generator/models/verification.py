@@ -272,14 +272,17 @@ class Claim(BaseModel):
                 penalty = len(contradicting) / (len(supporting) + len(contradicting))
                 self.confidence_score *= (1 - penalty * 0.5)
 
-        # Determine status
-        if self.confidence_score >= 0.8:
+        # Determine status based on confidence thresholds
+        # VERIFIED: >= 0.7 (evidence found matching claim)
+        # PARTIALLY_VERIFIED: >= 0.4 (some evidence, needs more)
+        # UNVERIFIED: < 0.4 (insufficient or no evidence)
+        if self.confidence_score >= 0.7:
             self.status = VerificationStatus.VERIFIED
             self.hallucination_risk = HallucinationRisk.NONE
-        elif self.confidence_score >= 0.5:
+        elif self.confidence_score >= 0.4:
             self.status = VerificationStatus.PARTIALLY_VERIFIED
             self.hallucination_risk = HallucinationRisk.LOW
-        elif self.confidence_score >= 0.3:
+        elif self.confidence_score >= 0.2:
             self.status = VerificationStatus.UNVERIFIED
             self.hallucination_risk = HallucinationRisk.MEDIUM
             self.needs_sme_review = True

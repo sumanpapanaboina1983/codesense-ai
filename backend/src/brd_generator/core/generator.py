@@ -15,8 +15,6 @@ from ..mcp_clients.neo4j_client import Neo4jMCPClient
 from ..mcp_clients.filesystem_client import FilesystemMCPClient
 from .aggregator import ContextAggregator
 from .synthesizer import LLMSynthesizer, TemplateConfig
-from .tool_registry import ToolRegistry
-from .skill_loader import SkillLoader
 from ..utils.logger import get_logger, get_progress_logger, log_operation
 
 logger = get_logger(__name__)
@@ -29,11 +27,12 @@ MCP_CONFIG_PATHS = [
     Path.cwd() / ".copilot" / "mcp-config.json",  # Project directory
 ]
 
-# Default skills directories
+# Default skills directories - Copilot SDK expects .md files with YAML frontmatter
 SKILLS_DIRECTORIES = [
+    Path(__file__).parent.parent.parent.parent / ".github" / "skills",  # backend/.github/skills
+    Path.cwd() / ".github" / "skills",
     Path.home() / ".github" / "skills",
     Path("/home/appuser/.github/skills"),
-    Path.cwd() / ".github" / "skills",
 ]
 
 # Try to import Copilot SDK
@@ -91,19 +90,20 @@ class BRDGenerator:
             templates_dir: Directory containing custom template files
         """
         self.workspace_root = workspace_root or Path(os.getenv("CODEBASE_ROOT", str(Path.cwd())))
-        self.copilot_model = copilot_model or os.getenv("COPILOT_MODEL", "claude-sonnet-4-5")
+        # Default to gpt-4o which is available on all Copilot tiers
+        # Claude models require Copilot Pro/Business/Enterprise
+        self.copilot_model = copilot_model or os.getenv("COPILOT_MODEL", "gpt-4o")
         self.copilot_cli_path = copilot_cli_path or os.getenv("COPILOT_CLI_PATH")
         self.mcp_config_path = mcp_config_path
         self.use_native_mcp = use_native_mcp
         self.template_config = template_config
         self.templates_dir = templates_dir
 
-        # Skills directory - use package default if not specified
+        # Skills directory - Copilot SDK expects .github/skills with .md files
         if skills_dir:
             self.skills_dir = skills_dir
         else:
-            from ..skills import get_skills_directory
-            self.skills_dir = get_skills_directory()
+            self.skills_dir = self._find_skills_dir()
 
         # MCP server configuration from environment
         self.neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
@@ -120,13 +120,9 @@ class BRDGenerator:
         self._copilot_client: Optional[Any] = None
         self._copilot_session: Optional[Any] = None
 
-        # Skill loader for dynamic skill matching
-        self.skill_loader = SkillLoader(skills_dir=self.skills_dir)
-
         # Other components
         self.aggregator: Optional[ContextAggregator] = None
         self.synthesizer: Optional[LLMSynthesizer] = None
-        self.tool_registry: Optional[ToolRegistry] = None
         self._initialized = False
 
     def _find_skills_dir(self) -> Optional[Path]:
@@ -230,21 +226,13 @@ class BRDGenerator:
 
         progress.start_operation("BRDGenerator.initialize", "Setting up all components")
 
-        # Step 1: Connect MCP clients
+        # Step 1: Connect MCP clients (for aggregator fallback)
         progress.step("initialize", "Connecting MCP clients (Neo4j, Filesystem)")
         await self.neo4j_client.connect()
         await self.filesystem_client.connect()
         progress.info("MCP clients connected", neo4j=self.neo4j_uri, workspace=str(self.workspace_root))
 
-        # Step 2: Create Tool Registry
-        progress.step("initialize", "Creating tool registry")
-        self.tool_registry = ToolRegistry(
-            neo4j_client=self.neo4j_client,
-            filesystem_client=self.filesystem_client,
-        )
-        progress.info("Tool registry created")
-
-        # Step 3: Initialize Copilot SDK client
+        # Step 2: Initialize Copilot SDK client
         progress.step("initialize", "Initializing Copilot SDK client")
         if COPILOT_SDK_AVAILABLE and CopilotClient is not None:
             try:
@@ -269,24 +257,12 @@ class BRDGenerator:
                     "mcp_servers": mcp_servers,
                 }
 
-                # Add tools from tool_registry to session config for SDK auto-execution
-                # When tools are passed to create_session(), SDK handles tool calling automatically
-                if self.tool_registry is not None:
-                    tools = self.tool_registry.get_tool_definitions()
-                    if tools:
-                        session_config["tools"] = tools
-                        progress.info(f"Registered {len(tools)} tools for auto-execution")
-
                 # Add skills directory for Copilot SDK native skill loading
-                progress.step("initialize", "Loading skills")
+                # SDK loads skills automatically from skill_directories
+                progress.step("initialize", "Configuring skills")
                 if self.skills_dir and self.skills_dir.exists():
                     session_config["skill_directories"] = [str(self.skills_dir)]
-                    progress.info(f"Skills directory: {self.skills_dir}")
-
-                    # Load skills locally for reference/logging
-                    self.skill_loader.load_skills()
-                    skill_names = list(self.skill_loader.skills.keys())
-                    progress.info(f"Skills available: {skill_names}")
+                    progress.info(f"Skills directory configured: {self.skills_dir}")
                 else:
                     progress.warning("No skills directory found")
 
@@ -303,14 +279,15 @@ class BRDGenerator:
         else:
             progress.warning("Copilot SDK not available - using mock mode")
 
-        # Step 4: Initialize context aggregator
+        # Step 3: Initialize context aggregator with Copilot session for agentic queries
         progress.step("initialize", "Creating context aggregator")
         self.aggregator = ContextAggregator(
             self.neo4j_client,
             self.filesystem_client,
+            copilot_session=self._copilot_session,  # Enable agentic context gathering
         )
 
-        # Step 5: Initialize synthesizer
+        # Step 4: Initialize synthesizer
         progress.step("initialize", "Creating LLM synthesizer")
         templates_dir = self.templates_dir or Path(__file__).parent.parent / "templates"
 
@@ -318,7 +295,6 @@ class BRDGenerator:
             session=self._copilot_session,
             templates_dir=templates_dir,
             model=self._get_copilot_model(self.copilot_model),
-            tool_registry=self.tool_registry,
             template_config=self.template_config,
         )
 
@@ -333,13 +309,17 @@ class BRDGenerator:
         """
         PHASE 1: Generate BRD only (without Epics/Stories).
 
-        This is the first step in the separated flow. Users review the BRD
-        and then invoke generate_epics_from_brd() when satisfied.
+        SKILLS-ONLY ARCHITECTURE:
+        The Copilot SDK handles everything via skills:
+        1. SDK loads skill from skill_directories
+        2. Skill instructs LLM to use MCP tools (Neo4j, Filesystem)
+        3. LLM gathers context and generates BRD in one unified session
+        4. No manual context aggregation - skills do it all
 
         Args:
             request: BRD generation request
-            use_skill: If True, use Copilot skills with MCP tools.
-                      If False, use template-based approach.
+            use_skill: If True, use Copilot skills (recommended).
+                      If False, falls back to template-based approach.
 
         Returns:
             BRDOutput containing only the BRD document
@@ -347,53 +327,83 @@ class BRDGenerator:
         if not self._initialized:
             await self.initialize()
 
-        mode_desc = "Skill-based (automatic)" if use_skill else "Template-based"
         progress.start_operation("PHASE 1: Generate BRD", f"Feature: {request.feature_description[:50]}...")
-        progress.info(f"Generation mode: {mode_desc}")
 
-        # Step 1: Build context from MCP servers
-        progress.step("generate_brd", "Building context from codebase", current=1, total=3)
-        progress.info("Querying Neo4j code graph and reading source files...")
-        context = await self.aggregator.build_context(
-            request=request.feature_description,
-            affected_components=request.affected_components,
-            include_similar=request.include_similar_features,
-        )
-        progress.info(
-            f"Context built",
-            components=len(context.architecture.components),
-            files=len(context.implementation.key_files),
-            tokens=context.estimated_tokens
-        )
+        if use_skill and self._copilot_session is not None:
+            # SKILLS-ONLY FLOW: SDK handles everything
+            # 1. Simple prompt triggers the generate-brd skill
+            # 2. Skill instructs LLM to use MCP tools
+            # 3. LLM gathers context and generates BRD in one session
+            progress.info("Using skills-only architecture - SDK handles all MCP calls")
+            progress.step("generate_brd", "Triggering generate-brd skill", current=1, total=2)
+            logger.info("[SKILLS-ONLY] Sending prompt to trigger skill - SDK handles MCP tools")
 
-        # Step 2: Generate BRD using Copilot SDK
-        progress.step("generate_brd", "Generating BRD document with LLM", current=2, total=3)
-        brd = await self.synthesizer.generate_brd(context, use_skill=use_skill)
-        progress.info(f"BRD generated: {brd.title}")
+            brd = await self.synthesizer.generate_brd_with_skill(
+                feature_request=request.feature_description,
+                affected_components=request.affected_components,
+            )
+            progress.info(f"BRD generated: {brd.title}")
 
-        # Step 3: Build output
-        progress.step("generate_brd", "Building output", current=3, total=3)
-        output = BRDOutput(
-            brd=brd,
-            epics=[],  # Empty - generated in Phase 2
-            backlogs=[],  # Empty - generated in Phase 2
-            metadata={
-                "copilot_model": self.copilot_model,
-                "copilot_available": self._copilot_session is not None,
-                "generation_mode": "skill-based" if use_skill else "template-based",
-                "phase": "brd_only",
-                "files_analyzed": len(context.implementation.key_files),
-                "components_found": len(context.architecture.components),
-                "mcp_servers": ["filesystem", "neo4j-code-graph"],
-            },
-        )
+            # Build output
+            progress.step("generate_brd", "Building output", current=2, total=2)
+            output = BRDOutput(
+                brd=brd,
+                epics=[],
+                backlogs=[],
+                metadata={
+                    "copilot_model": self.copilot_model,
+                    "copilot_available": True,
+                    "generation_mode": "skills-only",
+                    "phase": "brd_only",
+                    "mcp_servers": ["filesystem", "neo4j-code-graph"],
+                    "architecture": "skills-only (SDK handles everything)",
+                },
+            )
 
-        progress.end_operation(
-            "PHASE 1: Generate BRD",
-            success=True,
-            details=f"Generated '{brd.title}' with {len(context.implementation.key_files)} files analyzed"
-        )
-        return output
+            progress.end_operation(
+                "PHASE 1: Generate BRD",
+                success=True,
+                details=f"Generated '{brd.title}' via skill"
+            )
+            return output
+
+        else:
+            # FALLBACK: Template-based with manual context (when SDK unavailable)
+            progress.info("SDK unavailable - using template-based fallback")
+            progress.step("generate_brd", "Building context from codebase", current=1, total=3)
+            logger.info("[FALLBACK] Using template-based generation with manual context")
+
+            context = await self.aggregator.build_context(
+                request=request.feature_description,
+                affected_components=request.affected_components,
+                include_similar=request.include_similar_features,
+            )
+
+            progress.step("generate_brd", "Generating BRD document", current=2, total=3)
+            brd = await self.synthesizer.generate_brd(context, use_skill=False)
+
+            progress.step("generate_brd", "Building output", current=3, total=3)
+            output = BRDOutput(
+                brd=brd,
+                epics=[],
+                backlogs=[],
+                metadata={
+                    "copilot_model": self.copilot_model,
+                    "copilot_available": False,
+                    "generation_mode": "template-based",
+                    "phase": "brd_only",
+                    "files_analyzed": len(context.implementation.key_files),
+                    "components_found": len(context.architecture.components),
+                    "architecture": "fallback (manual context)",
+                },
+            )
+
+            progress.end_operation(
+                "PHASE 1: Generate BRD",
+                success=True,
+                details=f"Generated '{brd.title}'"
+            )
+            return output
 
     async def generate_epics_from_brd(
         self,
@@ -740,14 +750,9 @@ class BRDGenerator:
                 }
 
                 # skill_directories: List[str] - directories to load skills from
+                # SDK loads skills natively from these directories
                 if self.skills_dir and self.skills_dir.exists():
                     session_config["skill_directories"] = [str(self.skills_dir)]
-
-                # Add tools from tool_registry for SDK auto-execution
-                if self.tool_registry is not None:
-                    tools = self.tool_registry.get_tool_definitions()
-                    if tools:
-                        session_config["tools"] = tools
 
                 session = await self._copilot_client.create_session(session_config)
                 logger.info(
@@ -760,13 +765,14 @@ class BRDGenerator:
                 )
                 session = self._copilot_session
 
-        # Create repository-scoped aggregator
+        # Create repository-scoped aggregator with Copilot session for agentic queries
         repo_filesystem_client = FilesystemMCPClient(workspace_root=workspace_root)
         await repo_filesystem_client.connect()
 
         repo_aggregator = ContextAggregator(
             self.neo4j_client,
             repo_filesystem_client,
+            copilot_session=session,  # Enable agentic context gathering
         )
 
         # Build context
@@ -782,7 +788,6 @@ class BRDGenerator:
             session=session,
             templates_dir=templates_dir,
             model=self._get_copilot_model(self.copilot_model),
-            tool_registry=self.tool_registry,
             template_config=self.template_config,
         )
 
@@ -975,9 +980,13 @@ class BRDGenerator:
             return {}
 
     def _get_copilot_model(self, model_name: str) -> str:
-        """Map model names to Copilot CLI model names."""
+        """Map model names to Copilot CLI model names.
+
+        Note: Claude models require Copilot Pro/Business/Enterprise subscription.
+        If Claude models fail, GPT-4 is used as fallback (available on all tiers).
+        """
         model_mapping = {
-            # Claude 4.5 models
+            # Claude 4.5 models (requires Copilot Pro+)
             "claude-sonnet-4-5": "claude-sonnet-4.5",
             "claude-4-5-sonnet": "claude-sonnet-4.5",
             "claude-sonnet-4.5": "claude-sonnet-4.5",
@@ -994,13 +1003,17 @@ class BRDGenerator:
             # Claude 4 Sonnet
             "claude-sonnet-4": "claude-sonnet-4",
             "sonnet-4": "claude-sonnet-4",
-            # GPT models
+            # GPT models (available on all Copilot tiers)
+            "gpt-4o": "gpt-4o",
+            "gpt-4": "gpt-4o",
+            "gpt-4.1": "gpt-4.1",
             "gpt-5": "gpt-5",
             "gpt-5.1": "gpt-5.1",
             "gpt-5.2": "gpt-5.2",
-            "gpt-4.1": "gpt-4.1",
             # Gemini
             "gemini-3-pro": "gemini-3-pro-preview",
+            # Default fallback (available on all tiers)
+            "default": "gpt-4o",
         }
 
         if model_name.lower() in model_mapping:
@@ -1011,14 +1024,15 @@ class BRDGenerator:
             "claude-sonnet-4.5", "claude-haiku-4.5", "claude-opus-4.5",
             "claude-sonnet-4", "gpt-5.2-codex", "gpt-5.1-codex-max",
             "gpt-5.1-codex", "gpt-5.2", "gpt-5.1", "gpt-5",
-            "gpt-5.1-codex-mini", "gpt-5-mini", "gpt-4.1",
+            "gpt-5.1-codex-mini", "gpt-5-mini", "gpt-4.1", "gpt-4o",
             "gemini-3-pro-preview"
         ]
         if model_name in valid_models:
             return model_name
 
-        logger.warning(f"Unknown model '{model_name}', defaulting to claude-sonnet-4.5")
-        return "claude-sonnet-4.5"
+        # Default to GPT-4o which is available on all Copilot tiers
+        logger.warning(f"Unknown model '{model_name}', defaulting to gpt-4o (works on all tiers)")
+        return "gpt-4o"
 
     async def __aenter__(self) -> "BRDGenerator":
         """Async context manager entry."""

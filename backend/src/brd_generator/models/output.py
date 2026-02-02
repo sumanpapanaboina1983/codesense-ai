@@ -39,8 +39,14 @@ class BRDDocument(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
 
+    # Store raw LLM-generated markdown to preserve full content
+    raw_markdown: Optional[str] = None
+
     def to_markdown(self) -> str:
-        """Convert to Markdown format."""
+        """Convert to Markdown format. Returns raw markdown if available."""
+        # If we have raw LLM-generated markdown, return it (preserves full content)
+        if self.raw_markdown:
+            return self.raw_markdown
         lines = [
             f"# Business Requirements Document: {self.title}",
             "",

@@ -54,6 +54,50 @@ class GenerationApproach(str, Enum):
     AUTO = "auto"
 
 
+class DetailLevel(str, Enum):
+    """Detail level for BRD output - controls verbosity and depth.
+
+    CONCISE: Brief, executive-summary style output.
+        - 1-2 paragraphs per section
+        - Bullet points preferred
+        - Focus on key points only
+        - Good for quick reviews or presentations
+
+    STANDARD: Balanced detail level (default).
+        - 2-4 paragraphs per section
+        - Mix of prose and bullets
+        - Includes examples and explanations
+        - Good for most use cases
+
+    DETAILED: Comprehensive, thorough documentation.
+        - Full explanations with all details
+        - Extensive code references
+        - Complete acceptance criteria
+        - Good for formal documentation or compliance
+    """
+
+    CONCISE = "concise"
+    STANDARD = "standard"
+    DETAILED = "detailed"
+
+
+class BRDSection(BaseModel):
+    """Custom section definition for BRD output."""
+
+    name: str = Field(
+        ...,
+        description="Section name (e.g., 'Executive Summary', 'Functional Requirements')"
+    )
+    description: Optional[str] = Field(
+        None,
+        description="Brief description of what this section should contain"
+    )
+    required: bool = Field(
+        True,
+        description="Whether this section is required in the output"
+    )
+
+
 # =============================================================================
 # Phase 1: Generate BRD - Request/Response Models
 # =============================================================================
@@ -126,6 +170,39 @@ class SufficiencyCriteria(BaseModel):
         3,
         ge=1,
         description="Minimum number of dimensions to cover before generating"
+    )
+
+
+class VerificationLimits(BaseModel):
+    """Dynamic limits for verification queries in verified mode.
+
+    Configure how many entities, patterns, and results to process during
+    claim verification. Higher values = more thorough but slower.
+    """
+
+    max_entities_per_claim: int = Field(
+        10,
+        ge=1,
+        le=50,
+        description="Maximum entities to verify per claim"
+    )
+    max_patterns_per_claim: int = Field(
+        5,
+        ge=1,
+        le=20,
+        description="Maximum patterns to search per claim"
+    )
+    results_per_query: int = Field(
+        20,
+        ge=5,
+        le=100,
+        description="Maximum results returned per Neo4j query"
+    )
+    code_refs_per_evidence: int = Field(
+        10,
+        ge=1,
+        le=50,
+        description="Maximum code references to include per evidence item"
     )
 
 
@@ -244,6 +321,34 @@ class GenerateBRDRequest(BaseModel):
         description="Search for similar features in codebase"
     )
 
+    # Output control
+    detail_level: DetailLevel = Field(
+        DetailLevel.STANDARD,
+        description="""
+        Controls the verbosity and depth of the generated BRD:
+        - 'concise': Brief, executive-summary style (1-2 paragraphs per section)
+        - 'standard': Balanced detail level (default)
+        - 'detailed': Comprehensive documentation with full explanations
+        """
+    )
+
+    # Custom sections (simpler alternative to full template)
+    sections: Optional[list[BRDSection]] = Field(
+        None,
+        description="""
+        Custom sections to include in the BRD. If not provided, default sections are used.
+
+        Example:
+        [
+            {"name": "Executive Summary", "required": true},
+            {"name": "Current Implementation", "description": "Document existing code", "required": true},
+            {"name": "Data Flow", "description": "How data moves through the system", "required": false}
+        ]
+
+        If you want full control over format, use 'brd_template' instead.
+        """
+    )
+
     # Template-driven BRD generation (THE KEY FIELD)
     brd_template: Optional[str] = Field(
         None,
@@ -310,6 +415,22 @@ class GenerateBRDRequest(BaseModel):
         - Validation Rules (optional)
         - Error Handling (optional)
         - Dependencies (optional)
+        """
+    )
+
+    # Verification query limits (VERIFIED mode only)
+    verification_limits: Optional[VerificationLimits] = Field(
+        None,
+        description="""
+        Dynamic limits for verification queries (VERIFIED mode only).
+
+        Configure how thoroughly claims are verified:
+        - max_entities_per_claim: Entities to verify per claim (default: 10)
+        - max_patterns_per_claim: Patterns to search per claim (default: 5)
+        - results_per_query: Results per Neo4j query (default: 20)
+        - code_refs_per_evidence: Code refs per evidence item (default: 10)
+
+        Higher values = more thorough verification but slower.
         """
     )
 

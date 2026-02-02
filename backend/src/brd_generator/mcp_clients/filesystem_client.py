@@ -96,6 +96,10 @@ class FilesystemMCPClient(MCPClient):
         if not self._connected:
             raise MCPToolError("Filesystem MCP client not connected")
 
+        # Log MCP tool invocation
+        logger.info(f"[MCP-TOOL] Filesystem tool invoked: {tool_name}")
+        logger.info(f"[MCP-TOOL] Parameters: {parameters}")
+
         # Map tool names to HTTP endpoints
         tool_handlers = {
             "read_file": self._read_file,
@@ -109,7 +113,10 @@ class FilesystemMCPClient(MCPClient):
         if not handler:
             raise MCPToolError(f"Unknown tool: {tool_name}")
 
-        return await handler(**parameters)
+        result = await handler(**parameters)
+        result_preview = str(result)[:300] if result else "None"
+        logger.info(f"[MCP-TOOL] Result preview: {result_preview}...")
+        return result
 
     def _resolve_path(self, path: str) -> str:
         """Resolve path relative to workspace root."""
