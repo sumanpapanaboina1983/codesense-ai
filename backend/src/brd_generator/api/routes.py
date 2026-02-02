@@ -283,6 +283,38 @@ async def health_check() -> HealthResponse:
 
 
 # =============================================================================
+# Default Template Endpoint
+# =============================================================================
+
+@router.get(
+    "/brd/template/default",
+    tags=["BRD Generation"],
+    summary="Get the default BRD template",
+    response_model=dict,
+)
+async def get_default_template() -> dict:
+    """
+    Get the default BRD template that the system uses.
+
+    Returns the template content and metadata.
+    """
+    templates_dir = Path(__file__).parent.parent / "templates"
+    template_path = templates_dir / "brd-template.md"
+
+    if not template_path.exists():
+        raise HTTPException(status_code=404, detail="Default template not found")
+
+    template_content = template_path.read_text()
+
+    return {
+        "success": True,
+        "template": template_content,
+        "name": "Default BRD Template",
+        "description": "Business-focused template with 8 sections: Feature Overview, Functional Requirements, Business Validations, Actors & Interactions, Process Flow, Sequence Diagram, Assumptions & Constraints, and Acceptance Criteria.",
+    }
+
+
+# =============================================================================
 # Progress Queue for Streaming
 # =============================================================================
 
@@ -694,6 +726,7 @@ async def _generate_brd_verified_stream(
                 detail_level=request.detail_level.value,  # Pass detail level
                 custom_sections=custom_sections_verified,  # Pass custom sections
                 verification_limits=verification_limits_dict,  # Pass verification limits
+                progress_callback=progress_callback,  # Pass progress callback for streaming updates
             )
 
             # Run multi-agent generation
@@ -733,9 +766,14 @@ async def _generate_brd_verified_stream(
         "database": "🗄️",
         "context": "📊",
         "template": "📋",
+        "config": "⚙️",
         "agents": "🤖",
         "generator": "📝",
+        "section": "📄",
+        "section_complete": "✅",
         "verifier": "🔬",
+        "claims": "📋",
+        "verifying": "🔍",
         "feedback": "🔄",
         "complete": "✅",
     }

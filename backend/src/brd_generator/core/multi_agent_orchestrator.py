@@ -41,6 +41,11 @@ from ..models.verification import (
 from ..mcp_clients.neo4j_client import Neo4jMCPClient
 from ..mcp_clients.filesystem_client import FilesystemMCPClient
 from ..utils.logger import get_logger, get_progress_logger
+from typing import Callable, Awaitable
+
+# Type alias for progress callback
+ProgressCallback = Callable[[str, str], Awaitable[None]]
+
 from .brd_best_practices import (
     BRD_BEST_PRACTICES,
     DEFAULT_BRD_SECTIONS,
@@ -129,6 +134,7 @@ class MultiAgentOrchestrator:
         detail_level: str = "standard",
         custom_sections: Optional[list[dict]] = None,
         verification_limits: Optional[dict] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ):
         """
         Initialize the orchestrator.
@@ -141,6 +147,7 @@ class MultiAgentOrchestrator:
             max_iterations: Max regeneration attempts per section
             show_evidence_by_default: Include evidence in output
             parsed_template: Custom BRD template
+            progress_callback: Optional callback for streaming progress updates
             sufficiency_criteria: Custom criteria for what makes a complete analysis.
                 Structure:
                 {
@@ -199,6 +206,9 @@ class MultiAgentOrchestrator:
         self.verification_limits = {**default_limits, **(verification_limits or {})}
         logger.info(f"Verification limits: {self.verification_limits}")
 
+        # Progress callback for streaming updates to UI
+        self._progress_callback = progress_callback
+
         # Get sections from template, custom_sections, or defaults (from best practices)
         if custom_sections:
             self.sections = [s.get("name", f"Section {i}") for i, s in enumerate(custom_sections, 1)]
@@ -238,6 +248,14 @@ class MultiAgentOrchestrator:
         """Initialize is now a no-op since we use SDK directly."""
         logger.info("Orchestrator ready (using Copilot SDK's native agentic loop)")
 
+    async def _emit_progress(self, step: str, detail: str) -> None:
+        """Emit progress event to callback if available."""
+        if self._progress_callback:
+            try:
+                await self._progress_callback(step, detail)
+            except Exception as e:
+                logger.warning(f"Progress callback failed: {e}")
+
     async def generate_verified_brd(
         self,
         context: AggregatedContext,
@@ -269,6 +287,9 @@ class MultiAgentOrchestrator:
         logger.info(f"Max iterations per section: {self.max_iterations}")
         logger.info(f"Min confidence: {self.verification_config.min_confidence_for_approval}")
 
+        # Emit initial progress
+        await self._emit_progress("generator", f"📋 Starting generation: {len(self.sections)} sections to process")
+
         # Reset state
         self.section_contents = {}
         self.section_evidence = {}
@@ -284,6 +305,7 @@ class MultiAgentOrchestrator:
                 logger.info("=" * 70)
 
                 progress.step("BRD Generation", f"Processing section: {section_name}")
+                await self._emit_progress("section", f"📝 Section {section_idx}/{len(self.sections)}: {section_name}")
 
                 # Generate and verify this section
                 section_result = await self._process_section(
@@ -314,6 +336,13 @@ class MultiAgentOrchestrator:
                 # Log section summary
                 status = "✓ VERIFIED" if evidence.overall_confidence >= self.verification_config.min_confidence_for_approval else "⚠ PARTIAL"
                 logger.info(f"[{section_name}] {status} (confidence: {evidence.overall_confidence:.1%}, claims: {evidence.verified_claims}/{evidence.total_claims})")
+
+                # Emit section completion progress
+                status_icon = "✅" if evidence.overall_confidence >= self.verification_config.min_confidence_for_approval else "⚠️"
+                await self._emit_progress(
+                    "section_complete",
+                    f"{status_icon} {section_name}: {evidence.verified_claims}/{evidence.total_claims} claims verified ({evidence.overall_confidence:.0%} confidence)"
+                )
 
             # Combine all sections into final BRD
             logger.info("")
@@ -390,8 +419,13 @@ class MultiAgentOrchestrator:
             logger.info(f"[{section_name}] Iteration {iteration}/{self.max_iterations}")
             logger.info("-" * 50)
 
+            # Emit iteration progress
+            if iteration > 1:
+                await self._emit_progress("feedback", f"🔄 Regenerating {section_name} (attempt {iteration}/{self.max_iterations})")
+
             # Step 1: Generate section
             logger.info(f"[{section_name}] Generating content...")
+            await self._emit_progress("generator", f"✍️ Generating content for: {section_name}")
             content = await self._generate_section(
                 section_name=section_name,
                 context=context,
@@ -402,6 +436,7 @@ class MultiAgentOrchestrator:
 
             # Step 2: Extract and verify claims
             logger.info(f"[{section_name}] Extracting and verifying claims...")
+            await self._emit_progress("verifier", f"🔬 Verifying claims in: {section_name}")
             evidence = await self._verify_section(
                 section_name=section_name,
                 content=content,
@@ -477,8 +512,13 @@ class MultiAgentOrchestrator:
         claims = await self._extract_claims(section_name, content)
         logger.info(f"[{section_name}] Extracted {len(claims)} claims for verification")
 
+        # Emit claims extraction progress
+        await self._emit_progress("claims", f"📋 Extracted {len(claims)} claims from {section_name}")
+
         # Step 2: Verify each claim using direct MCP client queries
-        for claim in claims:
+        verified_count = 0
+        total_claims = len(claims)
+        for idx, claim in enumerate(claims, 1):
             await self._verify_claim_direct(claim, context)
             # IMPORTANT: If no evidence was found, ensure confidence is 0
             # (recalculate_confidence only runs when evidence is added)
@@ -486,6 +526,15 @@ class MultiAgentOrchestrator:
                 claim.confidence_score = 0.0
                 claim.status = VerificationStatus.UNVERIFIED
                 claim.hallucination_risk = HallucinationRisk.HIGH
+            else:
+                verified_count += 1
+
+            # Emit progress every few claims (to avoid flooding)
+            if idx == total_claims or idx % 3 == 0:
+                await self._emit_progress(
+                    "verifying",
+                    f"🔍 Verifying claims: {idx}/{total_claims} ({verified_count} verified)"
+                )
 
         # Step 3: Build section verification result
         result = SectionVerificationResult(
@@ -1359,6 +1408,7 @@ class VerifiedBRDGenerator:
         detail_level: str = "standard",
         custom_sections: Optional[list[dict]] = None,
         verification_limits: Optional[dict] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ):
         self.orchestrator = MultiAgentOrchestrator(
             copilot_session=copilot_session,
@@ -1371,6 +1421,7 @@ class VerifiedBRDGenerator:
             detail_level=detail_level,
             custom_sections=custom_sections,
             verification_limits=verification_limits,
+            progress_callback=progress_callback,
         )
         self._last_output: Optional[BRDOutput] = None
 

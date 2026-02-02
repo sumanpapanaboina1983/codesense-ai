@@ -22,7 +22,7 @@ const codegraphApi = axios.create({
 });
 
 const backendApi = axios.create({
-  baseURL: BACKEND_API_URL,
+  baseURL: `${BACKEND_API_URL}/api/v1`,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -85,15 +85,138 @@ export interface BRDTemplateConfig {
   custom_sections?: string[];
 }
 
+// =============================================================================
+// Enums for BRD Generation
+// =============================================================================
+
+export type GenerationMode = 'draft' | 'verified';
+export type GenerationApproach = 'context_first' | 'skills_only' | 'auto';
+export type DetailLevel = 'concise' | 'standard' | 'detailed';
+
+// =============================================================================
+// Sufficiency Criteria for Context Gathering
+// =============================================================================
+
+export interface SufficiencyDimension {
+  name: string;
+  description: string;
+  required: boolean;
+  min_evidence?: number;
+}
+
+export interface SufficiencyCriteria {
+  dimensions?: SufficiencyDimension[];
+  min_required_dimensions?: number;
+  min_total_evidence?: number;
+}
+
+// =============================================================================
+// Verification Limits
+// =============================================================================
+
+export interface VerificationLimits {
+  max_entities_per_claim?: number;
+  max_patterns_per_claim?: number;
+  results_per_query?: number;
+  code_refs_per_evidence?: number;
+}
+
+// =============================================================================
+// Custom BRD Section
+// =============================================================================
+
+export interface BRDSection {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+// =============================================================================
+// Verification Report Types
+// =============================================================================
+
+export interface ClaimVerificationDetail {
+  claim_id: string;
+  claim_text: string;
+  section: string;
+  status: 'verified' | 'partially_verified' | 'unverified' | 'contradicted';
+  confidence: number;
+  is_verified: boolean;
+  hallucination_risk: 'low' | 'medium' | 'high';
+  needs_sme_review: boolean;
+  evidence_count: number;
+  evidence_types: string[];
+}
+
+export interface SectionVerificationReport {
+  section_name: string;
+  status: 'verified' | 'partially_verified' | 'unverified' | 'contradicted';
+  confidence: number;
+  hallucination_risk: string;
+  total_claims: number;
+  verified_claims: number;
+  partially_verified_claims: number;
+  unverified_claims: number;
+  contradicted_claims: number;
+  claims_needing_sme: number;
+  verification_rate: number;
+  claims: ClaimVerificationDetail[];
+}
+
+export interface VerificationReport {
+  brd_id: string;
+  brd_title: string;
+  generated_at: string;
+  overall_status: 'verified' | 'partially_verified' | 'unverified';
+  overall_confidence: number;
+  hallucination_risk: string;
+  is_approved: boolean;
+  total_claims: number;
+  verified_claims: number;
+  partially_verified_claims: number;
+  unverified_claims: number;
+  contradicted_claims: number;
+  claims_needing_sme: number;
+  verification_rate: number;
+  sections: SectionVerificationReport[];
+}
+
+// =============================================================================
+// BRD Generation Request
+// =============================================================================
+
 export interface GenerateBRDRequest {
   feature_description: string;
+
+  // Generation mode selection
+  mode?: GenerationMode;  // default: 'draft'
+
+  // Generation approach selection
+  approach?: GenerationApproach;  // default: 'auto'
+
   affected_components?: string[];
-  include_similar_features?: boolean;
+  include_similar_features?: boolean;  // default: true
+
+  // Output control
+  detail_level?: DetailLevel;  // default: 'standard'
+
+  // Custom sections
+  sections?: BRDSection[];
+
+  // Template-driven BRD generation
+  brd_template?: string;
   template_config?: BRDTemplateConfig;
-  // Multi-agent verification settings (always enabled)
-  max_iterations?: number;  // default: 3, range: 1-5
+
+  // Multi-agent verification settings (VERIFIED mode only)
+  max_iterations?: number;  // default: 3, range: 1-10
   min_confidence?: number;  // default: 0.7, range: 0-1
   show_evidence?: boolean;  // default: false
+
+  // Sufficiency criteria
+  sufficiency_criteria?: SufficiencyCriteria;
+
+  // Verification query limits (VERIFIED mode only)
+  verification_limits?: VerificationLimits;
 }
 
 export interface StreamEvent {
@@ -105,16 +228,25 @@ export interface StreamEvent {
 export interface GenerateBRDResponse {
   success: boolean;
   brd: BRDResponse;
-  // Verification metrics (always included since multi-agent is always on)
-  is_verified: boolean;
-  confidence_score: number;
-  hallucination_risk: string;
-  iterations_used: number;
-  // Evidence trail (only if show_evidence=true)
+
+  // Generation mode used
+  mode: GenerationMode;
+
+  // Verification metrics (populated in VERIFIED mode, may be null in DRAFT)
+  is_verified?: boolean;
+  confidence_score?: number;
+  hallucination_risk?: string;
+  iterations_used?: number;
+
+  // Complete verification report (VERIFIED mode only)
+  verification_report?: VerificationReport;
+
+  // Evidence trail (only if show_evidence=true in VERIFIED mode)
   evidence_trail?: Record<string, any>;
   evidence_trail_text?: string;
+
   // SME review
-  needs_sme_review: boolean;
+  needs_sme_review?: boolean;
   sme_review_claims?: Array<{
     claim_id: string;
     text: string;
@@ -125,6 +257,10 @@ export interface GenerateBRDResponse {
     needs_sme_review: boolean;
     evidence_count: number;
   }>;
+
+  // Draft mode warning
+  draft_warning?: string;
+
   metadata?: Record<string, any>;
 }
 
@@ -238,6 +374,19 @@ export async function getAnalyzedRepositories(): Promise<RepositorySummary[]> {
   return response.data.data;
 }
 
+// Get default BRD template
+export interface DefaultTemplateResponse {
+  success: boolean;
+  template: string;
+  name: string;
+  description: string;
+}
+
+export async function getDefaultTemplate(): Promise<DefaultTemplateResponse> {
+  const response = await backendApi.get<DefaultTemplateResponse>('/brd/template/default');
+  return response.data;
+}
+
 // Generate BRD with streaming (SSE) - Multi-agent verification always enabled
 export async function generateBRDStream(
   repositoryId: string,
@@ -245,7 +394,7 @@ export async function generateBRDStream(
   onEvent: (event: StreamEvent) => void,
   onError?: (error: Error) => void
 ): Promise<void> {
-  const url = `${BACKEND_API_URL}/brd/generate/${repositoryId}`;
+  const url = `${BACKEND_API_URL}/api/v1/brd/generate/${repositoryId}`;
 
   try {
     const response = await fetch(url, {

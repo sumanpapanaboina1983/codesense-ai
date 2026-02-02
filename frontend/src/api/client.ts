@@ -1,8 +1,6 @@
 import axios from 'axios';
 import type {
   Repository,
-  BRDRequest,
-  BRD,
   Epic,
   EpicGenerationRequest,
   UserStory,
@@ -13,10 +11,11 @@ import type {
   AnalysisRun,
 } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
+// Use the backend proxy URL that works both in development and Docker
+const API_BASE_URL = import.meta.env.VITE_BACKEND_API_URL || '/backend';
 
 const api = axios.create({
-  baseURL: API_BASE_URL,
+  baseURL: `${API_BASE_URL}/api/v1`,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -37,12 +36,14 @@ export const getRepositories = async (params?: {
   offset?: number;
 }): Promise<Repository[]> => {
   const response = await api.get('/repositories', { params });
-  return response.data;
+  // API returns { success: true, data: [...] }
+  return response.data.data || response.data;
 };
 
 export const getRepository = async (id: string): Promise<Repository> => {
   const response = await api.get(`/repositories/${id}`);
-  return response.data;
+  // API returns { success: true, data: {...} }
+  return response.data.data || response.data;
 };
 
 export const createRepository = async (data: {
