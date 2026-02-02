@@ -138,3 +138,189 @@ export interface AnalysisRun {
   nodes_created?: number;
   relationships_created?: number;
 }
+
+// =============================================================================
+// Agentic Readiness Types
+// =============================================================================
+
+export type ReadinessGrade = 'A' | 'B' | 'C' | 'D' | 'F';
+
+export interface TestingCoverage {
+  percentage: number;
+  grade: ReadinessGrade;
+}
+
+export interface TestQuality {
+  has_unit_tests: boolean;
+  has_integration_tests: boolean;
+  has_e2e_tests: boolean;
+  frameworks: string[];
+}
+
+export interface UntestedCriticalFunction {
+  entity_id: string;
+  name: string;
+  file_path: string;
+  reason: string;
+  stereotype?: string;
+}
+
+export interface TestingReadiness {
+  overall_grade: ReadinessGrade;
+  overall_score: number;
+  coverage: TestingCoverage;
+  untested_critical_functions: UntestedCriticalFunction[];
+  test_quality: TestQuality;
+  recommendations: string[];
+}
+
+export interface DocumentationCoverage {
+  percentage: number;
+  grade: ReadinessGrade;
+}
+
+export interface UndocumentedPublicApi {
+  entity_id: string;
+  name: string;
+  file_path: string;
+  kind: string;
+  signature?: string;
+}
+
+export interface DocumentationQualityDistribution {
+  excellent: number;
+  good: number;
+  partial: number;
+  minimal: number;
+  none: number;
+}
+
+export interface DocumentationReadiness {
+  overall_grade: ReadinessGrade;
+  overall_score: number;
+  coverage: DocumentationCoverage;
+  public_api_coverage: DocumentationCoverage;
+  undocumented_public_apis: UndocumentedPublicApi[];
+  quality_distribution: DocumentationQualityDistribution;
+  recommendations: string[];
+}
+
+export interface ReadinessRecommendation {
+  priority: 'high' | 'medium' | 'low';
+  category: 'testing' | 'documentation';
+  title: string;
+  description: string;
+  affected_count: number;
+  affected_entities?: string[];
+  estimated_effort?: 'low' | 'medium' | 'high';
+}
+
+export interface EnrichmentAction {
+  id: string;
+  name: string;
+  description: string;
+  affected_entities: number;
+  category: 'documentation' | 'testing';
+  is_automated: boolean;
+}
+
+export interface ReadinessSummary {
+  total_entities: number;
+  tested_entities: number;
+  documented_entities: number;
+  critical_gaps: number;
+}
+
+export interface AgenticReadinessReport {
+  success: boolean;
+  repository_id: string;
+  repository_name: string;
+  generated_at: string;
+  overall_grade: ReadinessGrade;
+  overall_score: number;
+  is_agentic_ready: boolean;
+  testing: TestingReadiness;
+  documentation: DocumentationReadiness;
+  recommendations: ReadinessRecommendation[];
+  enrichment_actions: EnrichmentAction[];
+  summary: ReadinessSummary;
+}
+
+// =============================================================================
+// Feature Discovery Types
+// =============================================================================
+
+export type FeatureCategory = 'user-facing' | 'admin' | 'internal' | 'api-only';
+export type FeatureComplexity = 'simple' | 'moderate' | 'complex';
+
+export interface DiscoveredFeature {
+  entity_id: string;
+  feature_name: string;
+  description: string;
+  category: FeatureCategory;
+  confidence: number;
+  ui_entry_points: string[];
+  api_endpoints: string[];
+  services: string[];
+  database_entities: string[];
+  complexity: FeatureComplexity;
+  trace_path: string[];
+}
+
+export interface FeatureDiscoveryResult {
+  features: DiscoveredFeature[];
+  unmapped_endpoints: string[];
+  unmapped_routes: string[];
+  stats: {
+    total_features: number;
+    by_category: Record<FeatureCategory, number>;
+    by_complexity: Record<FeatureComplexity, number>;
+    coverage_percent: number;
+  };
+}
+
+// =============================================================================
+// Enrichment Types
+// =============================================================================
+
+export type DocumentationStyle = 'jsdoc' | 'javadoc' | 'docstring' | 'xmldoc' | 'godoc';
+export type TestType = 'unit' | 'integration';
+
+export interface DocumentationEnrichmentRequest {
+  entity_ids: string[] | 'all-undocumented';
+  style: DocumentationStyle;
+  include_examples: boolean;
+  include_parameters: boolean;
+  include_returns: boolean;
+  include_throws: boolean;
+  max_entities?: number;
+}
+
+export interface TestEnrichmentRequest {
+  entity_ids: string[] | 'all-untested';
+  framework: string;
+  test_types: TestType[];
+  include_mocks: boolean;
+  include_edge_cases: boolean;
+  max_entities?: number;
+}
+
+export interface GeneratedContent {
+  entity_id: string;
+  entity_name: string;
+  file_path: string;
+  content: string;
+  insert_position: { line: number; column: number };
+  content_type: 'documentation' | 'test';
+  is_new_file: boolean;
+}
+
+export interface EnrichmentResult {
+  success: boolean;
+  entities_processed: number;
+  entities_enriched: number;
+  entities_skipped: number;
+  generated_content: GeneratedContent[];
+  errors: { entity_id: string; error: string }[];
+  enrichment_type: 'documentation' | 'testing';
+}

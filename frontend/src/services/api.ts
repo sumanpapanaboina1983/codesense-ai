@@ -308,4 +308,165 @@ export async function generateEpics(request: GenerateEpicsRequest): Promise<Gene
   return response.data;
 }
 
+// =============================================================================
+// Agentic Readiness API
+// =============================================================================
+
+export interface AgenticReadinessResponse {
+  success: boolean;
+  repository_id: string;
+  repository_name: string;
+  generated_at: string;
+  overall_grade: 'A' | 'B' | 'C' | 'D' | 'F';
+  overall_score: number;
+  is_agentic_ready: boolean;
+  testing: {
+    overall_grade: string;
+    overall_score: number;
+    coverage: { percentage: number; grade: string };
+    untested_critical_functions: Array<{
+      entity_id: string;
+      name: string;
+      file_path: string;
+      reason: string;
+      stereotype?: string;
+    }>;
+    test_quality: {
+      has_unit_tests: boolean;
+      has_integration_tests: boolean;
+      has_e2e_tests: boolean;
+      frameworks: string[];
+    };
+    recommendations: string[];
+  };
+  documentation: {
+    overall_grade: string;
+    overall_score: number;
+    coverage: { percentage: number; grade: string };
+    public_api_coverage: { percentage: number; grade: string };
+    undocumented_public_apis: Array<{
+      entity_id: string;
+      name: string;
+      file_path: string;
+      kind: string;
+      signature?: string;
+    }>;
+    quality_distribution: {
+      excellent: number;
+      good: number;
+      partial: number;
+      minimal: number;
+      none: number;
+    };
+    recommendations: string[];
+  };
+  recommendations: Array<{
+    priority: 'high' | 'medium' | 'low';
+    category: 'testing' | 'documentation';
+    title: string;
+    description: string;
+    affected_count: number;
+    estimated_effort?: string;
+  }>;
+  enrichment_actions: Array<{
+    id: string;
+    name: string;
+    description: string;
+    affected_entities: number;
+    category: string;
+    is_automated: boolean;
+  }>;
+  summary: {
+    total_entities: number;
+    tested_entities: number;
+    documented_entities: number;
+    critical_gaps: number;
+  };
+}
+
+// Get Agentic Readiness Report
+export async function getReadinessReport(repositoryId: string): Promise<AgenticReadinessResponse> {
+  const response = await backendApi.get<AgenticReadinessResponse>(`/repositories/${repositoryId}/readiness`);
+  return response.data;
+}
+
+// =============================================================================
+// Enrichment API
+// =============================================================================
+
+export interface EnrichmentRequest {
+  entity_ids: string[] | 'all-undocumented' | 'all-untested';
+  style?: string;
+  framework?: string;
+  test_types?: string[];
+  include_examples?: boolean;
+  include_parameters?: boolean;
+  include_returns?: boolean;
+  include_throws?: boolean;
+  include_mocks?: boolean;
+  include_edge_cases?: boolean;
+  max_entities?: number;
+}
+
+export interface EnrichmentResponse {
+  success: boolean;
+  entities_processed: number;
+  entities_enriched: number;
+  entities_skipped: number;
+  generated_content: Array<{
+    entity_id: string;
+    entity_name: string;
+    file_path: string;
+    content: string;
+    insert_position: { line: number; column: number };
+    content_type: string;
+    is_new_file: boolean;
+  }>;
+  errors: Array<{ entity_id: string; error: string }>;
+  enrichment_type: string;
+}
+
+// Enrich Documentation
+export async function enrichDocumentation(
+  repositoryId: string,
+  request: EnrichmentRequest
+): Promise<EnrichmentResponse> {
+  const response = await backendApi.post<EnrichmentResponse>(
+    `/repositories/${repositoryId}/enrich/documentation`,
+    request
+  );
+  return response.data;
+}
+
+// Enrich Tests
+export async function enrichTests(
+  repositoryId: string,
+  request: EnrichmentRequest
+): Promise<EnrichmentResponse> {
+  const response = await backendApi.post<EnrichmentResponse>(
+    `/repositories/${repositoryId}/enrich/tests`,
+    request
+  );
+  return response.data;
+}
+
+// =============================================================================
+// Repository Detail API
+// =============================================================================
+
+export interface RepositoryDetail extends RepositorySummary {
+  local_path?: string;
+  last_commit_sha?: string;
+  file_count?: number;
+  total_loc?: number;
+}
+
+// Get single repository by ID
+export async function getRepository(repositoryId: string): Promise<RepositoryDetail> {
+  const response = await backendApi.get<{ success: boolean; data: RepositoryDetail }>(
+    `/repositories/${repositoryId}`
+  );
+  return response.data.data;
+}
+
 export default codegraphApi;

@@ -3,14 +3,131 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
 
 # =============================================================================
+# Generation Mode Enum
+# =============================================================================
+
+class GenerationMode(str, Enum):
+    """BRD generation mode.
+
+    DRAFT: Fast, single-pass generation using LLM + MCP tools.
+           No multi-agent verification, no evidence gathering.
+           Good for quick exploration or initial drafts.
+
+    VERIFIED: Thorough, multi-agent generation with verification.
+              Includes evidence gathering, claim verification,
+              hallucination detection, and confidence scoring.
+              Slower but highly accurate.
+    """
+
+    DRAFT = "draft"
+    VERIFIED = "verified"
+
+
+class GenerationApproach(str, Enum):
+    """BRD generation approach - how context is gathered and BRD is created.
+
+    CONTEXT_FIRST: Two-phase approach:
+        1. Aggregator gathers context from codebase (Neo4j + Filesystem)
+        2. LLM receives context and generates BRD
+        More reliable but slower. Context is explicitly passed to LLM.
+
+    SKILLS_ONLY: Single-phase approach:
+        1. Simple prompt triggers the generate-brd skill
+        2. Skill instructs LLM to use MCP tools directly
+        3. LLM gathers context and generates BRD in one session
+        Faster but relies on skill being triggered correctly.
+
+    AUTO: Automatically choose based on mode:
+        - DRAFT mode -> SKILLS_ONLY (faster)
+        - VERIFIED mode -> CONTEXT_FIRST (more reliable)
+    """
+
+    CONTEXT_FIRST = "context_first"
+    SKILLS_ONLY = "skills_only"
+    AUTO = "auto"
+
+
+# =============================================================================
 # Phase 1: Generate BRD - Request/Response Models
 # =============================================================================
+
+# =============================================================================
+# Sufficiency Criteria Models
+# =============================================================================
+
+class SufficiencyDimension(BaseModel):
+    """A dimension to explore when gathering context for BRD generation."""
+
+    name: str = Field(
+        ...,
+        description="Name of the dimension (e.g., 'Data Model', 'Business Logic')"
+    )
+    description: str = Field(
+        ...,
+        description="What to look for in this dimension"
+    )
+    required: bool = Field(
+        False,
+        description="Whether this dimension must be covered"
+    )
+
+
+class SufficiencyOutputRequirements(BaseModel):
+    """Output requirements for BRD generation."""
+
+    code_traceability: bool = Field(
+        True,
+        description="Include file paths and line numbers for claims"
+    )
+    explicit_gaps: bool = Field(
+        True,
+        description="Document what information wasn't found"
+    )
+    evidence_based: bool = Field(
+        True,
+        description="All claims must be backed by tool results"
+    )
+
+
+class SufficiencyCriteria(BaseModel):
+    """Criteria for what makes a complete analysis before generating BRD.
+
+    Customize these to define what context is sufficient for your project.
+
+    Example for a security-focused project:
+    ```json
+    {
+        "dimensions": [
+            {"name": "Authentication", "description": "Auth mechanisms", "required": true},
+            {"name": "Authorization", "description": "RBAC, permissions", "required": true},
+            {"name": "Data Protection", "description": "Encryption, PII", "required": true}
+        ],
+        "min_dimensions_covered": 3
+    }
+    ```
+    """
+
+    dimensions: list[SufficiencyDimension] = Field(
+        default_factory=list,
+        description="Dimensions to explore when gathering context"
+    )
+    output_requirements: Optional[SufficiencyOutputRequirements] = Field(
+        None,
+        description="Requirements for BRD output format"
+    )
+    min_dimensions_covered: int = Field(
+        3,
+        ge=1,
+        description="Minimum number of dimensions to cover before generating"
+    )
+
 
 class BRDTemplateConfig(BaseModel):
     """Template configuration for BRD generation."""
@@ -63,11 +180,20 @@ class BRDTemplateConfig(BaseModel):
 
 
 class GenerateBRDRequest(BaseModel):
-    """Request model for BRD generation with multi-agent verification.
+    """Request model for BRD generation.
 
-    Multi-agent verification is always enabled:
+    Supports two generation modes:
+
+    DRAFT MODE (default):
+    - Fast, single-pass generation using LLM + MCP tools
+    - No multi-agent verification or evidence gathering
+    - Good for quick exploration or initial drafts
+
+    VERIFIED MODE:
+    - Thorough, multi-agent generation with verification
     - Generator Agent creates BRD sections iteratively
     - Verifier Agent validates claims against codebase
+    - Includes evidence gathering, hallucination detection, confidence scoring
 
     BRD structure is TEMPLATE-DRIVEN:
     - Upload any BRD template and the system will follow its structure
@@ -80,6 +206,32 @@ class GenerateBRDRequest(BaseModel):
         description="Description of the feature to generate BRD for",
         min_length=10,
         examples=["Add a caching layer to improve API response times"]
+    )
+
+    # Generation mode selection
+    mode: GenerationMode = Field(
+        GenerationMode.DRAFT,
+        description="""
+        Generation mode:
+        - 'draft': Fast single-pass generation (default). Uses LLM + MCP tools
+          but skips multi-agent verification. Good for quick exploration.
+        - 'verified': Thorough multi-agent generation with verification,
+          evidence gathering, and hallucination detection. Slower but more accurate.
+        """
+    )
+
+    # Generation approach selection
+    approach: GenerationApproach = Field(
+        GenerationApproach.AUTO,
+        description="""
+        How context is gathered and BRD is generated:
+        - 'context_first': Aggregator gathers context first, then LLM generates BRD
+          with explicit context. More reliable but slower.
+        - 'skills_only': Simple prompt triggers skill, LLM uses MCP tools directly.
+          Faster but relies on skill matching.
+        - 'auto' (default): Automatically choose based on mode.
+          DRAFT -> skills_only, VERIFIED -> context_first
+        """
     )
 
     affected_components: Optional[list[str]] = Field(
@@ -121,24 +273,44 @@ class GenerateBRDRequest(BaseModel):
         description="Additional template configuration (org name, approval roles, etc.)"
     )
 
-    # Multi-agent verification settings (always enabled)
+    # Multi-agent verification settings (only used in VERIFIED mode)
     max_iterations: int = Field(
         3,
         ge=1,
-        le=5,
-        description="Maximum verification iterations before accepting BRD"
+        le=10,
+        description="Maximum verification iterations (VERIFIED mode only)"
     )
 
     min_confidence: float = Field(
         0.7,
         ge=0.0,
         le=1.0,
-        description="Minimum confidence score for BRD approval"
+        description="Minimum confidence score for BRD approval (VERIFIED mode only)"
     )
 
     show_evidence: bool = Field(
         False,
-        description="Include full evidence trail in response (hidden by default)"
+        description="Include full evidence trail in response (VERIFIED mode only)"
+    )
+
+    # Sufficiency criteria - what makes a complete analysis
+    sufficiency_criteria: Optional[SufficiencyCriteria] = Field(
+        None,
+        description="""
+        Define what context is sufficient for BRD generation.
+
+        Customize dimensions to explore (e.g., Data Model, Business Logic, API Contracts)
+        and set minimum coverage requirements.
+
+        If not provided, uses default dimensions:
+        - Data Model (required)
+        - Business Logic (required)
+        - User Flow (required)
+        - API Contracts (optional)
+        - Validation Rules (optional)
+        - Error Handling (optional)
+        - Dependencies (optional)
+        """
     )
 
 
@@ -172,55 +344,77 @@ class BRDResponse(BaseModel):
 
 
 class GenerateBRDResponse(BaseModel):
-    """Response model for BRD generation with verification results.
+    """Response model for BRD generation.
 
-    Multi-agent verification is always enabled, so response includes:
-    - The generated BRD document
-    - Verification metrics (confidence, hallucination risk, etc.)
+    Response varies based on generation mode:
+
+    DRAFT MODE:
+    - BRD document
+    - mode = "draft"
+    - No verification metrics (is_verified, confidence_score, etc. are None)
+    - Includes a warning that draft may need review
+
+    VERIFIED MODE:
+    - BRD document
+    - mode = "verified"
+    - Full verification metrics (confidence, hallucination risk, iterations)
     - Optional evidence trail (when show_evidence=True)
+    - SME review requirements if applicable
     """
 
     success: bool = True
     brd: BRDResponse
 
-    # Verification metrics (always included since multi-agent is always on)
-    is_verified: bool = Field(
+    # Generation mode used
+    mode: GenerationMode = Field(
         ...,
-        description="Whether the BRD passed verification"
-    )
-    confidence_score: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
-        description="Overall confidence score (0-1)"
-    )
-    hallucination_risk: str = Field(
-        ...,
-        description="Hallucination risk level: none, low, medium, high, critical"
-    )
-    iterations_used: int = Field(
-        ...,
-        description="Number of generator-verifier iterations"
+        description="Generation mode used: 'draft' or 'verified'"
     )
 
-    # Evidence trail (only if requested)
+    # Verification metrics (only populated in VERIFIED mode)
+    is_verified: Optional[bool] = Field(
+        None,
+        description="Whether the BRD passed verification (VERIFIED mode only)"
+    )
+    confidence_score: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Overall confidence score 0-1 (VERIFIED mode only)"
+    )
+    hallucination_risk: Optional[str] = Field(
+        None,
+        description="Hallucination risk level: none, low, medium, high, critical (VERIFIED mode only)"
+    )
+    iterations_used: Optional[int] = Field(
+        None,
+        description="Number of generator-verifier iterations (VERIFIED mode only)"
+    )
+
+    # Evidence trail (only in VERIFIED mode if requested)
     evidence_trail: Optional["EvidenceTrailSummary"] = Field(
         None,
-        description="Evidence trail summary (only included if show_evidence=True)"
+        description="Evidence trail summary (VERIFIED mode with show_evidence=True)"
     )
     evidence_trail_text: Optional[str] = Field(
         None,
-        description="Full evidence trail as formatted text (only if show_evidence=True)"
+        description="Full evidence trail as formatted text (VERIFIED mode with show_evidence=True)"
     )
 
-    # SME review requirements
+    # SME review requirements (VERIFIED mode only)
     needs_sme_review: bool = Field(
         False,
-        description="Whether the BRD has claims that need SME review"
+        description="Whether the BRD has claims that need SME review (VERIFIED mode only)"
     )
     sme_review_claims: list["ClaimSummary"] = Field(
         default_factory=list,
-        description="Claims flagged for SME review"
+        description="Claims flagged for SME review (VERIFIED mode only)"
+    )
+
+    # Draft mode warning
+    draft_warning: Optional[str] = Field(
+        None,
+        description="Warning message for draft mode (e.g., 'Draft may contain inaccuracies')"
     )
 
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -600,3 +794,238 @@ class GetEvidenceTrailResponse(BaseModel):
         ...,
         description="Full formatted evidence trail"
     )
+
+
+# =============================================================================
+# Phase 3: Agentic Readiness Report - Request/Response Models
+# =============================================================================
+
+class ReadinessGrade(str, Enum):
+    """Readiness grade levels."""
+    A = "A"
+    B = "B"
+    C = "C"
+    D = "D"
+    F = "F"
+
+
+class RecommendationPriority(str, Enum):
+    """Recommendation priority levels."""
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class RecommendationCategory(str, Enum):
+    """Recommendation category."""
+    TESTING = "testing"
+    DOCUMENTATION = "documentation"
+
+
+class UntestedCriticalFunction(BaseModel):
+    """An untested critical function."""
+    entity_id: str
+    name: str
+    file_path: str
+    reason: str
+    stereotype: Optional[str] = None
+
+
+class TestingCoverage(BaseModel):
+    """Testing coverage metrics."""
+    percentage: int = Field(ge=0, le=100)
+    grade: ReadinessGrade
+
+
+class TestQuality(BaseModel):
+    """Test quality assessment."""
+    has_unit_tests: bool
+    has_integration_tests: bool
+    has_e2e_tests: bool
+    frameworks: list[str] = Field(default_factory=list)
+    mocking_coverage: Optional[float] = None
+
+
+class TestingReadinessResponse(BaseModel):
+    """Testing readiness assessment."""
+    overall_grade: ReadinessGrade
+    overall_score: int = Field(ge=0, le=100)
+    coverage: TestingCoverage
+    untested_critical_functions: list[UntestedCriticalFunction] = Field(default_factory=list)
+    test_quality: TestQuality
+    recommendations: list[str] = Field(default_factory=list)
+
+
+class UndocumentedPublicApi(BaseModel):
+    """An undocumented public API."""
+    entity_id: str
+    name: str
+    file_path: str
+    kind: str
+    signature: Optional[str] = None
+
+
+class DocumentationCoverage(BaseModel):
+    """Documentation coverage metrics."""
+    percentage: int = Field(ge=0, le=100)
+    grade: ReadinessGrade
+
+
+class DocumentationQualityDistribution(BaseModel):
+    """Distribution of documentation quality."""
+    excellent: int = 0
+    good: int = 0
+    partial: int = 0
+    minimal: int = 0
+    none: int = 0
+
+
+class DocumentationReadinessResponse(BaseModel):
+    """Documentation readiness assessment."""
+    overall_grade: ReadinessGrade
+    overall_score: int = Field(ge=0, le=100)
+    coverage: DocumentationCoverage
+    public_api_coverage: DocumentationCoverage
+    undocumented_public_apis: list[UndocumentedPublicApi] = Field(default_factory=list)
+    quality_distribution: DocumentationQualityDistribution
+    recommendations: list[str] = Field(default_factory=list)
+
+
+class ReadinessRecommendation(BaseModel):
+    """A recommendation for improving readiness."""
+    priority: RecommendationPriority
+    category: RecommendationCategory
+    title: str
+    description: str
+    affected_count: int
+    affected_entities: list[str] = Field(default_factory=list)
+    estimated_effort: Optional[str] = None
+
+
+class EnrichmentAction(BaseModel):
+    """An available enrichment action."""
+    id: str
+    name: str
+    description: str
+    affected_entities: int
+    category: str
+    is_automated: bool
+
+
+class ReadinessSummary(BaseModel):
+    """Summary statistics for readiness report."""
+    total_entities: int
+    tested_entities: int
+    documented_entities: int
+    critical_gaps: int
+
+
+class AgenticReadinessResponse(BaseModel):
+    """Complete Agentic Readiness Report response."""
+    success: bool = True
+    repository_id: str
+    repository_name: str
+    generated_at: datetime
+
+    overall_grade: ReadinessGrade
+    overall_score: int = Field(ge=0, le=100)
+    is_agentic_ready: bool = Field(
+        ...,
+        description="Whether the repository meets agentic readiness threshold (score >= 75)"
+    )
+
+    testing: TestingReadinessResponse
+    documentation: DocumentationReadinessResponse
+
+    recommendations: list[ReadinessRecommendation] = Field(default_factory=list)
+    enrichment_actions: list[EnrichmentAction] = Field(default_factory=list)
+
+    summary: ReadinessSummary
+
+
+# =============================================================================
+# Phase 4: Codebase Enrichment - Request/Response Models
+# =============================================================================
+
+class DocumentationStyle(str, Enum):
+    """Documentation style for generation."""
+    JSDOC = "jsdoc"
+    JAVADOC = "javadoc"
+    DOCSTRING = "docstring"
+    XMLDOC = "xmldoc"
+    GODOC = "godoc"
+
+
+class DocumentationEnrichmentRequest(BaseModel):
+    """Request for documentation enrichment."""
+    entity_ids: list[str] | str = Field(
+        ...,
+        description="Entity IDs to enrich, or 'all-undocumented'"
+    )
+    style: DocumentationStyle = DocumentationStyle.JSDOC
+    include_examples: bool = True
+    include_parameters: bool = True
+    include_returns: bool = True
+    include_throws: bool = True
+    max_entities: Optional[int] = Field(
+        50,
+        description="Maximum entities to process (for 'all-undocumented')"
+    )
+
+
+class TestType(str, Enum):
+    """Test type for generation."""
+    UNIT = "unit"
+    INTEGRATION = "integration"
+
+
+class TestEnrichmentRequest(BaseModel):
+    """Request for test enrichment."""
+    entity_ids: list[str] | str = Field(
+        ...,
+        description="Entity IDs to generate tests for, or 'all-untested'"
+    )
+    framework: str = Field(
+        "jest",
+        description="Test framework to use (jest, junit, pytest, etc.)"
+    )
+    test_types: list[TestType] = Field(
+        default_factory=lambda: [TestType.UNIT]
+    )
+    include_mocks: bool = True
+    include_edge_cases: bool = True
+    max_entities: Optional[int] = Field(
+        20,
+        description="Maximum entities to process (for 'all-untested')"
+    )
+
+
+class GeneratedContent(BaseModel):
+    """Generated content for a single entity."""
+    entity_id: str
+    entity_name: str
+    file_path: str
+    content: str
+    insert_position: dict[str, int] = Field(
+        ...,
+        description="Line and column for insertion"
+    )
+    content_type: str
+    is_new_file: bool
+
+
+class EnrichmentError(BaseModel):
+    """Error during enrichment."""
+    entity_id: str
+    error: str
+
+
+class EnrichmentResponse(BaseModel):
+    """Response from enrichment operation."""
+    success: bool = True
+    entities_processed: int
+    entities_enriched: int
+    entities_skipped: int
+    generated_content: list[GeneratedContent] = Field(default_factory=list)
+    errors: list[EnrichmentError] = Field(default_factory=list)
+    enrichment_type: str

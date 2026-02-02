@@ -1,7 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard,
-  FolderGit2,
   Activity,
   MessageSquare,
   FileText,
@@ -10,6 +9,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Code2,
+  Plus,
+  Library,
 } from 'lucide-react';
 import { useAppStore } from '../../store/appStore';
 import './Sidebar.css';
@@ -17,7 +18,8 @@ import './Sidebar.css';
 const mainNavItems = [
   { path: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { path: '/chat', icon: MessageSquare, label: 'Code Assistant' },
-  { path: '/analyze', icon: FolderGit2, label: 'Repositories' },
+  { path: '/repositories', icon: Library, label: 'Repositories' },
+  { path: '/analyze', icon: Plus, label: 'Add Repository' },
   { path: '/jobs', icon: Activity, label: 'Analysis Jobs' },
 ];
 

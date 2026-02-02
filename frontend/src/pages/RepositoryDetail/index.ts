@@ -1,0 +1,1 @@
+export { RepositoryDetail } from './RepositoryDetail';

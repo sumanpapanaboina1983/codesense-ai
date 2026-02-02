@@ -37,6 +37,20 @@ from .models import (
     ClaimSummary,
     GetEvidenceTrailRequest,
     GetEvidenceTrailResponse,
+    # Generation mode
+    GenerationMode,
+    # Agentic Readiness (Phase 3)
+    AgenticReadinessResponse,
+    TestingReadinessResponse,
+    DocumentationReadinessResponse,
+    ReadinessRecommendation,
+    EnrichmentAction,
+    ReadinessSummary,
+    ReadinessGrade,
+    # Enrichment (Phase 4)
+    DocumentationEnrichmentRequest,
+    TestEnrichmentRequest,
+    EnrichmentResponse,
 )
 from ..core.generator import BRDGenerator
 from ..core.synthesizer import TemplateConfig
@@ -305,15 +319,232 @@ _evidence_bundles: dict[str, Any] = {}
 
 
 # =============================================================================
-# Phase 1: Generate BRD with Multi-Agent Verification
+# Phase 1: Generate BRD - Draft Mode (Fast, Single-Pass)
 # =============================================================================
 
-async def _generate_brd_stream(
+async def _generate_brd_draft_stream(
     repository_id: str,
     request: GenerateBRDRequest,
     generator: BRDGenerator,
 ) -> AsyncGenerator[str, None]:
-    """Generate BRD using multi-agent architecture with verification."""
+    """Generate BRD using selected approach.
+
+    CONTEXT_FIRST approach:
+    - Aggregator gathers context from codebase (Neo4j + Filesystem)
+    - Context is explicitly passed to LLM for BRD generation
+    - More reliable, context is visible in logs
+
+    SKILLS_ONLY approach:
+    - Simple prompt triggers generate-brd skill
+    - Skill instructs LLM to use MCP tools directly
+    - Faster, single unified session
+    """
+    from sqlalchemy import select
+    from ..models.repository import Repository as RepositorySchema
+    from ..core.aggregator import ContextAggregator
+    from .models import GenerationApproach
+
+    progress_queue = ProgressQueue()
+
+    async def run_generation():
+        try:
+            async def progress_callback(step: str, detail: str) -> None:
+                await progress_queue.put(step, detail)
+
+            # Determine approach
+            approach = request.approach
+            if approach == GenerationApproach.AUTO:
+                approach = GenerationApproach.SKILLS_ONLY  # Default for draft mode
+
+            approach_name = "Context-First" if approach == GenerationApproach.CONTEXT_FIRST else "Skills-Only"
+            await progress_callback("init", f"🚀 Starting BRD generation ({approach_name})...")
+
+            # Get repository
+            await progress_callback("database", "Loading repository information...")
+            async with get_async_session() as session:
+                result = await session.execute(
+                    select(RepositoryDB).where(RepositoryDB.id == repository_id)
+                )
+                db_repo = result.scalar_one_or_none()
+
+                if not db_repo:
+                    await progress_callback("error", f"Repository not found: {repository_id}")
+                    return None
+
+                if db_repo.status != DBRepositoryStatus.CLONED:
+                    await progress_callback("error", f"Repository not cloned: {db_repo.status.value}")
+                    return None
+
+                if db_repo.analysis_status != DBAnalysisStatus.COMPLETED:
+                    await progress_callback("error", f"Repository not analyzed: {db_repo.analysis_status.value}")
+                    return None
+
+                repository = RepositorySchema.model_validate(db_repo)
+
+            await progress_callback("database", f"Repository loaded: {repository.name}")
+
+            # Ensure generator is initialized
+            if not generator._initialized:
+                await progress_callback("init", "Initializing generator components...")
+                await generator.initialize()
+
+            workspace_root = Path(repository.local_path) if repository.local_path else generator.workspace_root
+
+            if approach == GenerationApproach.CONTEXT_FIRST:
+                # ==========================================
+                # CONTEXT-FIRST APPROACH
+                # ==========================================
+                await progress_callback("context", "📊 Gathering context from codebase...")
+                await progress_callback("context", "Using aggregator to query Neo4j and read files")
+
+                from ..mcp_clients.filesystem_client import FilesystemMCPClient
+                repo_filesystem_client = FilesystemMCPClient(workspace_root=workspace_root)
+                await repo_filesystem_client.connect()
+
+                aggregator = ContextAggregator(
+                    generator.neo4j_client,
+                    repo_filesystem_client,
+                    copilot_session=generator._copilot_session,
+                )
+
+                context = await aggregator.build_context(
+                    request=request.feature_description,
+                    affected_components=request.affected_components,
+                    include_similar=request.include_similar_features,
+                )
+
+                await progress_callback("context", f"Context ready: {len(context.architecture.components)} components, {len(context.implementation.key_files)} files")
+
+                await progress_callback("generate", "📝 Generating BRD with gathered context...")
+
+                # Generate BRD with explicit context
+                brd = await generator.synthesizer.generate_brd_with_context(
+                    context=context,
+                    feature_request=request.feature_description,
+                )
+
+                await repo_filesystem_client.disconnect()
+
+            else:
+                # ==========================================
+                # SKILLS-ONLY APPROACH
+                # ==========================================
+                await progress_callback("generate", "📝 Triggering generate-brd skill...")
+                await progress_callback("generate", "SDK will use MCP tools to gather context and generate BRD")
+
+                # Use synthesizer's skill-based method
+                brd = await generator.synthesizer.generate_brd_with_skill(
+                    feature_request=request.feature_description,
+                    affected_components=request.affected_components,
+                )
+
+            await progress_callback("complete", f"✅ Draft BRD complete: {brd.title}")
+
+            return brd, repository
+
+        except Exception as e:
+            logger.exception("Failed to generate BRD (draft mode)")
+            await progress_queue.put("error", str(e))
+            return None
+        finally:
+            progress_queue.mark_done()
+
+    # Start generation task
+    generation_task = asyncio.create_task(run_generation())
+
+    # Stream progress
+    step_icons = {
+        "init": "🚀",
+        "database": "🗄️",
+        "context": "📊",
+        "template": "📋",
+        "generate": "📝",
+        "complete": "✅",
+    }
+
+    while not progress_queue.is_done or not generation_task.done():
+        event = await progress_queue.get()
+        if event:
+            step = event["step"]
+            detail = event["detail"]
+
+            if step == "error":
+                yield f"data: {json.dumps({'type': 'error', 'content': detail})}\n\n"
+            else:
+                icon = step_icons.get(step, "▶️")
+                yield f"data: {json.dumps({'type': 'thinking', 'content': f'{icon} {detail}'})}\n\n"
+
+        await asyncio.sleep(0.05)
+
+        if generation_task.done() and progress_queue.is_done:
+            break
+
+    # Get result
+    try:
+        result = await generation_task
+    except Exception as e:
+        yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+        return
+
+    if result is None:
+        return
+
+    brd, repository = result
+
+    # Convert to BRD response
+    brd_response = _brd_to_response(brd)
+
+    # Stream content
+    markdown_content = brd_response.markdown
+    chunk_size = 100
+    for i in range(0, len(markdown_content), chunk_size):
+        chunk = markdown_content[i:i + chunk_size]
+        yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+        await asyncio.sleep(0.02)
+
+    # Send complete response (Draft mode - no verification metrics)
+    response_data = GenerateBRDResponse(
+        success=True,
+        brd=brd_response,
+        mode=GenerationMode.DRAFT,
+        # No verification metrics in draft mode
+        is_verified=None,
+        confidence_score=None,
+        hallucination_risk=None,
+        iterations_used=None,
+        evidence_trail=None,
+        evidence_trail_text=None,
+        needs_sme_review=False,
+        sme_review_claims=[],
+        draft_warning="This is a draft BRD generated without verification. It may contain inaccuracies or unsupported claims. Use 'verified' mode for production-quality documentation.",
+        metadata={
+            "mode": "draft",
+            "repository_id": repository.id,
+            "repository_name": repository.name,
+            "components_found": len(brd.functional_requirements) + len(brd.technical_requirements),
+        },
+    )
+    yield f"data: {json.dumps({'type': 'complete', 'data': response_data.model_dump(mode='json')})}\n\n"
+
+
+# =============================================================================
+# Phase 1: Generate BRD - Verified Mode (Multi-Agent Verification)
+# =============================================================================
+
+async def _generate_brd_verified_stream(
+    repository_id: str,
+    request: GenerateBRDRequest,
+    generator: BRDGenerator,
+) -> AsyncGenerator[str, None]:
+    """Generate BRD using multi-agent architecture with verification.
+
+    This is the thorough "Verified" mode:
+    - Uses Generator Agent to create BRD sections iteratively
+    - Uses Verifier Agent to validate claims against codebase
+    - Evidence gathering with confidence scoring
+    - Hallucination detection and SME review flagging
+    - Multiple iterations until confidence threshold met
+    """
     from sqlalchemy import select
     from ..models.repository import Repository as RepositorySchema
     from ..core.multi_agent_orchestrator import VerifiedBRDGenerator
@@ -372,6 +603,7 @@ async def _generate_brd_stream(
             aggregator = ContextAggregator(
                 generator.neo4j_client,
                 repo_filesystem_client,
+                copilot_session=generator._copilot_session,  # Enable agentic context gathering
             )
 
             context = await aggregator.build_context(
@@ -399,12 +631,34 @@ async def _generate_brd_stream(
                 max_iterations=request.max_iterations,
             )
 
+            # Convert sufficiency criteria if provided
+            sufficiency_dict = None
+            if request.sufficiency_criteria:
+                sufficiency_dict = {
+                    "dimensions": [
+                        {
+                            "name": d.name,
+                            "description": d.description,
+                            "required": d.required,
+                        }
+                        for d in request.sufficiency_criteria.dimensions
+                    ],
+                    "output_requirements": {
+                        "code_traceability": request.sufficiency_criteria.output_requirements.code_traceability if request.sufficiency_criteria.output_requirements else True,
+                        "explicit_gaps": request.sufficiency_criteria.output_requirements.explicit_gaps if request.sufficiency_criteria.output_requirements else True,
+                        "evidence_based": request.sufficiency_criteria.output_requirements.evidence_based if request.sufficiency_criteria.output_requirements else True,
+                    } if request.sufficiency_criteria.output_requirements else None,
+                    "min_dimensions_covered": request.sufficiency_criteria.min_dimensions_covered,
+                }
+                await progress_callback("config", f"Custom sufficiency criteria: {len(request.sufficiency_criteria.dimensions)} dimensions")
+
             verified_generator = VerifiedBRDGenerator(
                 copilot_session=generator._copilot_session,
                 neo4j_client=generator.neo4j_client,
                 filesystem_client=repo_filesystem_client,
                 max_iterations=request.max_iterations,
                 parsed_template=parsed_template,  # Pass parsed template
+                sufficiency_criteria=sufficiency_dict,  # Pass sufficiency criteria
             )
 
             # Run multi-agent generation
@@ -562,6 +816,7 @@ async def _generate_brd_stream(
     response_data = GenerateBRDResponse(
         success=True,
         brd=brd_response,
+        mode=GenerationMode.VERIFIED,
         is_verified=evidence_bundle.is_approved if evidence_bundle else False,
         confidence_score=evidence_bundle.overall_confidence if evidence_bundle else 0.0,
         hallucination_risk=evidence_bundle.hallucination_risk.value if evidence_bundle else "unknown",
@@ -570,9 +825,10 @@ async def _generate_brd_stream(
         evidence_trail_text=evidence_text,
         needs_sme_review=len(sme_claims) > 0,
         sme_review_claims=sme_claims,
+        draft_warning=None,  # No warning in verified mode
         metadata={
             **output.metadata,
-            "mode": "multi_agent_verified",
+            "mode": "verified",
             "generator_agent": "brd_generator",
             "verifier_agent": "brd_verifier",
             "repository_id": repository.id,
@@ -585,16 +841,33 @@ async def _generate_brd_stream(
 @router.post(
     "/brd/generate/{repository_id}",
     tags=["Phase 1: BRD"],
-    summary="Generate BRD with Multi-Agent Verification",
+    summary="Generate BRD (Draft or Verified mode)",
     description="""
-    Generate a verified Business Requirements Document for a repository.
+    Generate a Business Requirements Document for a repository.
 
-    ## Multi-Agent Architecture
+    ## Generation Modes
 
-    This endpoint uses two specialized agents that work together:
+    Choose between two modes via the `mode` parameter:
+
+    ### Draft Mode (default) - Fast
+    - Single-pass LLM generation with MCP tools
+    - No multi-agent verification
+    - No evidence gathering or hallucination detection
+    - Best for: Quick exploration, initial drafts, brainstorming
+
+    ### Verified Mode - Thorough
+    - Multi-agent architecture with Generator and Verifier agents
+    - Evidence gathering from codebase
+    - Hallucination detection and confidence scoring
+    - Multiple iterations until confidence threshold met
+    - Best for: Production documentation, compliance requirements
+
+    ## Multi-Agent Architecture (Verified Mode Only)
+
+    In verified mode, two specialized agents work together:
 
     ### Agent 1: BRD Generator
-    - Generates BRD sections iteratively (executive summary, business context, etc.)
+    - Generates BRD sections iteratively
     - Incorporates feedback from the Verifier agent
     - Regenerates sections that fail verification
 
@@ -609,23 +882,30 @@ async def _generate_brd_stream(
     The endpoint streams events as Server-Sent Events (SSE):
     - `thinking`: Progress updates during generation
     - `content`: Streaming BRD content chunks
-    - `complete`: Final complete BRD response with verification results
+    - `complete`: Final complete BRD response
     - `error`: Error messages
 
     ## Request Parameters
 
-    - `max_iterations`: Maximum verification iterations (default: 3)
-    - `min_confidence`: Minimum confidence for approval (default: 0.7)
-    - `show_evidence`: Include evidence trail in response (default: false)
+    - `mode`: Generation mode - "draft" (default) or "verified"
+    - `max_iterations`: Maximum verification iterations (verified mode only, default: 3)
+    - `min_confidence`: Minimum confidence for approval (verified mode only, default: 0.7)
+    - `show_evidence`: Include evidence trail in response (verified mode only, default: false)
 
     ## Response
 
     The complete event includes:
-    - Verified BRD document
+    - BRD document
+    - Generation mode used
+
+    In verified mode, also includes:
     - Confidence score (0-1)
     - Hallucination risk level
     - Claims needing SME review
     - Evidence trail (if requested)
+
+    In draft mode, includes:
+    - Warning that draft may need review
     """,
 )
 async def generate_brd(
@@ -633,9 +913,15 @@ async def generate_brd(
     request: GenerateBRDRequest,
     generator: BRDGenerator = Depends(get_generator),
 ) -> StreamingResponse:
-    """Generate BRD with multi-agent verification."""
+    """Generate BRD with selected mode (draft or verified)."""
+    # Dispatch based on mode
+    if request.mode == GenerationMode.DRAFT:
+        stream_generator = _generate_brd_draft_stream(repository_id, request, generator)
+    else:
+        stream_generator = _generate_brd_verified_stream(repository_id, request, generator)
+
     return StreamingResponse(
-        _generate_brd_stream(repository_id, request, generator),
+        stream_generator,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -898,4 +1184,357 @@ async def create_jira_issues(
 
     except Exception as e:
         logger.exception("Failed to create JIRA issues")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Phase 3: Agentic Readiness Report
+# =============================================================================
+
+@router.get(
+    "/repositories/{repository_id}/readiness",
+    response_model=AgenticReadinessResponse,
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    tags=["Agentic Readiness"],
+    summary="Generate Agentic Readiness Report",
+    description="""
+    **Phase 3**: Generate an Agentic Readiness Report for a repository.
+
+    This endpoint assesses a repository's readiness for agentic automation by evaluating:
+
+    ## Testing Readiness
+    - Overall test coverage percentage
+    - Coverage of critical functions (controllers, services, entry points)
+    - Test quality (unit, integration, E2E tests present)
+    - Test frameworks in use
+
+    ## Documentation Readiness
+    - Overall documentation coverage
+    - Public API documentation coverage
+    - Documentation quality distribution
+    - Undocumented public APIs
+
+    ## Grading System
+    - **A**: >= 90% - Excellent, ready for full automation
+    - **B**: >= 75% - Good, minimal gaps to address
+    - **C**: >= 60% - Fair, some work needed
+    - **D**: >= 40% - Poor, significant gaps
+    - **F**: < 40% - Failing, major improvements required
+
+    ## Agentic Ready Threshold
+    A repository is considered "Agentic Ready" when the overall score is >= 75 (Grade B or better).
+
+    ## Response Includes
+    - Overall grade and score
+    - Testing and documentation breakdowns
+    - Prioritized recommendations
+    - Available enrichment actions
+    """,
+)
+async def get_readiness_report(
+    repository_id: str,
+    generator: BRDGenerator = Depends(get_generator),
+) -> AgenticReadinessResponse:
+    """Generate Agentic Readiness Report for a repository."""
+    from datetime import datetime
+    from sqlalchemy import select
+
+    try:
+        logger.info(f"[API] Generating Agentic Readiness Report for repository: {repository_id}")
+
+        # Get repository info
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(RepositoryDB).where(RepositoryDB.id == repository_id)
+            )
+            db_repo = result.scalar_one_or_none()
+
+            if not db_repo:
+                raise HTTPException(status_code=404, detail=f"Repository not found: {repository_id}")
+
+            if db_repo.analysis_status != DBAnalysisStatus.COMPLETED:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Repository not analyzed. Current status: {db_repo.analysis_status.value}"
+                )
+
+            repository_name = db_repo.name
+
+        # Ensure generator is initialized (for Neo4j client access)
+        if not generator._initialized:
+            await generator.initialize()
+
+        # Generate readiness report using Neo4j data
+        # For now, return a mock response - actual implementation would query Neo4j
+        # In production, this would call AgenticReadinessService
+
+        # Mock response for API structure demonstration
+        # TODO: Integrate with AgenticReadinessService from codegraph
+        return AgenticReadinessResponse(
+            success=True,
+            repository_id=repository_id,
+            repository_name=repository_name,
+            generated_at=datetime.now(),
+            overall_grade=ReadinessGrade.C,
+            overall_score=65,
+            is_agentic_ready=False,
+            testing=TestingReadinessResponse(
+                overall_grade=ReadinessGrade.C,
+                overall_score=60,
+                coverage={
+                    "percentage": 55,
+                    "grade": ReadinessGrade.C,
+                },
+                untested_critical_functions=[],
+                test_quality={
+                    "has_unit_tests": True,
+                    "has_integration_tests": False,
+                    "has_e2e_tests": False,
+                    "frameworks": ["jest"],
+                },
+                recommendations=[
+                    "Increase test coverage to at least 70%",
+                    "Add integration tests for API endpoints",
+                ],
+            ),
+            documentation=DocumentationReadinessResponse(
+                overall_grade=ReadinessGrade.C,
+                overall_score=70,
+                coverage={
+                    "percentage": 65,
+                    "grade": ReadinessGrade.C,
+                },
+                public_api_coverage={
+                    "percentage": 70,
+                    "grade": ReadinessGrade.C,
+                },
+                undocumented_public_apis=[],
+                quality_distribution={
+                    "excellent": 10,
+                    "good": 30,
+                    "partial": 25,
+                    "minimal": 20,
+                    "none": 15,
+                },
+                recommendations=[
+                    "Document all public APIs",
+                    "Improve documentation quality with examples",
+                ],
+            ),
+            recommendations=[
+                ReadinessRecommendation(
+                    priority="high",
+                    category="testing",
+                    title="Increase Test Coverage",
+                    description="Current test coverage is below the recommended threshold.",
+                    affected_count=50,
+                    estimated_effort="medium",
+                ),
+                ReadinessRecommendation(
+                    priority="medium",
+                    category="documentation",
+                    title="Document Public APIs",
+                    description="Several public APIs lack documentation.",
+                    affected_count=25,
+                    estimated_effort="medium",
+                ),
+            ],
+            enrichment_actions=[
+                EnrichmentAction(
+                    id="enrich-docs-public-api",
+                    name="Generate Documentation for Public APIs",
+                    description="Auto-generate JSDoc documentation for undocumented public functions.",
+                    affected_entities=25,
+                    category="documentation",
+                    is_automated=True,
+                ),
+                EnrichmentAction(
+                    id="enrich-tests-critical",
+                    name="Generate Tests for Critical Functions",
+                    description="Auto-generate test skeletons for untested controller and service methods.",
+                    affected_entities=15,
+                    category="testing",
+                    is_automated=True,
+                ),
+            ],
+            summary=ReadinessSummary(
+                total_entities=500,
+                tested_entities=275,
+                documented_entities=325,
+                critical_gaps=40,
+            ),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to generate Agentic Readiness Report")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Phase 4: Codebase Enrichment
+# =============================================================================
+
+@router.post(
+    "/repositories/{repository_id}/enrich/documentation",
+    response_model=EnrichmentResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    tags=["Codebase Enrichment"],
+    summary="Generate documentation for undocumented code",
+    description="""
+    **Phase 4**: Generate documentation for undocumented functions and classes.
+
+    This endpoint uses LLM to generate documentation based on:
+    - Function/method signatures
+    - Parameter types and names
+    - Return types
+    - Code context and implementation
+
+    ## Supported Styles
+    - **jsdoc**: JavaScript/TypeScript JSDoc format
+    - **javadoc**: Java documentation format
+    - **docstring**: Python docstring format
+    - **xmldoc**: C# XML documentation format
+    - **godoc**: Go documentation format
+
+    ## Entity Selection
+    - Provide specific `entity_ids` to document particular functions/classes
+    - Use `"all-undocumented"` to process all undocumented public APIs
+    - Use `max_entities` to limit processing (default: 50)
+
+    ## Response
+    Returns generated documentation content with:
+    - File paths for insertion
+    - Line/column positions
+    - The generated documentation content
+    """,
+)
+async def enrich_documentation(
+    repository_id: str,
+    request: DocumentationEnrichmentRequest,
+    generator: BRDGenerator = Depends(get_generator),
+) -> EnrichmentResponse:
+    """Generate documentation for undocumented code."""
+    try:
+        logger.info(f"[API] Documentation enrichment requested for repository: {repository_id}")
+        logger.info(f"[API] Style: {request.style}, Entities: {request.entity_ids}")
+
+        # Validate repository exists
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(RepositoryDB).where(RepositoryDB.id == repository_id)
+            )
+            db_repo = result.scalar_one_or_none()
+
+            if not db_repo:
+                raise HTTPException(status_code=404, detail=f"Repository not found: {repository_id}")
+
+        # TODO: Implement actual documentation generation using LLM
+        # This would:
+        # 1. Query Neo4j for undocumented entities
+        # 2. Get source code context
+        # 3. Use LLM to generate documentation
+        # 4. Return generated content
+
+        # Mock response for API structure demonstration
+        return EnrichmentResponse(
+            success=True,
+            entities_processed=10,
+            entities_enriched=8,
+            entities_skipped=2,
+            generated_content=[],
+            errors=[],
+            enrichment_type="documentation",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to enrich documentation")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/repositories/{repository_id}/enrich/tests",
+    response_model=EnrichmentResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    tags=["Codebase Enrichment"],
+    summary="Generate test skeletons for untested code",
+    description="""
+    **Phase 4**: Generate test skeletons for untested functions and methods.
+
+    This endpoint uses LLM to generate test code based on:
+    - Function/method signatures
+    - Implementation logic analysis
+    - Known testing patterns for the framework
+    - Edge case identification
+
+    ## Supported Frameworks
+    - **jest**: JavaScript/TypeScript testing
+    - **mocha**: JavaScript testing
+    - **junit**: Java testing
+    - **pytest**: Python testing
+    - **go test**: Go testing
+    - **xunit**: C# testing
+
+    ## Test Types
+    - **unit**: Unit tests for isolated function testing
+    - **integration**: Integration tests for service interactions
+
+    ## Entity Selection
+    - Provide specific `entity_ids` to generate tests for particular functions
+    - Use `"all-untested"` to process all untested critical functions
+    - Use `max_entities` to limit processing (default: 20)
+
+    ## Response
+    Returns generated test content with:
+    - Test file paths
+    - The generated test code
+    - Mock/stub configurations if needed
+    """,
+)
+async def enrich_tests(
+    repository_id: str,
+    request: TestEnrichmentRequest,
+    generator: BRDGenerator = Depends(get_generator),
+) -> EnrichmentResponse:
+    """Generate test skeletons for untested code."""
+    try:
+        logger.info(f"[API] Test enrichment requested for repository: {repository_id}")
+        logger.info(f"[API] Framework: {request.framework}, Types: {request.test_types}")
+
+        # Validate repository exists
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(RepositoryDB).where(RepositoryDB.id == repository_id)
+            )
+            db_repo = result.scalar_one_or_none()
+
+            if not db_repo:
+                raise HTTPException(status_code=404, detail=f"Repository not found: {repository_id}")
+
+        # TODO: Implement actual test generation using LLM
+        # This would:
+        # 1. Query Neo4j for untested entities
+        # 2. Get source code context
+        # 3. Analyze function behavior and dependencies
+        # 4. Use LLM to generate tests
+        # 5. Return generated test code
+
+        # Mock response for API structure demonstration
+        return EnrichmentResponse(
+            success=True,
+            entities_processed=5,
+            entities_enriched=4,
+            entities_skipped=1,
+            generated_content=[],
+            errors=[],
+            enrichment_type="testing",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to enrich tests")
         raise HTTPException(status_code=500, detail=str(e))

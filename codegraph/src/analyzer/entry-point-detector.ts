@@ -12,14 +12,18 @@ import {
     EventHandlerNode,
     ScheduledTaskNode,
     CLICommandNode,
+    UIRouteNode,
+    UIPageNode,
     HttpMethod,
     GraphQLOperationType,
     ParameterInfo,
     CLIOption,
     RelationshipInfo,
     AnnotationInfo,
+    UIRoutingFramework,
 } from './types.js';
 import { DetectedFramework } from './types.js';
+import { UIRouteParser, UIRouteDetectionResult } from './parsers/route-parser.js';
 
 // =============================================================================
 // REST Endpoint Detection Patterns
@@ -220,10 +224,12 @@ const CLI_PATTERNS: CLIPattern[] = [
 export class EntryPointDetector {
     private logger: winston.Logger;
     private detectedFrameworks: DetectedFramework[];
+    private uiRouteParser: UIRouteParser;
 
     constructor(logger: winston.Logger, detectedFrameworks: DetectedFramework[] = []) {
         this.logger = logger;
         this.detectedFrameworks = detectedFrameworks;
+        this.uiRouteParser = new UIRouteParser(logger);
     }
 
     /**
@@ -288,12 +294,17 @@ export class EntryPointDetector {
             }
         }
 
+        // Detect UI routes and pages
+        const uiRouteResult = this.detectUIRoutes(nodes, sourceTexts);
+
         this.logger.info('Entry point detection complete', {
             restEndpoints: restEndpoints.length,
             graphqlOperations: graphqlOperations.length,
             eventHandlers: eventHandlers.length,
             scheduledTasks: scheduledTasks.length,
             cliCommands: cliCommands.length,
+            uiRoutes: uiRouteResult.routes.length,
+            uiPages: uiRouteResult.pages.length,
         });
 
         return {
@@ -302,8 +313,20 @@ export class EntryPointDetector {
             eventHandlers,
             scheduledTasks,
             cliCommands,
-            relationships,
+            uiRoutes: uiRouteResult.routes,
+            uiPages: uiRouteResult.pages,
+            relationships: [...relationships, ...uiRouteResult.relationships],
         };
+    }
+
+    /**
+     * Detect UI routes and pages from frontend routing frameworks.
+     */
+    detectUIRoutes(
+        nodes: AstNode[],
+        sourceTexts: Map<string, string>
+    ): UIRouteDetectionResult {
+        return this.uiRouteParser.detectAllRoutes(nodes, sourceTexts);
     }
 
     /**
@@ -694,6 +717,8 @@ export interface EntryPointDetectionResult {
     eventHandlers: EventHandlerNode[];
     scheduledTasks: ScheduledTaskNode[];
     cliCommands: CLICommandNode[];
+    uiRoutes: UIRouteNode[];
+    uiPages: UIPageNode[];
     relationships: RelationshipInfo[];
 }
 

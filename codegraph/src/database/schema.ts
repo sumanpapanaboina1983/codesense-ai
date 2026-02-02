@@ -46,6 +46,11 @@ export const NODE_LABELS = [
     // Repository Overview Feature - Test labels
     'TestFile',             // Test file
     'TestCase',             // Individual test case
+    // UI Entry Points (Phase 1)
+    'UIRoute',              // Programmatic UI route (React Router, Vue Router, Angular)
+    'UIPage',               // File-based UI page (Next.js, Nuxt, SvelteKit, Remix)
+    // Feature Discovery (Phase 2)
+    'Feature',              // Discovered end-to-end feature
 ];
 
 // Define Relationship Types used in the graph
@@ -123,6 +128,19 @@ export const RELATIONSHIP_TYPES = [
     'TESTS',                   // TestFile/TestCase -> Function/Class (tests a code unit)
     'MOCKS',                   // TestFile -> Dependency (mocks a dependency)
     'COVERS',                  // TestCase -> Function (covers a function)
+    // UI Entry Points (Phase 1) - Route relationship types
+    'RENDERS_PAGE',            // UIRoute -> Component (route renders a page component)
+    'ROUTE_CALLS_API',         // UIRoute/UIPage -> RestEndpoint (route calls an API)
+    'ROUTE_USES_SERVICE',      // UIRoute/UIPage -> Service (route uses a service)
+    'CHILD_ROUTE',             // UIRoute -> UIRoute (parent-child route relationship)
+    'LAYOUT_FOR',              // UIPage -> UIPage (layout wraps page)
+    'GUARDS_ROUTE',            // Guard -> UIRoute (guard protects route)
+    // Feature Discovery (Phase 2) - Feature relationship types
+    'FEATURE_HAS_UI',          // Feature -> UIRoute/UIPage
+    'FEATURE_HAS_API',         // Feature -> RestEndpoint/GraphQLOperation
+    'FEATURE_HAS_SERVICE',     // Feature -> Service class
+    'FEATURE_HAS_DATA',        // Feature -> Entity/Repository
+    'RELATED_FEATURE',         // Feature -> Feature
 ];
 
 // Define relationship types that can cross file boundaries
@@ -212,6 +230,23 @@ const ENTRY_POINT_INDEXES = [
     // TestCase indexes
     `CREATE INDEX testcase_name_idx IF NOT EXISTS FOR (n:TestCase) ON (n.testName)`,
     `CREATE INDEX testcase_suite_idx IF NOT EXISTS FOR (n:TestCase) ON (n.suiteName)`,
+    // UIRoute indexes (Phase 1)
+    `CREATE INDEX uiroute_path_idx IF NOT EXISTS FOR (n:UIRoute) ON (n.path)`,
+    `CREATE INDEX uiroute_fullpath_idx IF NOT EXISTS FOR (n:UIRoute) ON (n.fullPath)`,
+    `CREATE INDEX uiroute_framework_idx IF NOT EXISTS FOR (n:UIRoute) ON (n.framework)`,
+    `CREATE INDEX uiroute_requiresauth_idx IF NOT EXISTS FOR (n:UIRoute) ON (n.requiresAuth)`,
+    `CREATE INDEX uiroute_isdynamic_idx IF NOT EXISTS FOR (n:UIRoute) ON (n.isDynamic)`,
+    // UIPage indexes (Phase 1)
+    `CREATE INDEX uipage_routepath_idx IF NOT EXISTS FOR (n:UIPage) ON (n.routePath)`,
+    `CREATE INDEX uipage_framework_idx IF NOT EXISTS FOR (n:UIPage) ON (n.framework)`,
+    `CREATE INDEX uipage_routertype_idx IF NOT EXISTS FOR (n:UIPage) ON (n.routerType)`,
+    `CREATE INDEX uipage_islayout_idx IF NOT EXISTS FOR (n:UIPage) ON (n.isLayout)`,
+    `CREATE INDEX uipage_isdynamic_idx IF NOT EXISTS FOR (n:UIPage) ON (n.isDynamic)`,
+    // Feature indexes (Phase 2)
+    `CREATE INDEX feature_name_idx IF NOT EXISTS FOR (n:Feature) ON (n.featureName)`,
+    `CREATE INDEX feature_category_idx IF NOT EXISTS FOR (n:Feature) ON (n.category)`,
+    `CREATE INDEX feature_complexity_idx IF NOT EXISTS FOR (n:Feature) ON (n.complexity)`,
+    `CREATE INDEX feature_confidence_idx IF NOT EXISTS FOR (n:Feature) ON (n.confidence)`,
 ];
 
 // Repository Overview Feature - Analysis property indexes (for AstNode properties)

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Plus,
   RefreshCw,
@@ -8,6 +9,7 @@ import {
   ExternalLink,
   Star,
   GitFork,
+  BarChart2,
 } from 'lucide-react';
 import {
   getRepositories,
@@ -155,7 +157,12 @@ export function Repositories() {
                 <tr key={repo.id}>
                   <td>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                      <strong>{repo.name}</strong>
+                      <Link
+                        to={`/repositories/${repo.id}`}
+                        style={{ fontWeight: 600, color: 'var(--color-primary)', textDecoration: 'none' }}
+                      >
+                        {repo.name}
+                      </Link>
                       {repo.description && (
                         <span style={{ fontSize: 'var(--font-size-sm)', color: 'var(--color-gray-500)' }}>
                           {repo.description.slice(0, 60)}
@@ -201,6 +208,13 @@ export function Repositories() {
                   </td>
                   <td>
                     <div style={{ display: 'flex', gap: 'var(--spacing-xs)' }}>
+                      <Link
+                        to={`/repositories/${repo.id}`}
+                        className="btn btn-sm btn-outline"
+                        title="View details & readiness report"
+                      >
+                        <BarChart2 size={16} />
+                      </Link>
                       <button
                         className="btn btn-sm btn-outline"
                         onClick={() => handleSync(repo.id)}

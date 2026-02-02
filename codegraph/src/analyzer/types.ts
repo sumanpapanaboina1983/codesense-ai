@@ -1430,6 +1430,127 @@ export const CODE_SMELL_TYPES = {
  */
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS' | 'TRACE';
 
+// =============================================================================
+// UI Routing Types (Phase 1: UI Entry Points)
+// =============================================================================
+
+/**
+ * Supported UI routing frameworks.
+ */
+export type UIRoutingFramework =
+    | 'react-router'
+    | 'next-js'
+    | 'vue-router'
+    | 'angular-router'
+    | 'svelte-kit'
+    | 'nuxt'
+    | 'remix'
+    | 'unknown';
+
+/**
+ * Route guard information for protected routes.
+ */
+export interface RouteGuard {
+    /** Guard name/type */
+    name: string;
+    /** Guard type: auth, role, permission, custom */
+    type: 'auth' | 'role' | 'permission' | 'custom';
+    /** Required roles if role-based */
+    roles?: string[];
+    /** Required permissions if permission-based */
+    permissions?: string[];
+}
+
+/**
+ * Represents a UI route defined in code (React Router, Vue Router, Angular).
+ * These are routes defined programmatically via router configuration.
+ */
+export interface UIRouteNode extends AstNode {
+    kind: 'UIRoute';
+    properties: {
+        /** Route path pattern (e.g., '/users/:id') */
+        path: string;
+        /** Full resolved path including parent routes */
+        fullPath: string;
+        /** Path parameters extracted from the path */
+        pathParameters: string[];
+        /** Component entityId that renders this route */
+        componentId?: string;
+        /** Component name */
+        componentName?: string;
+        /** Layout component name if applicable */
+        layoutName?: string;
+        /** Route guards/middleware */
+        guards?: RouteGuard[];
+        /** Whether the route requires authentication */
+        requiresAuth?: boolean;
+        /** Framework that defines this route */
+        framework: UIRoutingFramework;
+        /** Whether this is an index/default route */
+        isIndex: boolean;
+        /** Whether the route has dynamic segments */
+        isDynamic: boolean;
+        /** Whether the route is lazily loaded */
+        isLazy: boolean;
+        /** Parent route entityId for nested routes */
+        parentRouteId?: string;
+        /** Child route entityIds */
+        childRouteIds?: string[];
+        /** Query parameters expected */
+        queryParameters?: string[];
+        /** API endpoints called from this route's component */
+        apiEndpointIds?: string[];
+    };
+}
+
+/**
+ * Represents a UI page from file-based routing (Next.js, Nuxt, SvelteKit, Remix).
+ * These are pages where the route is inferred from the file system structure.
+ */
+export interface UIPageNode extends AstNode {
+    kind: 'UIPage';
+    properties: {
+        /** Inferred route path from file location */
+        routePath: string;
+        /** Path segments (e.g., ['app', 'users', '[id]']) */
+        segments: string[];
+        /** Whether this is a layout component */
+        isLayout: boolean;
+        /** Whether this is a loading state component */
+        isLoading: boolean;
+        /** Whether this is an error boundary component */
+        isError: boolean;
+        /** Whether this is a not-found page */
+        isNotFound: boolean;
+        /** Router type for the framework */
+        routerType: 'app-router' | 'pages-router' | 'nuxt-pages' | 'svelte-routes' | 'remix-routes';
+        /** Framework */
+        framework: UIRoutingFramework;
+        /** Whether this is a server component (Next.js App Router) */
+        isServerComponent?: boolean;
+        /** Whether this is a client component */
+        isClientComponent?: boolean;
+        /** Data fetching methods present */
+        dataFetching?: string[];
+        /** API methods if this is an API route */
+        apiMethods?: HttpMethod[];
+        /** Whether the page is dynamic */
+        isDynamic: boolean;
+        /** Dynamic segment names */
+        dynamicSegments?: string[];
+        /** Whether this is a catch-all route */
+        isCatchAll: boolean;
+        /** Whether this is an optional catch-all route */
+        isOptionalCatchAll: boolean;
+        /** Metadata/SEO exports */
+        hasMetadata?: boolean;
+        /** Parent layout entityId */
+        parentLayoutId?: string;
+        /** API endpoints called from this page */
+        apiEndpointIds?: string[];
+    };
+}
+
 /**
  * Represents a REST API endpoint.
  */
@@ -1812,6 +1933,15 @@ export interface EntryPointSummary {
     scheduledTaskCount: number;
     /** Total CLI commands */
     cliCommandCount: number;
+    // UI Entry Points (Phase 1)
+    /** Total UI routes (programmatic routing) */
+    uiRouteCount: number;
+    /** Total UI pages (file-based routing) */
+    uiPageCount: number;
+    /** UI routes/pages by framework */
+    uiByFramework: Record<UIRoutingFramework, number>;
+    /** Count of routes requiring authentication */
+    protectedRouteCount: number;
 }
 
 /**
@@ -1933,3 +2063,374 @@ export interface RepositoryOverview {
     /** Recommendations for new developers */
     recommendations: StartingPointRecommendation[];
 }
+
+// =============================================================================
+// Phase 2: Feature Discovery Types
+// =============================================================================
+
+/**
+ * Feature category classification.
+ */
+export type FeatureCategory = 'user-facing' | 'admin' | 'internal' | 'api-only';
+
+/**
+ * Feature complexity level.
+ */
+export type FeatureComplexity = 'simple' | 'moderate' | 'complex';
+
+/**
+ * Represents a discovered end-to-end feature in the application.
+ * Features are traced from UI entry points through API endpoints,
+ * services, and down to database entities.
+ */
+export interface FeatureNode extends AstNode {
+    kind: 'Feature';
+    properties: {
+        /** Auto-inferred or user-provided feature name */
+        featureName: string;
+        /** Feature description */
+        description: string;
+        /** Feature category */
+        category: FeatureCategory;
+        /** Confidence score for the auto-inferred name (0-1) */
+        confidence: number;
+        /** UI entry point entityIds (routes/pages) */
+        uiEntryPoints: string[];
+        /** API endpoint entityIds */
+        apiEndpoints: string[];
+        /** Service entityIds involved */
+        services: string[];
+        /** Database entity/table names */
+        databaseEntities: string[];
+        /** Feature complexity assessment */
+        complexity: FeatureComplexity;
+        /** Full trace path from UI to database */
+        tracePath: string[];
+        /** User override for the feature name */
+        userOverrideName?: string;
+        /** Tags for categorization */
+        tags?: string[];
+        /** Related feature entityIds */
+        relatedFeatures?: string[];
+    };
+}
+
+/**
+ * Result from feature discovery analysis.
+ */
+export interface FeatureDiscoveryResult {
+    /** Discovered features */
+    features: FeatureNode[];
+    /** API endpoints not mapped to any feature */
+    unmappedEndpoints: string[];
+    /** UI routes not mapped to any feature */
+    unmappedRoutes: string[];
+    /** Statistics about the discovery */
+    stats: {
+        totalFeatures: number;
+        byCategory: Record<FeatureCategory, number>;
+        byComplexity: Record<FeatureComplexity, number>;
+        coveragePercent: number;
+    };
+}
+
+// =============================================================================
+// Phase 3: Agentic Readiness Types
+// =============================================================================
+
+/**
+ * Readiness grade from A to F.
+ */
+export type ReadinessGrade = 'A' | 'B' | 'C' | 'D' | 'F';
+
+/**
+ * Testing readiness assessment.
+ */
+export interface TestingReadiness {
+    /** Overall testing grade */
+    overallGrade: ReadinessGrade;
+    /** Overall testing score (0-100) */
+    overallScore: number;
+    /** Test coverage metrics */
+    coverage: {
+        /** Coverage percentage */
+        percentage: number;
+        /** Grade based on coverage */
+        grade: ReadinessGrade;
+    };
+    /** Critical functions without tests */
+    untestedCriticalFunctions: {
+        entityId: string;
+        name: string;
+        filePath: string;
+        /** Why this function is critical */
+        reason: string;
+        /** Stereotype of the containing class */
+        stereotype?: Stereotype;
+    }[];
+    /** Test quality assessment */
+    testQuality: {
+        hasUnitTests: boolean;
+        hasIntegrationTests: boolean;
+        hasE2ETests: boolean;
+        /** Test frameworks detected */
+        frameworks: TestFramework[];
+        /** Mocking coverage */
+        mockingCoverage?: number;
+    };
+    /** Recommendations for improving testing */
+    recommendations: string[];
+}
+
+/**
+ * Documentation quality level.
+ */
+export type DocumentationQuality = 'excellent' | 'good' | 'partial' | 'minimal' | 'none';
+
+/**
+ * Documentation readiness assessment.
+ */
+export interface DocumentationReadiness {
+    /** Overall documentation grade */
+    overallGrade: ReadinessGrade;
+    /** Overall documentation score (0-100) */
+    overallScore: number;
+    /** Documentation coverage metrics */
+    coverage: {
+        /** Coverage percentage */
+        percentage: number;
+        /** Grade based on coverage */
+        grade: ReadinessGrade;
+    };
+    /** Public API documentation coverage */
+    publicApiCoverage: {
+        /** Coverage percentage */
+        percentage: number;
+        /** Grade based on coverage */
+        grade: ReadinessGrade;
+    };
+    /** Undocumented public APIs */
+    undocumentedPublicApis: {
+        entityId: string;
+        name: string;
+        filePath: string;
+        kind: string;
+        /** Signature if method/function */
+        signature?: string;
+    }[];
+    /** Distribution of documentation quality */
+    qualityDistribution: Record<DocumentationQuality, number>;
+    /** Recommendations for improving documentation */
+    recommendations: string[];
+}
+
+/**
+ * Recommendation priority level.
+ */
+export type RecommendationPriority = 'high' | 'medium' | 'low';
+
+/**
+ * Recommendation category.
+ */
+export type RecommendationCategory = 'testing' | 'documentation';
+
+/**
+ * A recommendation for improving agentic readiness.
+ */
+export interface ReadinessRecommendation {
+    /** Priority level */
+    priority: RecommendationPriority;
+    /** Category */
+    category: RecommendationCategory;
+    /** Short title */
+    title: string;
+    /** Detailed description */
+    description: string;
+    /** Number of entities affected */
+    affectedCount: number;
+    /** Specific entity IDs affected (limited) */
+    affectedEntities?: string[];
+    /** Estimated effort to address */
+    estimatedEffort?: 'low' | 'medium' | 'high';
+}
+
+/**
+ * Enrichment action that can be taken.
+ */
+export interface EnrichmentAction {
+    /** Unique action ID */
+    id: string;
+    /** Action name */
+    name: string;
+    /** Action description */
+    description: string;
+    /** Number of entities that would be affected */
+    affectedEntities: number;
+    /** Category of enrichment */
+    category: 'documentation' | 'testing';
+    /** Whether the action is automated or requires manual intervention */
+    isAutomated: boolean;
+}
+
+/**
+ * Complete Agentic Readiness Report.
+ */
+export interface AgenticReadinessReport {
+    /** Repository ID */
+    repositoryId: string;
+    /** Repository name */
+    repositoryName: string;
+    /** Report generation timestamp */
+    generatedAt: string;
+
+    /** Overall readiness grade */
+    overallGrade: ReadinessGrade;
+    /** Overall readiness score (0-100) */
+    overallScore: number;
+    /** Whether the repository meets agentic readiness threshold (score >= 75) */
+    isAgenticReady: boolean;
+
+    /** Testing readiness assessment */
+    testing: TestingReadiness;
+    /** Documentation readiness assessment */
+    documentation: DocumentationReadiness;
+
+    /** Prioritized recommendations */
+    recommendations: ReadinessRecommendation[];
+
+    /** Available enrichment actions */
+    enrichmentActions: EnrichmentAction[];
+
+    /** Summary statistics */
+    summary: {
+        totalEntities: number;
+        testedEntities: number;
+        documentedEntities: number;
+        criticalGaps: number;
+    };
+}
+
+// =============================================================================
+// Phase 4: Codebase Enrichment Types
+// =============================================================================
+
+/**
+ * Documentation style for generation.
+ */
+export type DocumentationStyle = 'jsdoc' | 'javadoc' | 'docstring' | 'xmldoc' | 'godoc';
+
+/**
+ * Request for documentation enrichment.
+ */
+export interface DocumentationEnrichmentRequest {
+    /** Entity IDs to enrich, or 'all-undocumented' */
+    entityIds: string[] | 'all-undocumented';
+    /** Documentation style to use */
+    style: DocumentationStyle;
+    /** Include usage examples */
+    includeExamples: boolean;
+    /** Include parameter descriptions */
+    includeParameters: boolean;
+    /** Include return type descriptions */
+    includeReturns: boolean;
+    /** Include thrown exceptions */
+    includeThrows: boolean;
+    /** Maximum entities to process (for 'all-undocumented') */
+    maxEntities?: number;
+}
+
+/**
+ * Test type for generation.
+ */
+export type TestType = 'unit' | 'integration';
+
+/**
+ * Request for test enrichment.
+ */
+export interface TestEnrichmentRequest {
+    /** Entity IDs to generate tests for, or 'all-untested' */
+    entityIds: string[] | 'all-untested';
+    /** Test framework to use */
+    framework: string;
+    /** Types of tests to generate */
+    testTypes: TestType[];
+    /** Include mock setup */
+    includeMocks: boolean;
+    /** Include edge case tests */
+    includeEdgeCases: boolean;
+    /** Maximum entities to process (for 'all-untested') */
+    maxEntities?: number;
+}
+
+/**
+ * Generated content for a single entity.
+ */
+export interface GeneratedContent {
+    /** Entity ID that was enriched */
+    entityId: string;
+    /** Entity name */
+    entityName: string;
+    /** File path for the generated content */
+    filePath: string;
+    /** Generated content */
+    content: string;
+    /** Where to insert the content */
+    insertPosition: {
+        line: number;
+        column: number;
+    };
+    /** Content type */
+    contentType: 'documentation' | 'test';
+    /** Whether this is a new file or insertion */
+    isNewFile: boolean;
+}
+
+/**
+ * Result from enrichment operation.
+ */
+export interface EnrichmentResult {
+    /** Whether the operation succeeded */
+    success: boolean;
+    /** Number of entities processed */
+    entitiesProcessed: number;
+    /** Number of entities enriched */
+    entitiesEnriched: number;
+    /** Number of entities skipped */
+    entitiesSkipped: number;
+    /** Generated content for each entity */
+    generatedContent: GeneratedContent[];
+    /** Errors encountered */
+    errors: {
+        entityId: string;
+        error: string;
+    }[];
+    /** Enrichment type */
+    enrichmentType: 'documentation' | 'testing';
+}
+
+// =============================================================================
+// UI Route Relationship Types
+// =============================================================================
+
+/**
+ * Relationship types for UI routes and features.
+ */
+export const UI_ROUTE_RELATIONSHIPS = [
+    'RENDERS_PAGE',        // UIRoute -> Component (route renders a page component)
+    'ROUTE_CALLS_API',     // UIRoute/UIPage -> RestEndpoint (route calls an API)
+    'ROUTE_USES_SERVICE',  // UIRoute/UIPage -> Service (route uses a service)
+    'CHILD_ROUTE',         // UIRoute -> UIRoute (parent-child route relationship)
+    'LAYOUT_FOR',          // UIPage -> UIPage (layout wraps page)
+    'GUARDS_ROUTE',        // Guard -> UIRoute (guard protects route)
+] as const;
+
+/**
+ * Relationship types for feature discovery.
+ */
+export const FEATURE_RELATIONSHIPS = [
+    'FEATURE_HAS_UI',      // Feature -> UIRoute/UIPage
+    'FEATURE_HAS_API',     // Feature -> RestEndpoint/GraphQLOperation
+    'FEATURE_HAS_SERVICE', // Feature -> Service class
+    'FEATURE_HAS_DATA',    // Feature -> Entity/Repository
+    'RELATED_FEATURE',     // Feature -> Feature
+] as const;

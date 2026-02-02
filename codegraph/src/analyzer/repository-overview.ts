@@ -24,6 +24,7 @@ import {
     HttpMethod,
     GraphQLOperationType,
     TestFramework,
+    UIRoutingFramework,
 } from './types.js';
 
 // =============================================================================
@@ -209,6 +210,40 @@ const QUERIES = {
         MATCH (r:Repository {repositoryId: $repositoryId})-[:HAS_MODULE]->(m1:JavaModule)
         OPTIONAL MATCH (m1)-[d:DEPENDS_ON_MODULE]->(m2:JavaModule)
         RETURN m1.name as source, m2.name as target, coalesce(d.weight, 1) as weight
+    `,
+
+    // UI Routes by framework (Phase 1)
+    UI_ROUTES: `
+        MATCH (r:Repository {repositoryId: $repositoryId})-[:BELONGS_TO]-(f:File)
+        MATCH (f)-[*1..3]->(route:UIRoute)
+        RETURN
+            route.framework as framework,
+            count(*) as count
+    `,
+
+    // UI Pages by framework (Phase 1)
+    UI_PAGES: `
+        MATCH (r:Repository {repositoryId: $repositoryId})-[:BELONGS_TO]-(f:File)
+        MATCH (f)-[*1..3]->(page:UIPage)
+        RETURN
+            page.framework as framework,
+            count(*) as count
+    `,
+
+    // Protected routes count (Phase 1)
+    PROTECTED_ROUTES: `
+        MATCH (r:Repository {repositoryId: $repositoryId})-[:BELONGS_TO]-(f:File)
+        MATCH (f)-[*1..3]->(route:UIRoute)
+        WHERE route.requiresAuth = true
+        RETURN count(route) as count
+    `,
+
+    // UI routes to API connections (Phase 1)
+    UI_TO_API_CONNECTIONS: `
+        MATCH (r:Repository {repositoryId: $repositoryId})-[:BELONGS_TO]-(f:File)
+        MATCH (f)-[*1..3]->(route:UIRoute)-[:ROUTE_CALLS_API]->(endpoint:RestEndpoint)
+        RETURN route.path as routePath, endpoint.path as apiPath, endpoint.httpMethod as method
+        LIMIT 100
     `,
 };
 
@@ -461,6 +496,11 @@ export class RepositoryOverviewService {
             eventsBySource: {},
             scheduledTaskCount: 0,
             cliCommandCount: 0,
+            // UI Entry Points (Phase 1)
+            uiRouteCount: 0,
+            uiPageCount: 0,
+            uiByFramework: {} as Record<UIRoutingFramework, number>,
+            protectedRouteCount: 0,
         };
 
         try {
@@ -523,6 +563,43 @@ export class RepositoryOverviewService {
                 'RepositoryOverview'
             );
             summary.cliCommandCount = (cliResult as any).records?.[0]?.get('count')?.toNumber?.() || 0;
+
+            // UI Routes (Phase 1)
+            const uiRoutesResult = await this.neo4jClient.runTransaction(
+                QUERIES.UI_ROUTES,
+                { repositoryId },
+                'READ',
+                'RepositoryOverview'
+            );
+            for (const r of (uiRoutesResult as any).records || []) {
+                const framework = r.get('framework') as UIRoutingFramework;
+                const count = r.get('count')?.toNumber?.() || 0;
+                summary.uiByFramework[framework] = (summary.uiByFramework[framework] || 0) + count;
+                summary.uiRouteCount += count;
+            }
+
+            // UI Pages (Phase 1)
+            const uiPagesResult = await this.neo4jClient.runTransaction(
+                QUERIES.UI_PAGES,
+                { repositoryId },
+                'READ',
+                'RepositoryOverview'
+            );
+            for (const r of (uiPagesResult as any).records || []) {
+                const framework = r.get('framework') as UIRoutingFramework;
+                const count = r.get('count')?.toNumber?.() || 0;
+                summary.uiByFramework[framework] = (summary.uiByFramework[framework] || 0) + count;
+                summary.uiPageCount += count;
+            }
+
+            // Protected routes (Phase 1)
+            const protectedResult = await this.neo4jClient.runTransaction(
+                QUERIES.PROTECTED_ROUTES,
+                { repositoryId },
+                'READ',
+                'RepositoryOverview'
+            );
+            summary.protectedRouteCount = (protectedResult as any).records?.[0]?.get('count')?.toNumber?.() || 0;
 
         } catch (error) {
             this.logger.warn('Failed to fetch entry point summary', { error });
