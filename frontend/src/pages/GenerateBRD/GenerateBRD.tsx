@@ -24,8 +24,6 @@ import {
   Settings,
   Info,
   Eye,
-  Thermometer,
-  Hash,
 } from 'lucide-react';
 import {
   getAnalyzedRepositories,
@@ -112,8 +110,9 @@ export function GenerateBRD() {
   const [maxIterations, setMaxIterations] = useState(DEFAULT_OPTIONS.max_iterations);
   const [minConfidence, setMinConfidence] = useState(DEFAULT_OPTIONS.min_confidence);
   const [showEvidence, setShowEvidence] = useState(DEFAULT_OPTIONS.show_evidence);
-  const [temperature, setTemperature] = useState(DEFAULT_OPTIONS.temperature);
   const [seed, setSeed] = useState<number | undefined>(DEFAULT_OPTIONS.seed);
+  // Temperature is fixed at 0 for deterministic outputs (not user-configurable)
+  const temperature = DEFAULT_OPTIONS.temperature;
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
   const [showVerificationReport, setShowVerificationReport] = useState(false);
 
@@ -753,6 +752,44 @@ export function GenerateBRD() {
                                   )}
                                 </div>
                                 <p className="claim-text">{claim.claim_text}</p>
+
+                                {/* Verification Summary */}
+                                {claim.verification_summary && (
+                                  <p className="verification-summary">{claim.verification_summary}</p>
+                                )}
+
+                                {/* Code References with Explanations */}
+                                {claim.code_references && claim.code_references.length > 0 && (
+                                  <div className="code-references">
+                                    <div className="code-refs-header">
+                                      <FileCode size={14} />
+                                      <span>Code Evidence ({claim.code_references.length})</span>
+                                    </div>
+                                    {claim.code_references.slice(0, 3).map((ref, refIndex) => (
+                                      <div key={refIndex} className="code-ref-item">
+                                        <div className="code-ref-location">
+                                          <span className="file-path">{ref.file_path.split('/').pop()}</span>
+                                          <span className="line-nums">:{ref.start_line}-{ref.end_line}</span>
+                                          {ref.entity_name && (
+                                            <span className="entity-name">({ref.entity_name})</span>
+                                          )}
+                                        </div>
+                                        {ref.snippet && (
+                                          <pre className="code-snippet">{ref.snippet.slice(0, 200)}{ref.snippet.length > 200 ? '...' : ''}</pre>
+                                        )}
+                                        {ref.explanation && (
+                                          <p className="code-explanation">{ref.explanation}</p>
+                                        )}
+                                      </div>
+                                    ))}
+                                    {claim.code_references.length > 3 && (
+                                      <div className="more-refs">
+                                        +{claim.code_references.length - 3} more references
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
                                 <div className="claim-meta">
                                   <span className="evidence-count">
                                     {claim.evidence_count} evidence items
@@ -1216,49 +1253,6 @@ export function GenerateBRD() {
                     <span className="option-hint">
                       Search for similar features in codebase for reference
                     </span>
-                  </div>
-
-                  {/* Consistency Settings */}
-                  <div className="consistency-options">
-                    <h4>Consistency Settings</h4>
-
-                    {/* Temperature */}
-                    <div className="option-group">
-                      <label>
-                        <Thermometer size={14} />
-                        Temperature
-                        <span className="value-display">{temperature.toFixed(1)}</span>
-                      </label>
-                      <input
-                        type="range"
-                        min="0"
-                        max="10"
-                        value={temperature * 10}
-                        onChange={(e) => setTemperature(Number(e.target.value) / 10)}
-                        className="option-range"
-                      />
-                      <span className="option-hint">
-                        Lower = more consistent, Higher = more creative (0.0-1.0)
-                      </span>
-                    </div>
-
-                    {/* Seed */}
-                    <div className="option-group">
-                      <label>
-                        <Hash size={14} />
-                        Seed (optional)
-                      </label>
-                      <input
-                        type="number"
-                        value={seed ?? ''}
-                        onChange={(e) => setSeed(e.target.value ? Number(e.target.value) : undefined)}
-                        placeholder="Leave empty for random"
-                        className="option-input"
-                      />
-                      <span className="option-hint">
-                        Set a seed for reproducible outputs
-                      </span>
-                    </div>
                   </div>
 
                   {/* Verified Mode Options */}

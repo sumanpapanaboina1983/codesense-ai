@@ -137,6 +137,8 @@ class MultiAgentOrchestrator:
         progress_callback: Optional[ProgressCallback] = None,
         temperature: float = 0.0,
         seed: Optional[int] = None,
+        claims_per_section: int = 5,
+        default_section_words: int = 300,
     ):
         """
         Initialize the orchestrator.
@@ -152,6 +154,8 @@ class MultiAgentOrchestrator:
             progress_callback: Optional callback for streaming progress updates
             temperature: LLM temperature (0.0-1.0, lower = more consistent). Default 0.0.
             seed: Optional seed for reproducible outputs
+            claims_per_section: Target number of claims to extract per section (default: 5)
+            default_section_words: Default target word count per section (default: 300)
             sufficiency_criteria: Custom criteria for what makes a complete analysis.
                 Structure:
                 {
@@ -217,6 +221,11 @@ class MultiAgentOrchestrator:
         self.temperature = max(0.0, min(1.0, temperature))  # Clamp to 0-1
         self.seed = seed
         logger.info(f"Consistency settings: temperature={self.temperature}, seed={self.seed}")
+
+        # Claim extraction and section length controls
+        self.claims_per_section = max(3, min(15, claims_per_section))  # Clamp to 3-15
+        self.default_section_words = max(100, min(2000, default_section_words))  # Clamp to 100-2000
+        logger.info(f"Content controls: claims_per_section={self.claims_per_section}, default_section_words={self.default_section_words}")
 
         # Get sections from template, custom_sections, or defaults (from best practices)
         if custom_sections:
@@ -555,8 +564,13 @@ class MultiAgentOrchestrator:
         return result
 
     async def _extract_claims(self, section_name: str, content: str) -> list[Claim]:
-        """Extract verifiable claims from section content using LLM."""
-        prompt = f"""Extract verifiable technical claims from this BRD section.
+        """Extract verifiable claims from section content using LLM.
+
+        Uses self.claims_per_section to ensure consistent claim counts.
+        """
+        target_claims = self.claims_per_section
+
+        prompt = f"""Extract exactly {target_claims} verifiable technical claims from this BRD section.
 
 ## Section: {section_name}
 
@@ -564,26 +578,33 @@ class MultiAgentOrchestrator:
 {content}
 
 ## Instructions:
-Extract specific, verifiable claims about:
-- Component names mentioned
-- File paths referenced
-- Technical behaviors described
-- Integration points
-- Data flows
+Extract EXACTLY {target_claims} specific, verifiable claims. Prioritize the most important claims.
 
-Return as JSON array:
+Focus on claims about:
+- Component names and their responsibilities
+- File paths and code locations
+- Technical behaviors and business rules
+- Integration points and APIs
+- Data flows and transformations
+
+Return as JSON array with exactly {target_claims} claims:
 ```json
 [
   {{
-    "text": "The exact claim text",
-    "type": "technical|functional|integration",
-    "mentioned_entities": ["ComponentName", "ClassName"],
-    "search_patterns": ["pattern to search in code"]
+    "text": "The exact claim text from the BRD",
+    "type": "technical|functional|integration|business_rule",
+    "mentioned_entities": ["ComponentName", "ClassName", "MethodName"],
+    "search_patterns": ["pattern to search in code"],
+    "priority": 1
   }}
 ]
 ```
 
-Only extract claims that can be verified against code. Skip vague or subjective statements.
+IMPORTANT:
+- Return exactly {target_claims} claims, no more, no less
+- Order by priority (1 = most important)
+- Skip vague or subjective statements
+- Each claim should be specific enough to verify against code
 """
         response = await self._call_llm(prompt, timeout=120)
 
@@ -592,7 +613,8 @@ Only extract claims that can be verified against code. Skip vague or subjective 
             json_match = self._extract_json(response)
             if json_match:
                 claim_data_list = json.loads(json_match)
-                for claim_data in claim_data_list:
+                # Take exactly the target number of claims
+                for claim_data in claim_data_list[:target_claims]:
                     claims.append(Claim(
                         text=claim_data.get("text", ""),
                         section=section_name,
@@ -600,6 +622,10 @@ Only extract claims that can be verified against code. Skip vague or subjective 
                         mentioned_entities=claim_data.get("mentioned_entities", []),
                         search_patterns=claim_data.get("search_patterns", []),
                     ))
+
+                # If we got fewer claims than requested, log it
+                if len(claims) < target_claims:
+                    logger.info(f"[{section_name}] Extracted {len(claims)} claims (target: {target_claims})")
         except Exception as e:
             logger.warning(f"[{section_name}] Failed to parse claims: {e}")
 
@@ -1450,6 +1476,8 @@ class VerifiedBRDGenerator:
         progress_callback: Optional[ProgressCallback] = None,
         temperature: float = 0.0,
         seed: Optional[int] = None,
+        claims_per_section: int = 5,
+        default_section_words: int = 300,
     ):
         self.orchestrator = MultiAgentOrchestrator(
             copilot_session=copilot_session,
@@ -1465,6 +1493,8 @@ class VerifiedBRDGenerator:
             progress_callback=progress_callback,
             temperature=temperature,
             seed=seed,
+            claims_per_section=claims_per_section,
+            default_section_words=default_section_words,
         )
         self._last_output: Optional[BRDOutput] = None
 

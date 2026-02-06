@@ -742,6 +742,8 @@ async def _generate_brd_verified_stream(
                 progress_callback=progress_callback,  # Pass progress callback for streaming updates
                 temperature=request.temperature,  # Consistency control
                 seed=request.seed,  # Reproducibility control
+                claims_per_section=request.claims_per_section,  # Consistent claim extraction
+                default_section_words=request.default_section_words,  # Section length control
             )
 
             # Run multi-agent generation
@@ -867,12 +869,31 @@ async def _generate_brd_verified_stream(
                 code_refs = []
                 for ev in claim.evidence:
                     for ref in ev.code_references:
+                        # Generate explanation for why this code supports the claim
+                        explanation = None
+                        if ev.notes:
+                            explanation = ev.notes
+                        elif ev.description:
+                            explanation = f"This {ref.entity_type or 'code'} supports the claim: {ev.description[:150]}"
+
                         code_refs.append(CodeReferenceItem(
                             file_path=ref.file_path,
                             start_line=ref.start_line,
                             end_line=ref.end_line,
-                            snippet=ref.snippet[:200] if ref.snippet else None,
+                            snippet=ref.snippet[:300] if ref.snippet else None,
+                            explanation=explanation,
+                            entity_name=ref.entity_name,
+                            entity_type=ref.entity_type,
                         ))
+
+                # Build verification summary from evidence
+                verification_summary = None
+                if claim.evidence:
+                    primary_evidence = claim.evidence[0]
+                    if is_verified:
+                        verification_summary = f"Verified: Found {len(claim.evidence)} evidence item(s). {primary_evidence.description[:100] if primary_evidence.description else ''}"
+                    else:
+                        verification_summary = f"Not verified: {primary_evidence.notes or 'Insufficient evidence found in codebase.'}"
 
                 section_claims.append(ClaimVerificationDetail(
                     claim_id=claim.id,
@@ -886,6 +907,7 @@ async def _generate_brd_verified_stream(
                     evidence_count=len(claim.evidence),
                     evidence_types=evidence_types,
                     code_references=code_refs[:10],  # Limit to 10 refs per claim
+                    verification_summary=verification_summary,
                 ))
 
             # Calculate verification rate for this section
@@ -1179,16 +1201,34 @@ async def get_evidence_trail(
 
             evidence_types = list(set(e.evidence_type.value for e in claim.evidence)) if claim.evidence else []
 
-            # Extract code references from evidence
+            # Extract code references from evidence with explanations
             code_refs = []
             for ev in claim.evidence:
                 for ref in ev.code_references:
+                    explanation = None
+                    if ev.notes:
+                        explanation = ev.notes
+                    elif ev.description:
+                        explanation = f"This {ref.entity_type or 'code'} supports the claim: {ev.description[:150]}"
+
                     code_refs.append(CodeReferenceItem(
                         file_path=ref.file_path,
                         start_line=ref.start_line,
                         end_line=ref.end_line,
-                        snippet=ref.snippet[:200] if ref.snippet else None,
+                        snippet=ref.snippet[:300] if ref.snippet else None,
+                        explanation=explanation,
+                        entity_name=ref.entity_name,
+                        entity_type=ref.entity_type,
                     ))
+
+            # Build verification summary
+            verification_summary = None
+            if claim.evidence:
+                primary_evidence = claim.evidence[0]
+                if is_verified:
+                    verification_summary = f"Verified: Found {len(claim.evidence)} evidence item(s). {primary_evidence.description[:100] if primary_evidence.description else ''}"
+                else:
+                    verification_summary = f"Not verified: {primary_evidence.notes or 'Insufficient evidence found in codebase.'}"
 
             section_claims.append(ClaimVerificationDetail(
                 claim_id=claim.id,
@@ -1202,6 +1242,7 @@ async def get_evidence_trail(
                 evidence_count=len(claim.evidence),
                 evidence_types=evidence_types,
                 code_references=code_refs[:10],  # Limit to 10 refs per claim
+                verification_summary=verification_summary,
             ))
 
         section_verification_rate = (

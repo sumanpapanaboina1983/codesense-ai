@@ -1929,6 +1929,105 @@
   color: var(--color-gray-500);
 }
 
+/* Verification Summary */
+.verification-summary {
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-600);
+  font-style: italic;
+  margin: var(--spacing-xs) 0;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--color-gray-50);
+  border-radius: var(--radius-md);
+}
+
+/* Code References in Claims */
+.code-references {
+  margin: var(--spacing-sm) 0;
+  padding: var(--spacing-sm);
+  background: var(--color-gray-50);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-gray-200);
+}
+
+.code-refs-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-primary);
+  margin-bottom: var(--spacing-sm);
+}
+
+.code-refs-header svg {
+  color: var(--color-accent);
+}
+
+.code-ref-item {
+  padding: var(--spacing-sm);
+  background: var(--color-white);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--spacing-xs);
+  border: 1px solid var(--color-gray-200);
+}
+
+.code-ref-item:last-child {
+  margin-bottom: 0;
+}
+
+.code-ref-location {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+  margin-bottom: var(--spacing-xs);
+}
+
+.code-ref-location .file-path {
+  color: var(--color-accent);
+  font-weight: var(--font-weight-medium);
+}
+
+.code-ref-location .line-nums {
+  color: var(--color-gray-500);
+}
+
+.code-ref-location .entity-name {
+  color: var(--color-primary);
+  font-style: italic;
+}
+
+.code-snippet {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--color-gray-100);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: var(--spacing-xs) 0;
+  max-height: 100px;
+  color: var(--color-dark);
+}
+
+.code-explanation {
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-600);
+  margin: var(--spacing-xs) 0 0 0;
+  padding-left: var(--spacing-sm);
+  border-left: 2px solid var(--color-success);
+}
+
+.more-refs {
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-500);
+  font-style: italic;
+  text-align: center;
+  padding: var(--spacing-xs);
+}
+
 /* Draft Warning */
 .draft-warning {
   display: flex;

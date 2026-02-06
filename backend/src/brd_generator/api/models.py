@@ -434,6 +434,38 @@ class GenerateBRDRequest(BaseModel):
         """
     )
 
+    # Claim extraction settings for consistent verification
+    claims_per_section: int = Field(
+        5,
+        ge=3,
+        le=15,
+        description="""
+        Target number of claims to extract per section for verification.
+
+        Controls consistency in verification depth:
+        - 3-5: Quick verification, major claims only
+        - 5-8: Balanced verification (default)
+        - 8-15: Thorough verification, all significant claims
+
+        This ensures consistent claim counts across BRD generations.
+        """
+    )
+
+    # Section length control
+    default_section_words: int = Field(
+        300,
+        ge=100,
+        le=2000,
+        description="""
+        Default target word count per section.
+
+        Can be overridden per-section in the template using:
+        ## Section Name {words: 500}
+
+        Sections will be generated to approximately this length.
+        """
+    )
+
     # Consistency controls for reproducible outputs
     temperature: float = Field(
         0.0,
@@ -849,12 +881,15 @@ class ClaimSummary(BaseModel):
 
 
 class CodeReferenceItem(BaseModel):
-    """A code reference with file path and line numbers."""
+    """A code reference with file path, line numbers, code snippet, and explanation."""
 
     file_path: str
     start_line: int
     end_line: int
-    snippet: Optional[str] = None  # Optional code snippet
+    snippet: Optional[str] = None  # Code snippet
+    explanation: Optional[str] = None  # Why this code supports the claim
+    entity_name: Optional[str] = None  # Class/method/function name
+    entity_type: Optional[str] = None  # Class, Method, Function, etc.
 
 
 class ClaimVerificationDetail(BaseModel):
@@ -870,7 +905,8 @@ class ClaimVerificationDetail(BaseModel):
     needs_sme_review: bool
     evidence_count: int
     evidence_types: list[str] = Field(default_factory=list)  # Types of evidence found
-    code_references: list[CodeReferenceItem] = Field(default_factory=list)  # Code locations for hyperlinks
+    code_references: list[CodeReferenceItem] = Field(default_factory=list)  # Code locations with explanations
+    verification_summary: Optional[str] = None  # Brief summary of why claim is verified/not
 
 
 class SectionVerificationReport(BaseModel):

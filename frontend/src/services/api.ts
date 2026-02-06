@@ -140,6 +140,9 @@ export interface CodeReferenceItem {
   start_line: number;
   end_line: number;
   snippet?: string;
+  explanation?: string;  // Why this code supports the claim
+  entity_name?: string;  // Class/method/function name
+  entity_type?: string;  // Class, Method, Function, etc.
 }
 
 export interface ClaimVerificationDetail {
@@ -154,6 +157,7 @@ export interface ClaimVerificationDetail {
   evidence_count: number;
   evidence_types: string[];
   code_references: CodeReferenceItem[];
+  verification_summary?: string;  // Brief summary of why claim is verified/not
 }
 
 export interface SectionVerificationReport {
