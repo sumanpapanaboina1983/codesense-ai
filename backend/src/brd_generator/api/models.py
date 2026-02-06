@@ -436,14 +436,14 @@ class GenerateBRDRequest(BaseModel):
 
     # Consistency controls for reproducible outputs
     temperature: float = Field(
-        0.3,
+        0.0,
         ge=0.0,
         le=1.0,
         description="""
         LLM temperature for generation consistency.
 
-        - 0.0: Most deterministic, always picks highest probability token
-        - 0.3 (default): Balanced, consistent outputs with some variation
+        - 0.0 (default): Most deterministic, always picks highest probability token
+        - 0.3: Balanced, consistent outputs with some variation
         - 0.7: More creative, higher variance
         - 1.0: Maximum creativity, high variance
 

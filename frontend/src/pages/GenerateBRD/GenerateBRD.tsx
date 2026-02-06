@@ -68,6 +68,18 @@ interface VerificationInfo {
   verification_report?: VerificationReport;
 }
 
+// Generate a deterministic seed from a string (for reproducible outputs)
+function generateSeedFromString(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  // Ensure positive number in reasonable range
+  return Math.abs(hash) % 1000000;
+}
+
 // Default values for advanced options
 const DEFAULT_OPTIONS = {
   mode: 'draft' as GenerationMode,
@@ -77,8 +89,8 @@ const DEFAULT_OPTIONS = {
   max_iterations: 3,
   min_confidence: 0.7,
   show_evidence: false,
-  temperature: 0.3,  // Lower = more consistent outputs
-  seed: undefined as number | undefined,  // For reproducible outputs
+  temperature: 0,  // Zero for deterministic outputs
+  seed: undefined as number | undefined,  // Auto-generated from feature description
 };
 
 export function GenerateBRD() {
@@ -184,6 +196,16 @@ export function GenerateBRD() {
       }
     }
   }, [searchParams, repositories, selectedRepo]);
+
+  // Auto-generate seed from feature description for reproducible outputs
+  useEffect(() => {
+    if (featureDescription && selectedRepo) {
+      // Generate a deterministic seed from repo ID + feature description
+      const seedInput = `${selectedRepo.id}:${featureDescription}`;
+      const generatedSeed = generateSeedFromString(seedInput);
+      setSeed(generatedSeed);
+    }
+  }, [featureDescription, selectedRepo]);
 
   // Close dropdown when clicking outside
   useEffect(() => {

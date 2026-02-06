@@ -135,7 +135,7 @@ class MultiAgentOrchestrator:
         custom_sections: Optional[list[dict]] = None,
         verification_limits: Optional[dict] = None,
         progress_callback: Optional[ProgressCallback] = None,
-        temperature: float = 0.3,
+        temperature: float = 0.0,
         seed: Optional[int] = None,
     ):
         """
@@ -150,7 +150,7 @@ class MultiAgentOrchestrator:
             show_evidence_by_default: Include evidence in output
             parsed_template: Custom BRD template
             progress_callback: Optional callback for streaming progress updates
-            temperature: LLM temperature (0.0-1.0, lower = more consistent). Default 0.3.
+            temperature: LLM temperature (0.0-1.0, lower = more consistent). Default 0.0.
             seed: Optional seed for reproducible outputs
             sufficiency_criteria: Custom criteria for what makes a complete analysis.
                 Structure:
@@ -1448,7 +1448,7 @@ class VerifiedBRDGenerator:
         custom_sections: Optional[list[dict]] = None,
         verification_limits: Optional[dict] = None,
         progress_callback: Optional[ProgressCallback] = None,
-        temperature: float = 0.3,
+        temperature: float = 0.0,
         seed: Optional[int] = None,
     ):
         self.orchestrator = MultiAgentOrchestrator(
