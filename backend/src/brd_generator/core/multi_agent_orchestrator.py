@@ -746,14 +746,27 @@ IMPORTANT:
         # Detail level instructions
         detail_instructions = self._get_detail_level_instructions()
 
-        # Get custom section description if available
+        # Get custom section description and target word count if available
         custom_section_desc = ""
+        target_words = self.default_section_words  # Use instance default
         if self.custom_sections:
             for s in self.custom_sections:
                 if s.get("name", "").lower().replace(" ", "_") == section_name.lower().replace(" ", "_"):
                     if s.get("description"):
                         custom_section_desc = f"\n**Section Focus:** {s.get('description')}\n"
+                    if s.get("target_words"):
+                        target_words = s.get("target_words")
                     break
+
+        # Also check section_configs for target_words
+        if hasattr(self, 'section_configs') and self.section_configs:
+            for s in self.section_configs:
+                if isinstance(s, dict) and s.get("name", "").lower().replace(" ", "_") == section_name.lower().replace(" ", "_"):
+                    if s.get("target_words"):
+                        target_words = s.get("target_words")
+                    break
+
+        word_count_instruction = f"\n**Target Length:** Approximately {target_words} words for this section.\n"
 
         # REVERSE ENGINEERING prompt with BRD best practices
         prompt = f"""You are an expert Business Analyst reverse engineering EXISTING code to create a BRD.
@@ -765,7 +778,7 @@ IMPORTANT:
 The feature "{context.request}" ALREADY EXISTS in this codebase. Document what the code DOES, not what should be built.
 
 ## Current Section: {section_name.replace('_', ' ').title()}
-{custom_section_desc}
+{custom_section_desc}{word_count_instruction}
 {detail_instructions}
 
 ## Section Guidelines

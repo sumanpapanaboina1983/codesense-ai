@@ -1520,6 +1520,130 @@
 }
 
 /* =============================================================================
+   Section Length Configuration
+   ============================================================================= */
+
+.section-config-container {
+  margin-top: var(--spacing-lg);
+  border-top: 1px solid var(--color-gray-200);
+  padding-top: var(--spacing-lg);
+}
+
+.section-config-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: var(--spacing-md);
+  background: var(--color-gray-50);
+  border: 1px solid var(--color-gray-200);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-primary);
+  transition: all 0.2s ease;
+}
+
+.section-config-toggle:hover {
+  background: var(--color-gray-100);
+  border-color: var(--color-gray-300);
+}
+
+.section-config-toggle svg:first-child {
+  color: var(--color-accent);
+}
+
+.section-config-toggle .section-count {
+  margin-left: auto;
+  margin-right: var(--spacing-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-500);
+  background: var(--color-white);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+}
+
+.section-config-content {
+  margin-top: var(--spacing-md);
+  padding: var(--spacing-md);
+  background: var(--color-white);
+  border: 1px solid var(--color-gray-200);
+  border-radius: var(--radius-lg);
+}
+
+.section-config-hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-500);
+  margin-bottom: var(--spacing-md);
+}
+
+.section-config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-md);
+}
+
+.section-config-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--color-gray-50);
+  border-radius: var(--radius-md);
+  gap: var(--spacing-md);
+}
+
+.section-config-item .section-name {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-dark);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.section-words-input {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.section-words-input input {
+  width: 70px;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border: 1px solid var(--color-gray-300);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+
+.section-words-input input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(0, 180, 180, 0.1);
+}
+
+.section-words-input .words-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-500);
+}
+
+.section-config-actions {
+  display: flex;
+  gap: var(--spacing-sm);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--color-gray-100);
+}
+
+.section-config-actions .btn {
+  font-size: var(--font-size-xs);
+  padding: var(--spacing-xs) var(--spacing-sm);
+}
+
+/* =============================================================================
    Mode Badge Styles
    ============================================================================= */
 

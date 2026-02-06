@@ -24,6 +24,7 @@ import {
   Settings,
   Info,
   Eye,
+  Layers,
 } from 'lucide-react';
 import {
   getAnalyzedRepositories,
@@ -123,6 +124,16 @@ export function GenerateBRD() {
   const [isUsingDefaultTemplate, setIsUsingDefaultTemplate] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Section length configuration
+  interface SectionConfig {
+    name: string;
+    words: number;
+    description?: string;
+  }
+  const [sectionConfigs, setSectionConfigs] = useState<SectionConfig[]>([]);
+  const [showSectionConfig, setShowSectionConfig] = useState(false);
+  const DEFAULT_SECTION_WORDS = 300;
+
   // Streaming state
   const [isGenerating, setIsGenerating] = useState(false);
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
@@ -166,6 +177,47 @@ export function GenerateBRD() {
     };
     loadDefaultTemplate();
   }, []);
+
+  // Parse sections from template content
+  useEffect(() => {
+    if (!templateContent) return;
+
+    // Parse markdown headings to extract sections
+    // Supports: ## Section Name or ## Section Name {words: 500}
+    const sectionRegex = /^##\s+(.+?)(?:\s*\{words:\s*(\d+)\})?$/gm;
+    const sections: SectionConfig[] = [];
+    let match;
+
+    while ((match = sectionRegex.exec(templateContent)) !== null) {
+      const name = match[1].trim();
+      const words = match[2] ? parseInt(match[2], 10) : DEFAULT_SECTION_WORDS;
+
+      // Skip metadata sections
+      if (name.toLowerCase().includes('metadata') ||
+          name.toLowerCase().includes('version') ||
+          name.toLowerCase().includes('approval')) {
+        continue;
+      }
+
+      sections.push({ name, words });
+    }
+
+    // If no sections found, add default sections
+    if (sections.length === 0) {
+      sections.push(
+        { name: 'Executive Summary', words: 200 },
+        { name: 'Business Context', words: 300 },
+        { name: 'Functional Requirements', words: 400 },
+        { name: 'Technical Requirements', words: 400 },
+        { name: 'Data Requirements', words: 300 },
+        { name: 'Integration Points', words: 300 },
+        { name: 'Security & Compliance', words: 250 },
+        { name: 'Success Criteria', words: 200 },
+      );
+    }
+
+    setSectionConfigs(sections);
+  }, [templateContent]);
 
   // Handle URL parameters for pre-filling form
   useEffect(() => {
@@ -322,6 +374,15 @@ export function GenerateBRD() {
       request.template_config = {
         brd_template: templateContent,
       };
+    }
+
+    // Add section configurations with word counts
+    if (sectionConfigs.length > 0) {
+      request.custom_sections = sectionConfigs.map(section => ({
+        name: section.name,
+        description: section.description || `Content for ${section.name} section`,
+        target_words: section.words,
+      }));
     }
 
     let stepId = 0;
@@ -1317,6 +1378,82 @@ export function GenerateBRD() {
                       </div>
                     </div>
                   )}
+
+                  {/* Section Length Configuration */}
+                  <div className="section-config-container">
+                    <button
+                      type="button"
+                      className="section-config-toggle"
+                      onClick={() => setShowSectionConfig(!showSectionConfig)}
+                    >
+                      <Layers size={16} />
+                      <span>Section Length Configuration</span>
+                      <span className="section-count">{sectionConfigs.length} sections</span>
+                      {showSectionConfig ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                    </button>
+
+                    {showSectionConfig && (
+                      <div className="section-config-content">
+                        <p className="section-config-hint">
+                          Configure target word count for each section. Higher values = more detailed content.
+                        </p>
+                        <div className="section-config-grid">
+                          {sectionConfigs.map((section, index) => (
+                            <div key={index} className="section-config-item">
+                              <label className="section-name">{section.name}</label>
+                              <div className="section-words-input">
+                                <input
+                                  type="number"
+                                  min="100"
+                                  max="1000"
+                                  step="50"
+                                  value={section.words}
+                                  onChange={(e) => {
+                                    const newConfigs = [...sectionConfigs];
+                                    newConfigs[index] = {
+                                      ...section,
+                                      words: Math.max(100, Math.min(1000, parseInt(e.target.value) || 300))
+                                    };
+                                    setSectionConfigs(newConfigs);
+                                  }}
+                                />
+                                <span className="words-label">words</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="section-config-actions">
+                          <button
+                            type="button"
+                            className="btn btn-small btn-secondary"
+                            onClick={() => {
+                              setSectionConfigs(sectionConfigs.map(s => ({ ...s, words: 200 })));
+                            }}
+                          >
+                            Concise (200)
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-small btn-secondary"
+                            onClick={() => {
+                              setSectionConfigs(sectionConfigs.map(s => ({ ...s, words: 300 })));
+                            }}
+                          >
+                            Standard (300)
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-small btn-secondary"
+                            onClick={() => {
+                              setSectionConfigs(sectionConfigs.map(s => ({ ...s, words: 500 })));
+                            }}
+                          >
+                            Detailed (500)
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

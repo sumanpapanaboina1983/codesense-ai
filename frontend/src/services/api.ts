@@ -219,6 +219,13 @@ export interface GenerateBRDRequest {
   brd_template?: string;
   template_config?: BRDTemplateConfig;
 
+  // Custom sections with word count configuration
+  custom_sections?: Array<{
+    name: string;
+    description?: string;
+    target_words?: number;
+  }>;
+
   // Multi-agent verification settings (VERIFIED mode only)
   max_iterations?: number;  // default: 3, range: 1-10
   min_confidence?: number;  // default: 0.7, range: 0-1

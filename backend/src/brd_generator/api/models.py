@@ -96,6 +96,12 @@ class BRDSection(BaseModel):
         True,
         description="Whether this section is required in the output"
     )
+    target_words: int = Field(
+        300,
+        ge=100,
+        le=1000,
+        description="Target word count for this section (100-1000)"
+    )
 
 
 # =============================================================================
