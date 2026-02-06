@@ -632,7 +632,7 @@ IMPORTANT:
         return claims
 
     async def _verify_claim_direct(self, claim: Claim, context: AggregatedContext) -> None:
-        """Verify a single claim using direct MCP client queries."""
+        """Verify a single claim using direct MCP client queries and fetch actual code."""
         if not self.neo4j_client:
             logger.warning("No Neo4j client available for verification")
             return
@@ -642,72 +642,186 @@ IMPORTANT:
         max_entities = limits.get("max_entities_per_claim", 10)
         max_patterns = limits.get("max_patterns_per_claim", 5)
         results_limit = limits.get("results_per_query", 20)
-        code_refs_limit = limits.get("code_refs_per_evidence", 10)
+        code_refs_limit = limits.get("code_refs_per_evidence", 5)
+
+        code_snippets_found = []
 
         try:
-            # Search for mentioned entities in Neo4j
+            # Search for mentioned entities in Neo4j - get detailed code info
             for entity in claim.mentioned_entities[:max_entities]:
+                # Query for methods/classes with their code locations
                 query = f"""
                 MATCH (n)
                 WHERE n.name CONTAINS '{entity}' OR n.qualifiedName CONTAINS '{entity}'
-                RETURN n.name as name, labels(n) as labels, n.filePath as filePath
+                OPTIONAL MATCH (n)-[:CONTAINS|DECLARES|HAS_METHOD]->(m)
+                RETURN n.name as name, labels(n) as labels, n.filePath as filePath,
+                       n.startLine as startLine, n.endLine as endLine,
+                       n.sourceCode as sourceCode, n.body as body,
+                       collect(DISTINCT m.name) as members
                 LIMIT {results_limit}
                 """
-                # Use query_code_structure which returns {"nodes": records}
                 result = await self.neo4j_client.query_code_structure(query)
 
                 if result and result.get("nodes"):
-                    # Found evidence - high confidence since we found actual matching code
-                    evidence = EvidenceItem(
-                        evidence_type=EvidenceType.CODE_REFERENCE,
-                        category="primary",
-                        description=f"Found {entity} in codebase",
-                        confidence=0.95,  # High confidence - actual code match
-                        source="neo4j",
-                        query_used=query,
-                        supports_claim=True,
-                    )
-
                     for node in result["nodes"][:code_refs_limit]:
                         file_path = node.get("filePath") or node.get("path")
-                        if file_path:
-                            evidence.code_references.append(CodeReference(
-                                file_path=file_path,
-                                start_line=1,
-                                end_line=1,
-                                entity_name=node.get("name", entity),
-                                entity_type=node.get("labels", ["Unknown"])[0] if node.get("labels") else "Unknown",
-                            ))
+                        if not file_path:
+                            continue
 
-                    claim.add_evidence(evidence)
+                        entity_name = node.get("name", entity)
+                        entity_type = node.get("labels", ["Unknown"])[0] if node.get("labels") else "Unknown"
+                        start_line = node.get("startLine", 1) or 1
+                        end_line = node.get("endLine", start_line + 10) or start_line + 10
 
-            # Search using patterns
+                        # Try to get actual code snippet
+                        snippet = node.get("sourceCode") or node.get("body")
+                        if not snippet and self.filesystem_client:
+                            try:
+                                # Fetch code from file
+                                file_content = await self.filesystem_client.read_file(file_path)
+                                if file_content:
+                                    lines = file_content.split('\n')
+                                    # Get lines around the entity (±10 lines for context)
+                                    start_idx = max(0, start_line - 1)
+                                    end_idx = min(len(lines), end_line + 5)
+                                    snippet = '\n'.join(lines[start_idx:end_idx])
+                            except Exception as e:
+                                logger.debug(f"Could not read file {file_path}: {e}")
+
+                        if snippet:
+                            code_snippets_found.append({
+                                "file_path": file_path,
+                                "start_line": start_line,
+                                "end_line": end_line,
+                                "snippet": snippet[:500],  # Limit snippet size
+                                "entity_name": entity_name,
+                                "entity_type": entity_type,
+                                "members": node.get("members", []),
+                            })
+
+            # Search using patterns for additional evidence
             for pattern in claim.search_patterns[:max_patterns]:
                 query = f"""
                 MATCH (n)
                 WHERE n.name =~ '(?i).*{pattern}.*' OR n.qualifiedName =~ '(?i).*{pattern}.*'
-                RETURN n.name as name, labels(n) as labels, n.filePath as filePath
+                RETURN n.name as name, labels(n) as labels, n.filePath as filePath,
+                       n.startLine as startLine, n.endLine as endLine,
+                       n.sourceCode as sourceCode
                 LIMIT {results_limit}
                 """
                 try:
                     result = await self.neo4j_client.query_code_structure(query)
-
                     if result and result.get("nodes"):
-                        evidence = EvidenceItem(
-                            evidence_type=EvidenceType.CODE_REFERENCE,
-                            category="primary",
-                            description=f"Pattern '{pattern}' found in codebase",
-                            confidence=0.90,  # Pattern match - slightly lower than exact entity match
-                            source="neo4j",
-                            query_used=query,
-                            supports_claim=True,
-                        )
-                        claim.add_evidence(evidence)
+                        for node in result["nodes"][:2]:  # Limit pattern results
+                            file_path = node.get("filePath")
+                            snippet = node.get("sourceCode")
+                            if file_path and snippet:
+                                code_snippets_found.append({
+                                    "file_path": file_path,
+                                    "start_line": node.get("startLine", 1) or 1,
+                                    "end_line": node.get("endLine", 10) or 10,
+                                    "snippet": snippet[:500],
+                                    "entity_name": node.get("name", pattern),
+                                    "entity_type": node.get("labels", ["Code"])[0] if node.get("labels") else "Code",
+                                })
                 except Exception as e:
                     logger.debug(f"Pattern search failed for '{pattern}': {e}")
 
+            # If we found code, use LLM to explain how it supports the claim
+            if code_snippets_found:
+                explanation = await self._explain_code_evidence(claim.text, code_snippets_found[:3])
+
+                evidence = EvidenceItem(
+                    evidence_type=EvidenceType.CODE_REFERENCE,
+                    category="primary",
+                    description=explanation.get("summary", "Code found that implements this functionality"),
+                    confidence=0.9 if explanation.get("supports") else 0.5,
+                    source="neo4j",
+                    supports_claim=explanation.get("supports", True),
+                    notes=explanation.get("explanation"),
+                )
+
+                # Add code references with per-snippet explanations
+                for i, snippet_info in enumerate(code_snippets_found[:code_refs_limit]):
+                    snippet_explanation = None
+                    if explanation.get("snippet_explanations") and i < len(explanation["snippet_explanations"]):
+                        snippet_explanation = explanation["snippet_explanations"][i]
+
+                    evidence.code_references.append(CodeReference(
+                        file_path=snippet_info["file_path"],
+                        start_line=snippet_info["start_line"],
+                        end_line=snippet_info["end_line"],
+                        snippet=snippet_info["snippet"],
+                        entity_name=snippet_info["entity_name"],
+                        entity_type=snippet_info["entity_type"],
+                    ))
+                    # Store explanation in notes if not already set
+                    if snippet_explanation and not evidence.notes:
+                        evidence.notes = snippet_explanation
+
+                claim.add_evidence(evidence)
+            else:
+                logger.debug(f"No code snippets found for claim: {claim.text[:50]}...")
+
         except Exception as e:
             logger.warning(f"Claim verification failed: {e}")
+
+    async def _explain_code_evidence(self, claim_text: str, code_snippets: list[dict]) -> dict:
+        """Use LLM to explain how code snippets support the claim."""
+        if not code_snippets:
+            return {"supports": False, "summary": "No code found", "explanation": None}
+
+        # Format code snippets for the prompt
+        snippets_text = ""
+        for i, snippet in enumerate(code_snippets, 1):
+            snippets_text += f"""
+### Code {i}: {snippet['entity_name']} ({snippet['entity_type']})
+File: {snippet['file_path']}:{snippet['start_line']}-{snippet['end_line']}
+```
+{snippet['snippet'][:400]}
+```
+"""
+
+        prompt = f"""Analyze if this code supports the following claim from a BRD.
+
+## Claim:
+"{claim_text}"
+
+## Code Found:
+{snippets_text}
+
+## Task:
+1. Does this code implement/support the claim? (yes/no)
+2. Provide a brief summary (1 sentence) of how the code supports this claim
+3. For each code snippet, explain specifically what part implements the claim
+
+Return as JSON:
+```json
+{{
+  "supports": true,
+  "summary": "Brief summary of how code implements the claim",
+  "explanation": "Detailed explanation of the implementation",
+  "snippet_explanations": [
+    "Explanation for code 1",
+    "Explanation for code 2"
+  ]
+}}
+```
+"""
+        try:
+            response = await self._call_llm(prompt, timeout=60)
+            json_match = self._extract_json(response)
+            if json_match:
+                return json.loads(json_match)
+        except Exception as e:
+            logger.debug(f"Failed to get code explanation: {e}")
+
+        return {
+            "supports": True,
+            "summary": f"Found {len(code_snippets)} code location(s) related to this claim",
+            "explanation": None,
+            "snippet_explanations": []
+        }
 
     def _build_section_generation_prompt(
         self,

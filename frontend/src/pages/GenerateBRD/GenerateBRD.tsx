@@ -598,6 +598,121 @@ export function GenerateBRD() {
     setShowAdvancedOptions(false);
   };
 
+  // Code Evidence Panel Component - displays code that supports a claim
+  const CodeEvidencePanel = ({
+    references,
+    claimId,
+  }: {
+    references: Array<{
+      file_path: string;
+      start_line: number;
+      end_line: number;
+      snippet?: string;
+      explanation?: string;
+      entity_name?: string;
+      entity_type?: string;
+    }>;
+    claimId: string;
+  }) => {
+    const [expandedSnippets, setExpandedSnippets] = useState<Set<number>>(new Set());
+    const [showAllRefs, setShowAllRefs] = useState(false);
+
+    const toggleSnippet = (index: number) => {
+      const newExpanded = new Set(expandedSnippets);
+      if (newExpanded.has(index)) {
+        newExpanded.delete(index);
+      } else {
+        newExpanded.add(index);
+      }
+      setExpandedSnippets(newExpanded);
+    };
+
+    const displayRefs = showAllRefs ? references : references.slice(0, 3);
+
+    return (
+      <div className="code-evidence-panel">
+        <div className="code-evidence-header">
+          <FileCode size={14} />
+          <span>Supporting Code ({references.length} location{references.length !== 1 ? 's' : ''})</span>
+        </div>
+
+        <div className="code-evidence-list">
+          {displayRefs.map((ref, index) => {
+            const isExpanded = expandedSnippets.has(index);
+            const fileName = ref.file_path.split('/').pop() || ref.file_path;
+
+            return (
+              <div key={`${claimId}-ref-${index}`} className="code-evidence-item">
+                <div
+                  className="code-evidence-location"
+                  onClick={() => ref.snippet && toggleSnippet(index)}
+                  style={{ cursor: ref.snippet ? 'pointer' : 'default' }}
+                >
+                  <div className="location-info">
+                    <span className="file-name">{fileName}</span>
+                    <span className="line-range">:{ref.start_line}-{ref.end_line}</span>
+                    {ref.entity_name && (
+                      <span className="entity-badge">
+                        {ref.entity_type && <span className="entity-type">{ref.entity_type}</span>}
+                        {ref.entity_name}
+                      </span>
+                    )}
+                  </div>
+                  {ref.snippet && (
+                    <button className="expand-btn" type="button">
+                      {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                      {isExpanded ? 'Hide' : 'View'} Code
+                    </button>
+                  )}
+                </div>
+
+                {/* Explanation of how this code supports the claim */}
+                {ref.explanation && (
+                  <div className="code-explanation">
+                    <CheckCircle size={12} />
+                    <span>{ref.explanation}</span>
+                  </div>
+                )}
+
+                {/* Expandable code snippet */}
+                {ref.snippet && isExpanded && (
+                  <div className="code-snippet-container">
+                    <div className="snippet-header">
+                      <span className="snippet-path">{ref.file_path}</span>
+                      <span className="snippet-lines">Lines {ref.start_line}-{ref.end_line}</span>
+                    </div>
+                    <pre className="code-snippet-full">
+                      <code>{ref.snippet}</code>
+                    </pre>
+                  </div>
+                )}
+
+                {/* Show preview when collapsed */}
+                {ref.snippet && !isExpanded && (
+                  <pre className="code-snippet-preview">
+                    <code>{ref.snippet.split('\n').slice(0, 3).join('\n')}{ref.snippet.split('\n').length > 3 ? '\n...' : ''}</code>
+                  </pre>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {references.length > 3 && (
+          <button
+            className="show-more-refs"
+            type="button"
+            onClick={() => setShowAllRefs(!showAllRefs)}
+          >
+            {showAllRefs
+              ? `Show less`
+              : `Show ${references.length - 3} more code location${references.length - 3 !== 1 ? 's' : ''}`}
+          </button>
+        )}
+      </div>
+    );
+  };
+
   // Helper function to render confidence bar
   const renderConfidenceBar = (confidence: number) => {
     const percentage = confidence * 100;
@@ -819,36 +934,12 @@ export function GenerateBRD() {
                                   <p className="verification-summary">{claim.verification_summary}</p>
                                 )}
 
-                                {/* Code References with Explanations */}
+                                {/* Code Evidence - Shows actual code that implements the claim */}
                                 {claim.code_references && claim.code_references.length > 0 && (
-                                  <div className="code-references">
-                                    <div className="code-refs-header">
-                                      <FileCode size={14} />
-                                      <span>Code Evidence ({claim.code_references.length})</span>
-                                    </div>
-                                    {claim.code_references.slice(0, 3).map((ref, refIndex) => (
-                                      <div key={refIndex} className="code-ref-item">
-                                        <div className="code-ref-location">
-                                          <span className="file-path">{ref.file_path.split('/').pop()}</span>
-                                          <span className="line-nums">:{ref.start_line}-{ref.end_line}</span>
-                                          {ref.entity_name && (
-                                            <span className="entity-name">({ref.entity_name})</span>
-                                          )}
-                                        </div>
-                                        {ref.snippet && (
-                                          <pre className="code-snippet">{ref.snippet.slice(0, 200)}{ref.snippet.length > 200 ? '...' : ''}</pre>
-                                        )}
-                                        {ref.explanation && (
-                                          <p className="code-explanation">{ref.explanation}</p>
-                                        )}
-                                      </div>
-                                    ))}
-                                    {claim.code_references.length > 3 && (
-                                      <div className="more-refs">
-                                        +{claim.code_references.length - 3} more references
-                                      </div>
-                                    )}
-                                  </div>
+                                  <CodeEvidencePanel
+                                    references={claim.code_references}
+                                    claimId={claim.claim_id}
+                                  />
                                 )}
 
                                 <div className="claim-meta">
