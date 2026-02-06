@@ -2508,6 +2508,7 @@ async def discover_business_features(
                             complexity_score=score,
                             discovery_source="webflow",
                             entry_points=[wf_name],
+                            file_path=node.get("filePath"),
                             code_footprint=footprint,
                             has_tests=False,  # Will be updated in test check query
                         )
@@ -2605,6 +2606,7 @@ async def discover_business_features(
                             complexity_score=score,
                             discovery_source="controller",
                             entry_points=[ctrl_name],
+                            file_path=node.get("filePath"),
                             code_footprint=footprint,
                             endpoints=endpoints,
                             has_tests=False,
@@ -2673,6 +2675,7 @@ async def discover_business_features(
                             complexity_score=score,
                             discovery_source="service_cluster",
                             entry_points=[svc_name],
+                            file_path=node.get("filePath"),
                             code_footprint=footprint,
                             has_tests=False,
                         )

@@ -749,6 +749,7 @@ export interface BusinessFeature {
   complexity_score: number;
   discovery_source: 'webflow' | 'controller' | 'service_cluster';
   entry_points: string[];
+  file_path?: string;
   code_footprint: CodeFootprint;
   endpoints: FeatureEndpoint[];
   depends_on: string[];

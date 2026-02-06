@@ -1440,6 +1440,7 @@ class BusinessFeature(BaseModel):
     # Discovery metadata
     discovery_source: str = Field(..., description="How the feature was discovered (webflow, controller, service_cluster)")
     entry_points: list[str] = Field(default_factory=list, description="Entry point classes/methods")
+    file_path: Optional[str] = Field(None, description="Primary file path for this feature")
 
     # Code analysis
     code_footprint: CodeFootprint = Field(default_factory=CodeFootprint)

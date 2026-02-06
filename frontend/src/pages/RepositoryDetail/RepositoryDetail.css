@@ -939,6 +939,34 @@
 .source-controller { background: #dcfce7; color: #166534; }
 .source-service_cluster { background: #fef3c7; color: #92400e; }
 
+/* Source Cell with file and entry point */
+.source-cell {
+  max-width: 350px;
+}
+
+.source-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.source-file {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+}
+
+.source-entry-point {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
 /* Components Cell */
 .components-cell {
   display: flex;

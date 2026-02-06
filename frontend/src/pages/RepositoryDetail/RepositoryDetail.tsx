@@ -586,96 +586,64 @@ export function RepositoryDetail() {
                 </div>
               ) : discoveredFeatures && discoveredFeatures.features.length > 0 ? (
                 <div className="features-content">
-                  {/* Features Summary */}
-                  <div className="features-summary">
-                    <div className="summary-stat">
-                      <span className="summary-number">{discoveredFeatures.summary.total_features}</span>
-                      <span className="summary-label">Total Features</span>
-                    </div>
-                    <div className="summary-stat">
-                      <span className="summary-number">{discoveredFeatures.summary.features_with_tests}</span>
-                      <span className="summary-label">With Tests</span>
-                    </div>
-                    <div className="summary-stat">
-                      <span className="summary-number">{discoveredFeatures.summary.avg_complexity_score.toFixed(0)}</span>
-                      <span className="summary-label">Avg Complexity</span>
-                    </div>
-                    <div className="summary-stat">
-                      <span className="summary-number">{discoveredFeatures.discovery_duration_ms}ms</span>
-                      <span className="summary-label">Discovery Time</span>
-                    </div>
-                  </div>
-
                   {/* Features Table */}
                   <div className="features-table-container">
                     <table className="features-table">
                       <thead>
                         <tr>
                           <th>Feature</th>
-                          <th>Category</th>
-                          <th>Complexity</th>
                           <th>Source</th>
-                          <th>Components</th>
-                          <th>Tests</th>
                           <th>Actions</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {discoveredFeatures.features.map((feature) => (
-                          <tr
-                            key={feature.id}
-                            className={selectedFeature?.id === feature.id ? 'selected' : ''}
-                            onClick={() => setSelectedFeature(selectedFeature?.id === feature.id ? null : feature)}
-                          >
-                            <td className="feature-name-cell">
-                              <div className="feature-name">{feature.name}</div>
-                              <div className="feature-id">{feature.id}</div>
-                            </td>
-                            <td>
-                              <span className={`category-badge category-${feature.category}`}>
-                                {feature.category.replace('_', ' ')}
-                              </span>
-                            </td>
-                            <td>
-                              <div className="complexity-indicator">
-                                <div
-                                  className={`complexity-bar complexity-${feature.complexity}`}
-                                  style={{ width: `${feature.complexity_score}%` }}
-                                />
-                                <span className="complexity-score">{feature.complexity_score}</span>
-                              </div>
-                            </td>
-                            <td>
-                              <span className={`source-badge source-${feature.discovery_source}`}>
-                                {feature.discovery_source === 'service_cluster' ? 'service' : feature.discovery_source}
-                              </span>
-                            </td>
-                            <td className="components-cell">
-                              <span title="Controllers">{feature.code_footprint.controllers.length} ctrl</span>
-                              <span title="Services">{feature.code_footprint.services.length} svc</span>
-                              {feature.endpoints.length > 0 && (
-                                <span title="Endpoints">{feature.endpoints.length} api</span>
-                              )}
-                            </td>
-                            <td>
-                              {feature.has_tests ? (
-                                <CheckCircle2 size={16} className="test-yes" />
-                              ) : (
-                                <XCircle size={16} className="test-no" />
-                              )}
-                            </td>
-                            <td>
-                              <Link
-                                to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(feature.name)}`}
-                                className="btn btn-small btn-primary"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <FileText size={14} />
-                                BRD
-                              </Link>
-                            </td>
-                          </tr>
-                        ))}
+                        {discoveredFeatures.features.map((feature) => {
+                          // Extract filename from file_path
+                          const fileName = feature.file_path
+                            ? feature.file_path.split('/').pop() || feature.file_path
+                            : null;
+                          const entryPoint = feature.entry_points[0] || '';
+
+                          return (
+                            <tr
+                              key={feature.id}
+                              className={selectedFeature?.id === feature.id ? 'selected' : ''}
+                              onClick={() => setSelectedFeature(selectedFeature?.id === feature.id ? null : feature)}
+                            >
+                              <td className="feature-name-cell">
+                                <div className="feature-name">{feature.name}</div>
+                                <div className="feature-id">{feature.id}</div>
+                              </td>
+                              <td className="source-cell">
+                                <div className="source-info">
+                                  <span className={`source-badge source-${feature.discovery_source}`}>
+                                    {feature.discovery_source === 'service_cluster' ? 'service' : feature.discovery_source}
+                                  </span>
+                                  {fileName && (
+                                    <div className="source-file" title={feature.file_path || ''}>
+                                      {fileName}
+                                    </div>
+                                  )}
+                                  {entryPoint && (
+                                    <div className="source-entry-point">
+                                      {entryPoint}
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                              <td>
+                                <Link
+                                  to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(feature.name)}`}
+                                  className="btn btn-small btn-primary"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <FileText size={14} />
+                                  BRD
+                                </Link>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
