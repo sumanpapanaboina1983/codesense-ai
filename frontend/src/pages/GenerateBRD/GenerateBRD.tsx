@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
 import {
@@ -83,6 +83,7 @@ const DEFAULT_OPTIONS = {
 
 export function GenerateBRD() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   // State
   const [selectedRepo, setSelectedRepo] = useState<RepositorySummary | null>(null);
@@ -154,6 +155,35 @@ export function GenerateBRD() {
     };
     loadDefaultTemplate();
   }, []);
+
+  // Handle URL parameters for pre-filling form
+  useEffect(() => {
+    const repositoryId = searchParams.get('repository');
+    const feature = searchParams.get('feature');
+    const description = searchParams.get('description');
+    const urlMode = searchParams.get('mode');
+
+    // Set mode from URL parameter
+    if (urlMode === 'verified' || urlMode === 'draft') {
+      setMode(urlMode as GenerationMode);
+    }
+
+    // Set feature description from URL
+    if (feature) {
+      const fullDescription = description
+        ? `${feature}\n\n${description}`
+        : feature;
+      setFeatureDescription(fullDescription);
+    }
+
+    // Select repository from URL parameter once repositories are loaded
+    if (repositoryId && repositories && !selectedRepo) {
+      const repo = repositories.find(r => r.id === repositoryId);
+      if (repo) {
+        setSelectedRepo(repo);
+      }
+    }
+  }, [searchParams, repositories, selectedRepo]);
 
   // Close dropdown when clicking outside
   useEffect(() => {

@@ -633,12 +633,12 @@ export function RepositoryDetail() {
                               </td>
                               <td>
                                 <Link
-                                  to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(feature.name)}`}
+                                  to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(feature.name)}&mode=verified`}
                                   className="btn btn-small btn-primary"
                                   onClick={(e) => e.stopPropagation()}
                                 >
                                   <FileText size={14} />
-                                  BRD
+                                  Generate BRD
                                 </Link>
                               </td>
                             </tr>
@@ -754,7 +754,7 @@ export function RepositoryDetail() {
 
                         <div className="feature-actions">
                           <Link
-                            to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(selectedFeature.name)}&description=${encodeURIComponent(selectedFeature.description)}`}
+                            to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(selectedFeature.name)}&description=${encodeURIComponent(selectedFeature.description)}&mode=verified`}
                             className="btn btn-primary"
                           >
                             <FileText size={16} />

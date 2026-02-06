@@ -778,9 +778,9 @@
    ============================================================================= */
 
 .feature-count-badge {
-  background: var(--color-primary-light);
-  color: var(--color-primary);
-  padding: 2px 8px;
+  background: var(--color-primary);
+  color: #ffffff;
+  padding: 4px 10px;
   border-radius: 12px;
   font-size: var(--font-size-xs);
   font-weight: 600;
