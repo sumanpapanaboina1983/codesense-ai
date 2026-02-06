@@ -2384,6 +2384,166 @@ def _generate_feature_description(
     return " ".join(parts)
 
 
+def _extract_screen_prefix(jsp_name: str) -> str:
+    """Extract the screen prefix from a JSP filename.
+
+    Examples:
+        legalEntityAddressEntry.jsp -> legalEntityAddress
+        pointGroupMaintenanceResults.jsp -> pointGroupMaintenance
+        homePointLookup.jsp -> homePoint
+    """
+    import re
+    # Remove .jsp extension
+    name = jsp_name.replace('.jsp', '').replace('.JSP', '')
+
+    # Common suffixes to remove (order matters - longer first)
+    suffixes = [
+        'SearchLookup', 'SearchResults', 'MaintenanceEntry', 'MaintenanceResults',
+        'Entry', 'Results', 'Lookup', 'Search', 'Detail', 'Details',
+        'Conflicts', 'List', 'View', 'Edit', 'Add', 'Delete', 'Form',
+        'Maintenance', 'Management', 'Admin', 'Summary', 'Report',
+        'Procedures', 'Rule', 'Rules',
+    ]
+
+    # Try to find and remove suffix
+    for suffix in suffixes:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[:-len(suffix)]
+            break
+
+    return name
+
+
+def _is_business_screen(screen_prefix: str, jsp_names: list[str]) -> bool:
+    """Check if a screen group represents a business feature (not a template/layout)."""
+    # Skip common templates, layouts, and admin pages
+    skip_prefixes = {
+        'header', 'footer', 'error', 'index', 'layout',
+        'template', 'common', 'include', 'menu', 'nav', 'sidebar',
+        'exception', 'exceptions', 'login', 'logout', 'redirect',
+        'admin', 'jamonadmin', 'jamon', 'test', 'debug', 'sample'
+    }
+
+    prefix_lower = screen_prefix.lower()
+
+    # Skip if it's a template/layout
+    if prefix_lower in skip_prefixes:
+        return False
+
+    # Skip if it ends with layout or admin
+    if prefix_lower.endswith('layout') or prefix_lower.endswith('-layout'):
+        return False
+    if prefix_lower.endswith('admin'):
+        return False
+
+    # Skip single-view generic pages
+    if len(jsp_names) == 1 and prefix_lower in {'email', 'error', 'success', 'confirmation'}:
+        return False
+
+    return True
+
+
+def _group_jsps_by_screen(jsp_pages: list[dict]) -> dict[str, list[dict]]:
+    """Group JSP pages by their screen prefix.
+
+    Returns dict mapping screen_prefix -> list of JSP info dicts
+    """
+    groups: dict[str, list[dict]] = {}
+
+    for jsp in jsp_pages:
+        jsp_name = jsp.get('name', '')
+        if not jsp_name:
+            continue
+
+        prefix = _extract_screen_prefix(jsp_name)
+        if prefix not in groups:
+            groups[prefix] = []
+        groups[prefix].append(jsp)
+
+    return groups
+
+
+def _camel_to_title(camel_str: str) -> str:
+    """Convert camelCase to Title Case with spaces.
+
+    Examples:
+        legalEntityAddress -> Legal Entity Address
+        pointGroupMaintenance -> Point Group Maintenance
+        ediDunsFileSetup -> EDI DUNS File Setup
+    """
+    import re
+
+    # Handle common acronyms that should stay uppercase
+    acronyms = {'edi': 'EDI', 'duns': 'DUNS', 'api': 'API', 'ui': 'UI', 'csr': 'CSR'}
+
+    # Insert space before uppercase letters
+    spaced = re.sub(r'([a-z])([A-Z])', r'\1 \2', camel_str)
+
+    # Also handle sequences like "XMLParser" -> "XML Parser"
+    spaced = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', spaced)
+
+    # Split and process each word
+    words = spaced.split()
+    result_words = []
+    for word in words:
+        word_lower = word.lower()
+        if word_lower in acronyms:
+            result_words.append(acronyms[word_lower])
+        else:
+            result_words.append(word.capitalize())
+
+    return ' '.join(result_words)
+
+
+async def _generate_feature_name_with_llm(
+    session,
+    screen_prefix: str,
+    jsp_names: list[str],
+    controller_names: list[str],
+) -> str:
+    """Use LLM to generate a concise, business-friendly feature name.
+
+    Falls back to simple title conversion if LLM is not available.
+    """
+    # Fallback name from camelCase conversion
+    fallback_name = _camel_to_title(screen_prefix)
+
+    if not session:
+        return fallback_name
+
+    try:
+        prompt = f"""Generate a concise business feature name (2-4 words max) for this screen/feature.
+
+Technical context:
+- Screen prefix: {screen_prefix}
+- JSP pages: {', '.join(jsp_names[:5])}
+- Controllers: {', '.join(controller_names[:3]) if controller_names else 'None'}
+
+Requirements:
+- Name must be 2-4 words maximum
+- Use business terminology, not technical jargon
+- Examples of good names: "Legal Entity Search", "Point Group Management", "Address Maintenance"
+
+Return ONLY the feature name, nothing else."""
+
+        # Try to use session for LLM call
+        if hasattr(session, 'send_and_wait'):
+            import asyncio
+            event = await asyncio.wait_for(
+                session.send_and_wait({"content": prompt}, timeout=10),
+                timeout=15
+            )
+            if event and hasattr(event, 'text'):
+                name = event.text.strip().strip('"').strip("'")
+                # Validate - should be short
+                if name and len(name.split()) <= 5:
+                    return name
+    except Exception as e:
+        logger.debug(f"LLM feature naming failed: {e}")
+
+    return fallback_name
+
+
 @router.get(
     "/repositories/{repository_id}/features",
     response_model=DiscoveredFeaturesResponse,
@@ -2394,37 +2554,34 @@ def _generate_feature_description(
     **Phase 5**: Discover business features from the analyzed codebase.
 
     This endpoint analyzes the code graph to identify distinct business features
-    by examining:
+    using a **screen-centric approach**:
 
-    1. **Spring Web Flows** - Multi-step business processes
-    2. **Controllers** - REST endpoints grouped by controller
-    3. **Service Clusters** - Services and their dependencies
+    1. **JSP Pages** - Group related JSP pages into logical screens/features
+    2. **Spring Web Flows** - Multi-step business processes
+    3. **Controllers** - Find associated controllers for each screen
 
     ## Discovery Process
 
-    1. Query Neo4j for WebFlows, Controllers, and Services
-    2. Analyze relationships and dependencies
-    3. Group related components into features
-    4. Calculate complexity scores
-    5. Categorize features automatically
+    1. Query all JSP pages and group by common prefix (e.g., legalEntityAddress*)
+    2. Find associated controllers and services for each screen group
+    3. Use LLM to generate concise, business-friendly feature names
+    4. Calculate complexity scores based on code footprint
 
     ## Response
 
     Returns a list of discovered features with:
-    - Name and auto-generated description
-    - Category (authentication, user_management, etc.)
-    - Complexity score (0-100)
-    - Code footprint (controllers, services, models, views)
-    - Associated API endpoints
-    - Test coverage information
+    - Business-friendly name (e.g., "Legal Entity Search")
+    - File path and entry points
+    - Code footprint (controllers, services, views)
     """,
 )
 async def discover_business_features(
     repository_id: str,
     generator: BRDGenerator = Depends(get_generator),
 ) -> DiscoveredFeaturesResponse:
-    """Discover business features from the codebase."""
+    """Discover business features from the codebase using screen-centric approach."""
     import time
+    import re
     from datetime import datetime
     from sqlalchemy import select
 
@@ -2434,8 +2591,8 @@ async def discover_business_features(
         logger.info(f"[API] Discovering business features for repository: {repository_id}")
 
         # Get repository info
-        async with get_async_session() as session:
-            result = await session.execute(
+        async with get_async_session() as db_session:
+            result = await db_session.execute(
                 select(RepositoryDB).where(RepositoryDB.id == repository_id)
             )
             db_repo = result.scalar_one_or_none()
@@ -2458,22 +2615,144 @@ async def discover_business_features(
         features: list[BusinessFeature] = []
         feature_id = 0
 
+        # Get LLM session for feature naming (if available)
+        llm_session = getattr(generator, '_copilot_session', None)
+
         if generator.neo4j_client:
             try:
                 # =========================================================
-                # Discovery Method 1: Spring Web Flows
+                # Step 1: Query all JSP pages
+                # =========================================================
+                jsp_query = """
+                MATCH (j:JSPPage)
+                WHERE j.repositoryId = $repository_id
+                RETURN j.name as name, j.filePath as filePath
+                ORDER BY j.name
+                """
+                jsp_result = await generator.neo4j_client.query_code_structure(
+                    jsp_query,
+                    {"repository_id": repository_id}
+                )
+
+                jsp_pages = []
+                if jsp_result and jsp_result.get("nodes"):
+                    jsp_pages = [n for n in jsp_result["nodes"] if n.get("name")]
+
+                # =========================================================
+                # Step 2: Group JSPs by screen prefix
+                # =========================================================
+                screen_groups = _group_jsps_by_screen(jsp_pages)
+                logger.info(f"[FEATURES] Found {len(screen_groups)} screen groups from {len(jsp_pages)} JSP pages")
+
+                # =========================================================
+                # Step 3: Query all controllers for mapping
+                # =========================================================
+                controller_query = """
+                MATCH (c)
+                WHERE c.repositoryId = $repository_id
+                    AND (c:SpringController OR c.stereotype = 'Controller')
+                OPTIONAL MATCH (c)-[:USES|DEPENDS_ON|CALLS]->(svc)
+                WHERE svc:SpringService OR svc.stereotype = 'Service'
+                RETURN
+                    c.name as controllerName,
+                    c.filePath as filePath,
+                    collect(DISTINCT svc.name) as services
+                """
+                controller_result = await generator.neo4j_client.query_code_structure(
+                    controller_query,
+                    {"repository_id": repository_id}
+                )
+
+                controllers_map: dict[str, dict] = {}
+                if controller_result and controller_result.get("nodes"):
+                    for node in controller_result["nodes"]:
+                        ctrl_name = node.get("controllerName", "")
+                        if ctrl_name:
+                            controllers_map[ctrl_name.lower()] = node
+
+                # =========================================================
+                # Step 4: Create features from screen groups
+                # =========================================================
+                for screen_prefix, jsps in screen_groups.items():
+                    if not screen_prefix or len(screen_prefix) < 3:
+                        continue
+
+                    jsp_names = [j.get('name', '') for j in jsps]
+                    jsp_paths = [j.get('filePath', '') for j in jsps]
+
+                    # Skip non-business screens (templates, layouts, etc.)
+                    if not _is_business_screen(screen_prefix, jsp_names):
+                        continue
+
+                    feature_id += 1
+
+                    # Find matching controllers by name similarity
+                    matched_controllers = []
+                    matched_services = []
+                    screen_lower = screen_prefix.lower()
+
+                    for ctrl_name, ctrl_info in controllers_map.items():
+                        # Match if controller name contains screen prefix
+                        if screen_lower in ctrl_name or any(
+                            keyword in ctrl_name
+                            for keyword in screen_lower.split()
+                            if len(keyword) > 3
+                        ):
+                            matched_controllers.append(ctrl_info.get('controllerName', ''))
+                            matched_services.extend(ctrl_info.get('services', []) or [])
+
+                    # Deduplicate services
+                    matched_services = list(set(s for s in matched_services if s))
+
+                    # Build footprint
+                    footprint = CodeFootprint(
+                        controllers=matched_controllers[:5],
+                        services=matched_services[:5],
+                        views=jsp_names,
+                        total_files=len(jsps) + len(matched_controllers) + len(matched_services),
+                    )
+
+                    # Generate feature name using LLM or fallback
+                    feature_name = await _generate_feature_name_with_llm(
+                        llm_session,
+                        screen_prefix,
+                        jsp_names,
+                        matched_controllers,
+                    )
+
+                    # Get primary file path
+                    primary_file_path = jsp_paths[0] if jsp_paths else None
+
+                    # Categorize and calculate complexity
+                    category = _categorize_feature(feature_name, paths=jsp_paths)
+                    complexity, score = _calculate_complexity(footprint)
+
+                    feature = BusinessFeature(
+                        id=f"FEAT-{feature_id:03d}",
+                        name=feature_name,
+                        description=f"Screen for {feature_name.lower()} with {len(jsps)} view(s).",
+                        category=category,
+                        complexity=complexity,
+                        complexity_score=score,
+                        discovery_source="screen",
+                        entry_points=matched_controllers[:3] if matched_controllers else [screen_prefix],
+                        file_path=primary_file_path,
+                        code_footprint=footprint,
+                        has_tests=False,
+                    )
+                    features.append(feature)
+
+                # =========================================================
+                # Step 5: Add Web Flows as separate features
                 # =========================================================
                 webflow_query = """
                 MATCH (wf:SpringWebFlow)
                 WHERE wf.repositoryId = $repository_id
                 OPTIONAL MATCH (wf)-[:HAS_STATE]->(state)
-                OPTIONAL MATCH (wf)-[:USES|DEPENDS_ON]->(service)
-                WHERE service:SpringService OR service.stereotype = 'Service'
                 RETURN
                     wf.name as name,
                     wf.filePath as filePath,
-                    collect(DISTINCT state.name) as states,
-                    collect(DISTINCT service.name) as services
+                    collect(DISTINCT state.name) as states
                 """
                 webflow_result = await generator.neo4j_client.query_code_structure(
                     webflow_query,
@@ -2487,13 +2766,19 @@ async def discover_business_features(
                             continue
 
                         feature_id += 1
-                        services = [s for s in (node.get("services") or []) if s]
                         states = [s for s in (node.get("states") or []) if s]
 
                         footprint = CodeFootprint(
-                            services=services,
-                            views=states,  # States often correspond to views
-                            total_files=1 + len(services) + len(states),
+                            views=states,
+                            total_files=1 + len(states),
+                        )
+
+                        # Generate name from webflow name
+                        feature_name = await _generate_feature_name_with_llm(
+                            llm_session,
+                            wf_name.replace("-flow", "").replace("Flow", ""),
+                            states,
+                            [],
                         )
 
                         category = _categorize_feature(wf_name, paths=[node.get("filePath", "")])
@@ -2501,8 +2786,8 @@ async def discover_business_features(
 
                         feature = BusinessFeature(
                             id=f"FEAT-{feature_id:03d}",
-                            name=wf_name.replace("-flow", "").replace("Flow", "").replace("_", " ").title(),
-                            description=_generate_feature_description(wf_name, category, footprint, []),
+                            name=feature_name,
+                            description=f"Workflow for {feature_name.lower()} with {len(states)} state(s).",
                             category=category,
                             complexity=complexity,
                             complexity_score=score,
@@ -2510,243 +2795,21 @@ async def discover_business_features(
                             entry_points=[wf_name],
                             file_path=node.get("filePath"),
                             code_footprint=footprint,
-                            has_tests=False,  # Will be updated in test check query
-                        )
-                        features.append(feature)
-
-                # =========================================================
-                # Discovery Method 2: Controllers with Endpoints
-                # =========================================================
-                controller_query = """
-                MATCH (c)
-                WHERE c.repositoryId = $repository_id
-                    AND (c:SpringController OR c.stereotype = 'Controller')
-                OPTIONAL MATCH (c)-[:HAS_METHOD]->(m)
-                WHERE m.isEndpoint = true OR m.httpMethod IS NOT NULL
-                OPTIONAL MATCH (c)-[:USES|DEPENDS_ON|CALLS]->(svc)
-                WHERE svc:SpringService OR svc.stereotype = 'Service'
-                OPTIONAL MATCH (svc)-[:USES|DEPENDS_ON|CALLS]->(repo)
-                WHERE repo.stereotype = 'Repository'
-                RETURN
-                    c.name as controllerName,
-                    c.filePath as filePath,
-                    c.basePath as basePath,
-                    collect(DISTINCT {
-                        method: m.name,
-                        httpMethod: m.httpMethod,
-                        path: m.path
-                    }) as endpoints,
-                    collect(DISTINCT svc.name) as services,
-                    collect(DISTINCT repo.name) as repositories
-                ORDER BY c.name
-                """
-                controller_result = await generator.neo4j_client.query_code_structure(
-                    controller_query,
-                    {"repository_id": repository_id}
-                )
-
-                if controller_result and controller_result.get("nodes"):
-                    for node in controller_result["nodes"]:
-                        ctrl_name = node.get("controllerName", "")
-                        if not ctrl_name:
-                            continue
-
-                        feature_id += 1
-                        services = [s for s in (node.get("services") or []) if s]
-                        repos = [r for r in (node.get("repositories") or []) if r]
-                        raw_endpoints = node.get("endpoints") or []
-                        base_path = node.get("basePath", "")
-
-                        # Build endpoints
-                        endpoints: list[FeatureEndpoint] = []
-                        for ep in raw_endpoints:
-                            if ep and ep.get("method"):
-                                path = ep.get("path") or ""
-                                full_path = f"{base_path}{path}" if base_path else path
-                                endpoints.append(FeatureEndpoint(
-                                    path=full_path or f"/{ctrl_name.lower()}",
-                                    method=ep.get("httpMethod", "GET") or "GET",
-                                    controller=ctrl_name,
-                                    description=ep.get("method"),
-                                ))
-
-                        footprint = CodeFootprint(
-                            controllers=[ctrl_name],
-                            services=services,
-                            repositories=repos,
-                            total_files=1 + len(services) + len(repos),
-                        )
-
-                        # Generate feature name from controller
-                        feature_name = (ctrl_name
-                            .replace("Controller", "")
-                            .replace("Rest", "")
-                            .replace("Api", "")
-                        )
-                        # Convert camelCase to spaces
-                        import re
-                        feature_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', feature_name)
-                        feature_name = feature_name.strip().title()
-                        if not feature_name:
-                            feature_name = ctrl_name
-
-                        category = _categorize_feature(
-                            feature_name,
-                            ctrl_name,
-                            [ep.path for ep in endpoints]
-                        )
-                        complexity, score = _calculate_complexity(footprint)
-
-                        feature = BusinessFeature(
-                            id=f"FEAT-{feature_id:03d}",
-                            name=feature_name,
-                            description=_generate_feature_description(feature_name, category, footprint, endpoints),
-                            category=category,
-                            complexity=complexity,
-                            complexity_score=score,
-                            discovery_source="controller",
-                            entry_points=[ctrl_name],
-                            file_path=node.get("filePath"),
-                            code_footprint=footprint,
-                            endpoints=endpoints,
                             has_tests=False,
                         )
                         features.append(feature)
-
-                # =========================================================
-                # Discovery Method 3: Service Clusters (services without controllers)
-                # =========================================================
-                service_cluster_query = """
-                MATCH (s)
-                WHERE s.repositoryId = $repository_id
-                    AND (s:SpringService OR s.stereotype = 'Service')
-                    AND NOT EXISTS {
-                        MATCH (c)-[:USES|DEPENDS_ON|CALLS]->(s)
-                        WHERE c:SpringController OR c.stereotype = 'Controller'
-                    }
-                OPTIONAL MATCH (s)-[:USES|DEPENDS_ON|CALLS]->(dep)
-                WHERE dep:SpringService OR dep.stereotype = 'Service' OR dep.stereotype = 'Repository'
-                RETURN
-                    s.name as serviceName,
-                    s.filePath as filePath,
-                    collect(DISTINCT dep.name) as dependencies
-                """
-                service_result = await generator.neo4j_client.query_code_structure(
-                    service_cluster_query,
-                    {"repository_id": repository_id}
-                )
-
-                if service_result and service_result.get("nodes"):
-                    for node in service_result["nodes"]:
-                        svc_name = node.get("serviceName", "")
-                        if not svc_name:
-                            continue
-
-                        feature_id += 1
-                        deps = [d for d in (node.get("dependencies") or []) if d]
-
-                        footprint = CodeFootprint(
-                            services=[svc_name] + [d for d in deps if "Service" in d],
-                            repositories=[d for d in deps if "Repository" in d or "Dao" in d],
-                            total_files=1 + len(deps),
-                        )
-
-                        # Generate feature name
-                        feature_name = (svc_name
-                            .replace("Service", "")
-                            .replace("Impl", "")
-                            .replace("Helper", "")
-                        )
-                        import re
-                        feature_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', feature_name)
-                        feature_name = feature_name.strip().title()
-                        if not feature_name:
-                            feature_name = svc_name
-
-                        category = _categorize_feature(feature_name, svc_name)
-                        complexity, score = _calculate_complexity(footprint)
-
-                        feature = BusinessFeature(
-                            id=f"FEAT-{feature_id:03d}",
-                            name=f"{feature_name} (Background)",
-                            description=_generate_feature_description(feature_name, category, footprint, []),
-                            category=category,
-                            complexity=complexity,
-                            complexity_score=score,
-                            discovery_source="service_cluster",
-                            entry_points=[svc_name],
-                            file_path=node.get("filePath"),
-                            code_footprint=footprint,
-                            has_tests=False,
-                        )
-                        features.append(feature)
-
-                # =========================================================
-                # Enrich with JSP/View information
-                # =========================================================
-                jsp_query = """
-                MATCH (j:JSPPage)
-                WHERE j.repositoryId = $repository_id
-                RETURN j.name as name, j.filePath as filePath
-                """
-                jsp_result = await generator.neo4j_client.query_code_structure(
-                    jsp_query,
-                    {"repository_id": repository_id}
-                )
-
-                if jsp_result and jsp_result.get("nodes"):
-                    jsp_files = [n.get("name", "") for n in jsp_result["nodes"] if n.get("name")]
-
-                    # Match JSPs to features by name similarity
-                    for feature in features:
-                        feature_keywords = feature.name.lower().replace(" ", "").split()
-                        matched_views = []
-                        for jsp in jsp_files:
-                            jsp_lower = jsp.lower()
-                            if any(kw in jsp_lower for kw in feature_keywords if len(kw) > 3):
-                                matched_views.append(jsp)
-                        if matched_views:
-                            feature.code_footprint.views = matched_views[:5]  # Limit to 5
-                            feature.code_footprint.total_files += len(matched_views)
-
-                # =========================================================
-                # Check test coverage for features
-                # =========================================================
-                for feature in features:
-                    # Check if any component has tests
-                    components = (
-                        feature.code_footprint.controllers +
-                        feature.code_footprint.services
-                    )
-                    if components:
-                        test_check_query = """
-                        MATCH (f:File)
-                        WHERE f.repositoryId = $repository_id
-                            AND (f.name CONTAINS 'Test' OR f.name CONTAINS 'Spec'
-                                 OR f.filePath CONTAINS '/test/')
-                            AND ANY(comp IN $components WHERE f.name CONTAINS comp OR f.filePath CONTAINS comp)
-                        RETURN count(f) as test_count
-                        """
-                        test_result = await generator.neo4j_client.query_code_structure(
-                            test_check_query,
-                            {"repository_id": repository_id, "components": components}
-                        )
-                        if test_result and test_result.get("nodes"):
-                            test_count = int(test_result["nodes"][0].get("test_count", 0) or 0)
-                            feature.has_tests = test_count > 0
-                            if test_count > 0:
-                                # Rough estimate: assume each test file covers ~30%
-                                feature.test_coverage_estimate = min(test_count * 30, 100)
 
             except Exception as neo4j_error:
                 logger.warning(f"Neo4j query failed during feature discovery: {neo4j_error}")
+                import traceback
+                logger.warning(traceback.format_exc())
 
         # Calculate summary statistics
         summary = FeaturesSummary(
             total_features=len(features),
             by_category={cat.value: 0 for cat in FeatureCategory},
             by_complexity={comp.value: 0 for comp in FeatureComplexity},
-            by_discovery_source={"webflow": 0, "controller": 0, "service_cluster": 0},
+            by_discovery_source={"screen": 0, "webflow": 0, "controller": 0},
             features_with_tests=0,
             features_with_brd=0,
             avg_complexity_score=0.0,
@@ -2776,7 +2839,7 @@ async def discover_business_features(
             generated_at=datetime.now(),
             features=features,
             summary=summary,
-            discovery_method="hybrid",
+            discovery_method="screen-centric",
             discovery_duration_ms=duration_ms,
         )
 

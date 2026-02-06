@@ -938,6 +938,7 @@
 .source-webflow { background: #dbeafe; color: #1e40af; }
 .source-controller { background: #dcfce7; color: #166534; }
 .source-service_cluster { background: #fef3c7; color: #92400e; }
+.source-screen { background: #f3e8ff; color: #6b21a8; }
 
 /* Source Cell with file and entry point */
 .source-cell {
