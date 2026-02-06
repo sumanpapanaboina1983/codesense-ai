@@ -2384,28 +2384,56 @@ def _generate_feature_description(
     return " ".join(parts)
 
 
-def _extract_screen_prefix(jsp_name: str) -> str:
-    """Extract the screen prefix from a JSP filename.
+# =============================================================================
+# Dynamic Feature Discovery Helpers
+# =============================================================================
 
-    Examples:
-        legalEntityAddressEntry.jsp -> legalEntityAddress
-        pointGroupMaintenanceResults.jsp -> pointGroupMaintenance
-        homePointLookup.jsp -> homePoint
-    """
+# Blocklist of obvious technical/infrastructure terms (small, focused list)
+TECHNICAL_BLOCKLIST = {
+    # Logging/Debugging
+    'log', 'logger', 'logging', 'log4j', 'slf4j', 'debug', 'trace',
+
+    # UI Infrastructure
+    'header', 'footer', 'layout', 'template', 'include', 'menu', 'nav',
+    'sidebar', 'toolbar', 'modal', 'dialog', 'error', 'exception',
+
+    # System/Admin
+    'admin', 'jamon', 'jamonadmin', 'actuator', 'swagger', 'health', 'metrics',
+
+    # Generic pages
+    'index', 'home', 'main', 'default', 'welcome', 'login', 'logout',
+
+    # Test/Mock
+    'test', 'tests', 'spec', 'mock', 'stub',
+}
+
+
+def _is_technical_name(name: str) -> bool:
+    """Check if a name represents technical infrastructure (not a business feature)."""
+    name_lower = name.lower()
+
+    # Check blocklist
+    for term in TECHNICAL_BLOCKLIST:
+        if name_lower == term or name_lower.startswith(term) or name_lower.endswith(term):
+            return True
+
+    return False
+
+
+def _extract_screen_prefix(jsp_name: str) -> str:
+    """Extract the screen prefix from a JSP filename."""
     import re
-    # Remove .jsp extension
     name = jsp_name.replace('.jsp', '').replace('.JSP', '')
 
-    # Common suffixes to remove (order matters - longer first)
+    # Remove common suffixes
     suffixes = [
         'SearchLookup', 'SearchResults', 'MaintenanceEntry', 'MaintenanceResults',
         'Entry', 'Results', 'Lookup', 'Search', 'Detail', 'Details',
         'Conflicts', 'List', 'View', 'Edit', 'Add', 'Delete', 'Form',
         'Maintenance', 'Management', 'Admin', 'Summary', 'Report',
-        'Procedures', 'Rule', 'Rules',
+        'Procedures', 'Rule', 'Rules', 'Inquiry',
     ]
 
-    # Try to find and remove suffix
     for suffix in suffixes:
         if name.endswith(suffix) and len(name) > len(suffix):
             name = name[:-len(suffix)]
@@ -2414,40 +2442,8 @@ def _extract_screen_prefix(jsp_name: str) -> str:
     return name
 
 
-def _is_business_screen(screen_prefix: str, jsp_names: list[str]) -> bool:
-    """Check if a screen group represents a business feature (not a template/layout)."""
-    # Skip common templates, layouts, and admin pages
-    skip_prefixes = {
-        'header', 'footer', 'error', 'index', 'layout',
-        'template', 'common', 'include', 'menu', 'nav', 'sidebar',
-        'exception', 'exceptions', 'login', 'logout', 'redirect',
-        'admin', 'jamonadmin', 'jamon', 'test', 'debug', 'sample'
-    }
-
-    prefix_lower = screen_prefix.lower()
-
-    # Skip if it's a template/layout
-    if prefix_lower in skip_prefixes:
-        return False
-
-    # Skip if it ends with layout or admin
-    if prefix_lower.endswith('layout') or prefix_lower.endswith('-layout'):
-        return False
-    if prefix_lower.endswith('admin'):
-        return False
-
-    # Skip single-view generic pages
-    if len(jsp_names) == 1 and prefix_lower in {'email', 'error', 'success', 'confirmation'}:
-        return False
-
-    return True
-
-
-def _group_jsps_by_screen(jsp_pages: list[dict]) -> dict[str, list[dict]]:
-    """Group JSP pages by their screen prefix.
-
-    Returns dict mapping screen_prefix -> list of JSP info dicts
-    """
+def _group_jsps_by_prefix(jsp_pages: list[dict]) -> dict[str, list[dict]]:
+    """Group JSP pages by their screen prefix."""
     groups: dict[str, list[dict]] = {}
 
     for jsp in jsp_pages:
@@ -2456,6 +2452,11 @@ def _group_jsps_by_screen(jsp_pages: list[dict]) -> dict[str, list[dict]]:
             continue
 
         prefix = _extract_screen_prefix(jsp_name)
+
+        # Skip technical prefixes
+        if _is_technical_name(prefix):
+            continue
+
         if prefix not in groups:
             groups[prefix] = []
         groups[prefix].append(jsp)
@@ -2464,25 +2465,15 @@ def _group_jsps_by_screen(jsp_pages: list[dict]) -> dict[str, list[dict]]:
 
 
 def _camel_to_title(camel_str: str) -> str:
-    """Convert camelCase to Title Case with spaces.
-
-    Examples:
-        legalEntityAddress -> Legal Entity Address
-        pointGroupMaintenance -> Point Group Maintenance
-        ediDunsFileSetup -> EDI DUNS File Setup
-    """
+    """Convert camelCase to Title Case with spaces."""
     import re
 
-    # Handle common acronyms that should stay uppercase
-    acronyms = {'edi': 'EDI', 'duns': 'DUNS', 'api': 'API', 'ui': 'UI', 'csr': 'CSR'}
+    # Handle common acronyms
+    acronyms = {'edi': 'EDI', 'duns': 'DUNS', 'api': 'API', 'ui': 'UI', 'csr': 'CSR', 'xml': 'XML'}
 
-    # Insert space before uppercase letters
     spaced = re.sub(r'([a-z])([A-Z])', r'\1 \2', camel_str)
-
-    # Also handle sequences like "XMLParser" -> "XML Parser"
     spaced = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', spaced)
 
-    # Split and process each word
     words = spaced.split()
     result_words = []
     for word in words:
@@ -2495,53 +2486,142 @@ def _camel_to_title(camel_str: str) -> str:
     return ' '.join(result_words)
 
 
-async def _generate_feature_name_with_llm(
-    session,
-    screen_prefix: str,
-    jsp_names: list[str],
-    controller_names: list[str],
-) -> str:
-    """Use LLM to generate a concise, business-friendly feature name.
+def _is_likely_business_feature(prefix: str, jsp_names: list[str], controllers: list[str]) -> bool:
+    """Use smart heuristics to determine if this is likely a business feature.
 
-    Falls back to simple title conversion if LLM is not available.
+    Business features typically:
+    - Have multiple related screens (JSPs)
+    - Are backed by controllers
+    - Have meaningful business entity names (compound names like legalEntity)
+    - Are NOT generic single-word utility pages
     """
-    # Fallback name from camelCase conversion
-    fallback_name = _camel_to_title(screen_prefix)
+    # Already filtered technical names, but double-check
+    if _is_technical_name(prefix):
+        return False
 
-    if not session:
-        return fallback_name
+    # Generic single-word names that are NOT business features regardless of JSP count
+    generic_excludes = {
+        'definition', 'definitions', 'employee', 'employees',
+        'email', 'message', 'notification', 'alert', 'alerts',
+        'search', 'find', 'lookup', 'query', 'filter',
+        'report', 'reports', 'export', 'import', 'upload', 'download',
+        'list', 'grid', 'table', 'view', 'display', 'show',
+        'help', 'info', 'about', 'contact', 'settings', 'preferences',
+        'print', 'pdf', 'csv', 'excel', 'word',
+        'common', 'shared', 'util', 'utils', 'utility', 'utilities',
+        'base', 'abstract', 'generic', 'default', 'standard',
+    }
 
-    try:
-        prompt = f"""Generate a concise business feature name (2-4 words max) for this screen/feature.
+    prefix_lower = prefix.lower()
 
-Technical context:
-- Screen prefix: {screen_prefix}
-- JSP pages: {', '.join(jsp_names[:5])}
-- Controllers: {', '.join(controller_names[:3]) if controller_names else 'None'}
+    # Check if it's a generic single-word name (no compound)
+    has_compound_name = any(c.isupper() for c in prefix[1:]) if len(prefix) > 1 else False
 
-Requirements:
-- Name must be 2-4 words maximum
-- Use business terminology, not technical jargon
-- Examples of good names: "Legal Entity Search", "Point Group Management", "Address Maintenance"
+    # Exclude generic single-word names even if they have multiple JSPs
+    if not has_compound_name and prefix_lower in generic_excludes:
+        return False
 
-Return ONLY the feature name, nothing else."""
+    # If it has a controller AND is a compound name, it's likely a business feature
+    if controllers and has_compound_name:
+        return True
 
-        # Try to use session for LLM call
-        if hasattr(session, 'send_and_wait'):
-            import asyncio
-            event = await asyncio.wait_for(
-                session.send_and_wait({"content": prompt}, timeout=10),
-                timeout=15
-            )
-            if event and hasattr(event, 'text'):
-                name = event.text.strip().strip('"').strip("'")
-                # Validate - should be short
-                if name and len(name.split()) <= 5:
-                    return name
-    except Exception as e:
-        logger.debug(f"LLM feature naming failed: {e}")
+    # If it has a controller but generic name, check if it's a real business entity
+    if controllers and not has_compound_name:
+        # Even with a controller, single generic words are likely infrastructure
+        if prefix_lower in generic_excludes:
+            return False
+        return True
 
-    return fallback_name
+    # No controller - must have compound name AND multiple JSPs
+    if not controllers:
+        if not has_compound_name:
+            return False
+        # Compound name with multiple JSPs - likely a business feature
+        if len(jsp_names) >= 2:
+            return True
+        # Single JSP even with compound name - be conservative
+        return False
+
+    return False
+
+
+async def _classify_features_with_llm(
+    session,
+    candidates: list[dict],
+) -> list[dict]:
+    """Use LLM to classify and name multiple feature candidates at once.
+
+    Args:
+        session: LLM session
+        candidates: List of dicts with 'prefix', 'jsp_names', 'controllers'
+
+    Returns:
+        List of dicts with 'prefix', 'is_business', 'feature_name'
+    """
+    # Use smart heuristics (works without LLM)
+    results = []
+    for c in candidates:
+        prefix = c['prefix']
+        jsp_names = c['jsp_names']
+        controllers = c['controllers']
+
+        is_business = _is_likely_business_feature(prefix, jsp_names, controllers)
+
+        results.append({
+            'prefix': prefix,
+            'is_business': is_business,
+            'feature_name': _camel_to_title(prefix),
+        })
+
+    # If LLM session available, try to get better names for business features
+    if session:
+        try:
+            # Build batch prompt for business features only
+            business_candidates = [(i, c) for i, c in enumerate(candidates) if results[i]['is_business']]
+
+            if business_candidates and len(business_candidates) <= 30:
+                candidate_list = []
+                for idx, (i, c) in enumerate(business_candidates):
+                    jsp_str = ', '.join(c['jsp_names'][:3])
+                    ctrl_str = ', '.join(c['controllers'][:2]) if c['controllers'] else 'None'
+                    candidate_list.append(f"{idx+1}. {c['prefix']} | JSPs: {jsp_str} | Controllers: {ctrl_str}")
+
+                prompt = f"""Generate concise business feature names (2-4 words each) for these screens.
+
+Screens:
+{chr(10).join(candidate_list)}
+
+Respond with one name per line in format: <number>|<Feature Name>
+Example:
+1|Legal Entity Search
+2|Contract Management
+"""
+
+                if hasattr(session, 'send_and_wait'):
+                    import asyncio
+                    event = await asyncio.wait_for(
+                        session.send_and_wait({"prompt": prompt}, timeout=30),
+                        timeout=35
+                    )
+
+                    if event and hasattr(event, 'text'):
+                        response = event.text.strip()
+                        for line in response.split('\n'):
+                            parts = line.strip().split('|')
+                            if len(parts) >= 2:
+                                try:
+                                    idx = int(parts[0].strip()) - 1
+                                    name = parts[1].strip().strip('"').strip("'")
+                                    if 0 <= idx < len(business_candidates) and name:
+                                        original_idx = business_candidates[idx][0]
+                                        results[original_idx]['feature_name'] = name
+                                except (ValueError, IndexError):
+                                    continue
+
+        except Exception as e:
+            logger.warning(f"LLM feature naming failed (using heuristic names): {e}")
+
+    return results
 
 
 @router.get(
@@ -2560,28 +2640,34 @@ Return ONLY the feature name, nothing else."""
     2. **Spring Web Flows** - Multi-step business processes
     3. **Controllers** - Find associated controllers for each screen
 
-    ## Discovery Process
+    ## Discovery Process (Dynamic + LLM Classification)
 
-    1. Query all JSP pages and group by common prefix (e.g., legalEntityAddress*)
-    2. Find associated controllers and services for each screen group
-    3. Use LLM to generate concise, business-friendly feature names
-    4. Calculate complexity scores based on code footprint
+    1. **Web Flows First** - Spring Web Flows are explicit business processes
+    2. **JSP Grouping** - Group JSPs by common prefix
+    3. **LLM Classification** - Use LLM to classify each group as BUSINESS or TECHNICAL
+    4. **Controller Mapping** - Find associated controllers for each feature
+
+    ## How It Works
+
+    - No hardcoded business domains - discovery is fully dynamic
+    - LLM classifies candidates as business features or technical infrastructure
+    - Technical blocklist filters obvious infrastructure (logging, admin, layouts)
+    - Features with multiple JSPs or controllers are prioritized
 
     ## Response
 
-    Returns a list of discovered features with:
-    - Business-friendly name (e.g., "Legal Entity Search")
-    - File path and entry points
-    - Code footprint (controllers, services, views)
+    Returns validated business features with:
+    - LLM-generated business-friendly name
+    - Associated controllers and services
+    - Grouped JSP views
     """,
 )
 async def discover_business_features(
     repository_id: str,
     generator: BRDGenerator = Depends(get_generator),
 ) -> DiscoveredFeaturesResponse:
-    """Discover business features from the codebase using screen-centric approach."""
+    """Discover business features using dynamic LLM-based classification."""
     import time
-    import re
     from datetime import datetime
     from sqlalchemy import select
 
@@ -2615,14 +2701,78 @@ async def discover_business_features(
         features: list[BusinessFeature] = []
         feature_id = 0
 
-        # Get LLM session for feature naming (if available)
+        # Get LLM session for feature classification
         llm_session = getattr(generator, '_copilot_session', None)
 
         if generator.neo4j_client:
             try:
                 # =========================================================
-                # Step 1: Query all JSP pages
+                # Step 1: Web Flows - These ARE business processes
                 # =========================================================
+                logger.info("[FEATURES] Step 1: Discovering Web Flows...")
+                webflow_query = """
+                MATCH (wf:SpringWebFlow)
+                WHERE wf.repositoryId = $repository_id
+                OPTIONAL MATCH (wf)-[:HAS_STATE]->(state)
+                OPTIONAL MATCH (wf)-[:USES|DEPENDS_ON]->(svc)
+                WHERE svc:SpringService OR svc.stereotype = 'Service'
+                RETURN
+                    wf.name as name,
+                    wf.filePath as filePath,
+                    collect(DISTINCT state.name) as states,
+                    collect(DISTINCT svc.name) as services
+                """
+                webflow_result = await generator.neo4j_client.query_code_structure(
+                    webflow_query,
+                    {"repository_id": repository_id}
+                )
+
+                webflow_count = 0
+                if webflow_result and webflow_result.get("nodes"):
+                    for node in webflow_result["nodes"]:
+                        wf_name = node.get("name", "")
+                        if not wf_name or _is_technical_name(wf_name):
+                            continue
+
+                        feature_id += 1
+                        webflow_count += 1
+                        states = [s for s in (node.get("states") or []) if s]
+                        services = [s for s in (node.get("services") or []) if s]
+
+                        # Generate feature name from webflow
+                        clean_name = wf_name.replace("-flow", "").replace("Flow", "").replace("-", " ")
+                        feature_name = _camel_to_title(clean_name)
+
+                        footprint = CodeFootprint(
+                            services=services[:5],
+                            views=states,
+                            total_files=1 + len(states) + len(services),
+                        )
+
+                        category = _categorize_feature(feature_name, paths=[node.get("filePath", "")])
+                        complexity, score = _calculate_complexity(footprint)
+
+                        feature = BusinessFeature(
+                            id=f"FEAT-{feature_id:03d}",
+                            name=feature_name,
+                            description=f"Business workflow with {len(states)} state(s).",
+                            category=category,
+                            complexity=complexity,
+                            complexity_score=score,
+                            discovery_source="webflow",
+                            entry_points=[wf_name],
+                            file_path=node.get("filePath"),
+                            code_footprint=footprint,
+                            has_tests=False,
+                        )
+                        features.append(feature)
+
+                logger.info(f"[FEATURES] Found {webflow_count} web flows")
+
+                # =========================================================
+                # Step 2: Query all JSP pages
+                # =========================================================
+                logger.info("[FEATURES] Step 2: Querying JSP pages...")
                 jsp_query = """
                 MATCH (j:JSPPage)
                 WHERE j.repositoryId = $repository_id
@@ -2638,15 +2788,19 @@ async def discover_business_features(
                 if jsp_result and jsp_result.get("nodes"):
                     jsp_pages = [n for n in jsp_result["nodes"] if n.get("name")]
 
-                # =========================================================
-                # Step 2: Group JSPs by screen prefix
-                # =========================================================
-                screen_groups = _group_jsps_by_screen(jsp_pages)
-                logger.info(f"[FEATURES] Found {len(screen_groups)} screen groups from {len(jsp_pages)} JSP pages")
+                logger.info(f"[FEATURES] Found {len(jsp_pages)} JSP pages")
 
                 # =========================================================
-                # Step 3: Query all controllers for mapping
+                # Step 3: Group JSPs by prefix (filtering technical ones)
                 # =========================================================
+                logger.info("[FEATURES] Step 3: Grouping JSPs by prefix...")
+                jsp_groups = _group_jsps_by_prefix(jsp_pages)
+                logger.info(f"[FEATURES] Found {len(jsp_groups)} JSP groups after filtering")
+
+                # =========================================================
+                # Step 4: Query all controllers for mapping
+                # =========================================================
+                logger.info("[FEATURES] Step 4: Querying controllers...")
                 controller_query = """
                 MATCH (c)
                 WHERE c.repositoryId = $repository_id
@@ -2670,38 +2824,62 @@ async def discover_business_features(
                         if ctrl_name:
                             controllers_map[ctrl_name.lower()] = node
 
+                logger.info(f"[FEATURES] Found {len(controllers_map)} controllers")
+
                 # =========================================================
-                # Step 4: Create features from screen groups
+                # Step 5: Build candidates and find matching controllers
                 # =========================================================
-                for screen_prefix, jsps in screen_groups.items():
-                    if not screen_prefix or len(screen_prefix) < 3:
+                logger.info("[FEATURES] Step 5: Building feature candidates...")
+                candidates = []
+                for prefix, jsps in jsp_groups.items():
+                    if not prefix or len(prefix) < 3:
                         continue
 
                     jsp_names = [j.get('name', '') for j in jsps]
-                    jsp_paths = [j.get('filePath', '') for j in jsps]
 
-                    # Skip non-business screens (templates, layouts, etc.)
-                    if not _is_business_screen(screen_prefix, jsp_names):
+                    # Find matching controllers
+                    matched_controllers = []
+                    prefix_lower = prefix.lower()
+                    for ctrl_name, ctrl_info in controllers_map.items():
+                        if prefix_lower in ctrl_name:
+                            matched_controllers.append(ctrl_info.get('controllerName', ''))
+
+                    candidates.append({
+                        'prefix': prefix,
+                        'jsp_names': jsp_names,
+                        'controllers': matched_controllers,
+                        'jsps': jsps,
+                    })
+
+                logger.info(f"[FEATURES] Built {len(candidates)} candidates for classification")
+
+                # =========================================================
+                # Step 6: Classify features with LLM (batch)
+                # =========================================================
+                logger.info("[FEATURES] Step 6: Classifying features with LLM...")
+                classified = await _classify_features_with_llm(llm_session, candidates)
+
+                # =========================================================
+                # Step 7: Create features from classified results
+                # =========================================================
+                logger.info("[FEATURES] Step 7: Creating features from classified results...")
+                for i, classification in enumerate(classified):
+                    if not classification.get('is_business', False):
                         continue
+
+                    candidate = candidates[i]
+                    prefix = candidate['prefix']
+                    jsps = candidate['jsps']
+                    jsp_names = candidate['jsp_names']
+                    matched_controllers = candidate['controllers']
 
                     feature_id += 1
 
-                    # Find matching controllers by name similarity
-                    matched_controllers = []
+                    # Get services from matched controllers
                     matched_services = []
-                    screen_lower = screen_prefix.lower()
-
-                    for ctrl_name, ctrl_info in controllers_map.items():
-                        # Match if controller name contains screen prefix
-                        if screen_lower in ctrl_name or any(
-                            keyword in ctrl_name
-                            for keyword in screen_lower.split()
-                            if len(keyword) > 3
-                        ):
-                            matched_controllers.append(ctrl_info.get('controllerName', ''))
-                            matched_services.extend(ctrl_info.get('services', []) or [])
-
-                    # Deduplicate services
+                    for ctrl_name in matched_controllers:
+                        ctrl_info = controllers_map.get(ctrl_name.lower(), {})
+                        matched_services.extend(ctrl_info.get('services', []) or [])
                     matched_services = list(set(s for s in matched_services if s))
 
                     # Build footprint
@@ -2712,92 +2890,32 @@ async def discover_business_features(
                         total_files=len(jsps) + len(matched_controllers) + len(matched_services),
                     )
 
-                    # Generate feature name using LLM or fallback
-                    feature_name = await _generate_feature_name_with_llm(
-                        llm_session,
-                        screen_prefix,
-                        jsp_names,
-                        matched_controllers,
-                    )
+                    # Get feature name from LLM classification
+                    feature_name = classification.get('feature_name', _camel_to_title(prefix))
 
                     # Get primary file path
-                    primary_file_path = jsp_paths[0] if jsp_paths else None
+                    file_paths = [j.get('filePath', '') for j in jsps]
+                    primary_file_path = file_paths[0] if file_paths else None
 
-                    # Categorize and calculate complexity
-                    category = _categorize_feature(feature_name, paths=jsp_paths)
+                    category = _categorize_feature(feature_name, paths=file_paths)
                     complexity, score = _calculate_complexity(footprint)
 
                     feature = BusinessFeature(
                         id=f"FEAT-{feature_id:03d}",
                         name=feature_name,
-                        description=f"Screen for {feature_name.lower()} with {len(jsps)} view(s).",
+                        description=f"Business feature with {len(jsps)} screen(s).",
                         category=category,
                         complexity=complexity,
                         complexity_score=score,
                         discovery_source="screen",
-                        entry_points=matched_controllers[:3] if matched_controllers else [screen_prefix],
+                        entry_points=matched_controllers[:3] if matched_controllers else [prefix],
                         file_path=primary_file_path,
                         code_footprint=footprint,
                         has_tests=False,
                     )
                     features.append(feature)
 
-                # =========================================================
-                # Step 5: Add Web Flows as separate features
-                # =========================================================
-                webflow_query = """
-                MATCH (wf:SpringWebFlow)
-                WHERE wf.repositoryId = $repository_id
-                OPTIONAL MATCH (wf)-[:HAS_STATE]->(state)
-                RETURN
-                    wf.name as name,
-                    wf.filePath as filePath,
-                    collect(DISTINCT state.name) as states
-                """
-                webflow_result = await generator.neo4j_client.query_code_structure(
-                    webflow_query,
-                    {"repository_id": repository_id}
-                )
-
-                if webflow_result and webflow_result.get("nodes"):
-                    for node in webflow_result["nodes"]:
-                        wf_name = node.get("name", "")
-                        if not wf_name:
-                            continue
-
-                        feature_id += 1
-                        states = [s for s in (node.get("states") or []) if s]
-
-                        footprint = CodeFootprint(
-                            views=states,
-                            total_files=1 + len(states),
-                        )
-
-                        # Generate name from webflow name
-                        feature_name = await _generate_feature_name_with_llm(
-                            llm_session,
-                            wf_name.replace("-flow", "").replace("Flow", ""),
-                            states,
-                            [],
-                        )
-
-                        category = _categorize_feature(wf_name, paths=[node.get("filePath", "")])
-                        complexity, score = _calculate_complexity(footprint)
-
-                        feature = BusinessFeature(
-                            id=f"FEAT-{feature_id:03d}",
-                            name=feature_name,
-                            description=f"Workflow for {feature_name.lower()} with {len(states)} state(s).",
-                            category=category,
-                            complexity=complexity,
-                            complexity_score=score,
-                            discovery_source="webflow",
-                            entry_points=[wf_name],
-                            file_path=node.get("filePath"),
-                            code_footprint=footprint,
-                            has_tests=False,
-                        )
-                        features.append(feature)
+                logger.info(f"[FEATURES] Created {len(features)} total features")
 
             except Exception as neo4j_error:
                 logger.warning(f"Neo4j query failed during feature discovery: {neo4j_error}")
