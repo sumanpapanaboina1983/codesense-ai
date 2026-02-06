@@ -702,6 +702,93 @@ export async function getCodebaseStatistics(repositoryId: string): Promise<Codeb
 }
 
 // =============================================================================
+// Business Features Discovery API
+// =============================================================================
+
+export type FeatureCategory =
+  | 'authentication'
+  | 'user_management'
+  | 'data_management'
+  | 'workflow'
+  | 'reporting'
+  | 'integration'
+  | 'payment'
+  | 'notification'
+  | 'search'
+  | 'admin'
+  | 'configuration'
+  | 'other';
+
+export type FeatureComplexity = 'low' | 'medium' | 'high' | 'very_high';
+
+export interface CodeFootprint {
+  controllers: string[];
+  services: string[];
+  repositories: string[];
+  models: string[];
+  views: string[];
+  config_files: string[];
+  test_files: string[];
+  total_files: number;
+  total_lines: number;
+}
+
+export interface FeatureEndpoint {
+  path: string;
+  method: string;
+  controller: string;
+  description?: string;
+}
+
+export interface BusinessFeature {
+  id: string;
+  name: string;
+  description: string;
+  category: FeatureCategory;
+  complexity: FeatureComplexity;
+  complexity_score: number;
+  discovery_source: 'webflow' | 'controller' | 'service_cluster';
+  entry_points: string[];
+  code_footprint: CodeFootprint;
+  endpoints: FeatureEndpoint[];
+  depends_on: string[];
+  depended_by: string[];
+  has_tests: boolean;
+  test_coverage_estimate?: number;
+  brd_generated: boolean;
+  brd_id?: string;
+}
+
+export interface FeaturesSummary {
+  total_features: number;
+  by_category: Record<string, number>;
+  by_complexity: Record<string, number>;
+  by_discovery_source: Record<string, number>;
+  features_with_tests: number;
+  features_with_brd: number;
+  avg_complexity_score: number;
+}
+
+export interface DiscoveredFeaturesResponse {
+  success: boolean;
+  repository_id: string;
+  repository_name: string;
+  generated_at: string;
+  features: BusinessFeature[];
+  summary: FeaturesSummary;
+  discovery_method: string;
+  discovery_duration_ms?: number;
+}
+
+// Get Discovered Business Features
+export async function getDiscoveredFeatures(repositoryId: string): Promise<DiscoveredFeaturesResponse> {
+  const response = await backendApi.get<DiscoveredFeaturesResponse>(
+    `/repositories/${repositoryId}/features`
+  );
+  return response.data;
+}
+
+// =============================================================================
 // Repository Detail API
 // =============================================================================
 

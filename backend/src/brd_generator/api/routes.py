@@ -60,6 +60,14 @@ from .models import (
     CodebaseStatistics,
     CodebaseStatisticsResponse,
     LanguageBreakdown,
+    # Business Features Discovery
+    BusinessFeature,
+    DiscoveredFeaturesResponse,
+    FeaturesSummary,
+    FeatureCategory,
+    FeatureComplexity,
+    CodeFootprint,
+    FeatureEndpoint,
 )
 from ..core.generator import BRDGenerator
 from ..core.synthesizer import TemplateConfig
@@ -2277,4 +2285,500 @@ async def enrich_tests(
         raise
     except Exception as e:
         logger.exception("Failed to enrich tests")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Phase 5: Business Features Discovery
+# =============================================================================
+
+def _categorize_feature(name: str, controller_name: str = "", paths: list[str] = None) -> FeatureCategory:
+    """Categorize a feature based on naming patterns and paths."""
+    paths = paths or []
+    combined = f"{name} {controller_name} {' '.join(paths)}".lower()
+
+    if any(kw in combined for kw in ["auth", "login", "logout", "session", "oauth", "sso", "credential"]):
+        return FeatureCategory.AUTHENTICATION
+    elif any(kw in combined for kw in ["user", "profile", "account", "member", "customer", "register"]):
+        return FeatureCategory.USER_MANAGEMENT
+    elif any(kw in combined for kw in ["payment", "billing", "invoice", "subscription", "checkout", "cart"]):
+        return FeatureCategory.PAYMENT
+    elif any(kw in combined for kw in ["admin", "manage", "dashboard", "console"]):
+        return FeatureCategory.ADMIN
+    elif any(kw in combined for kw in ["report", "analytics", "stats", "metrics", "export"]):
+        return FeatureCategory.REPORTING
+    elif any(kw in combined for kw in ["search", "filter", "find", "query", "lookup"]):
+        return FeatureCategory.SEARCH
+    elif any(kw in combined for kw in ["notify", "alert", "email", "sms", "push", "message"]):
+        return FeatureCategory.NOTIFICATION
+    elif any(kw in combined for kw in ["config", "setting", "preference", "option"]):
+        return FeatureCategory.CONFIGURATION
+    elif any(kw in combined for kw in ["workflow", "process", "flow", "step", "wizard"]):
+        return FeatureCategory.WORKFLOW
+    elif any(kw in combined for kw in ["integrat", "api", "external", "webhook", "sync"]):
+        return FeatureCategory.INTEGRATION
+    elif any(kw in combined for kw in ["create", "update", "delete", "edit", "save", "load", "data"]):
+        return FeatureCategory.DATA_MANAGEMENT
+    return FeatureCategory.OTHER
+
+
+def _calculate_complexity(footprint: CodeFootprint) -> tuple[FeatureComplexity, int]:
+    """Calculate complexity based on code footprint."""
+    # Base score from file counts
+    score = 0
+    score += min(len(footprint.controllers) * 10, 20)
+    score += min(len(footprint.services) * 8, 24)
+    score += min(len(footprint.repositories) * 5, 15)
+    score += min(len(footprint.models) * 3, 15)
+    score += min(len(footprint.views) * 4, 16)
+    score += min(footprint.total_files * 2, 20)
+
+    # Cap at 100
+    score = min(score, 100)
+
+    if score >= 75:
+        return FeatureComplexity.VERY_HIGH, score
+    elif score >= 50:
+        return FeatureComplexity.HIGH, score
+    elif score >= 25:
+        return FeatureComplexity.MEDIUM, score
+    return FeatureComplexity.LOW, score
+
+
+def _generate_feature_description(
+    name: str,
+    category: FeatureCategory,
+    footprint: CodeFootprint,
+    endpoints: list[FeatureEndpoint]
+) -> str:
+    """Generate a description for a feature based on its metadata."""
+    parts = []
+
+    # Main description
+    category_desc = {
+        FeatureCategory.AUTHENTICATION: "handles user authentication and session management",
+        FeatureCategory.USER_MANAGEMENT: "manages user profiles and account operations",
+        FeatureCategory.DATA_MANAGEMENT: "provides data management capabilities",
+        FeatureCategory.WORKFLOW: "implements business workflow processes",
+        FeatureCategory.REPORTING: "generates reports and analytics",
+        FeatureCategory.INTEGRATION: "integrates with external systems",
+        FeatureCategory.PAYMENT: "processes payments and billing",
+        FeatureCategory.NOTIFICATION: "sends notifications and alerts",
+        FeatureCategory.SEARCH: "provides search and filtering functionality",
+        FeatureCategory.ADMIN: "provides administrative functions",
+        FeatureCategory.CONFIGURATION: "manages system configuration",
+        FeatureCategory.OTHER: "provides business functionality",
+    }
+    parts.append(f"This feature {category_desc.get(category, 'provides business functionality')}.")
+
+    # Components
+    if footprint.controllers:
+        parts.append(f"Exposes {len(footprint.controllers)} controller(s).")
+    if footprint.services:
+        parts.append(f"Utilizes {len(footprint.services)} service(s).")
+    if endpoints:
+        parts.append(f"Provides {len(endpoints)} API endpoint(s).")
+    if footprint.views:
+        parts.append(f"Includes {len(footprint.views)} UI view(s).")
+
+    return " ".join(parts)
+
+
+@router.get(
+    "/repositories/{repository_id}/features",
+    response_model=DiscoveredFeaturesResponse,
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    tags=["Business Features Discovery"],
+    summary="Discover business features from codebase",
+    description="""
+    **Phase 5**: Discover business features from the analyzed codebase.
+
+    This endpoint analyzes the code graph to identify distinct business features
+    by examining:
+
+    1. **Spring Web Flows** - Multi-step business processes
+    2. **Controllers** - REST endpoints grouped by controller
+    3. **Service Clusters** - Services and their dependencies
+
+    ## Discovery Process
+
+    1. Query Neo4j for WebFlows, Controllers, and Services
+    2. Analyze relationships and dependencies
+    3. Group related components into features
+    4. Calculate complexity scores
+    5. Categorize features automatically
+
+    ## Response
+
+    Returns a list of discovered features with:
+    - Name and auto-generated description
+    - Category (authentication, user_management, etc.)
+    - Complexity score (0-100)
+    - Code footprint (controllers, services, models, views)
+    - Associated API endpoints
+    - Test coverage information
+    """,
+)
+async def discover_business_features(
+    repository_id: str,
+    generator: BRDGenerator = Depends(get_generator),
+) -> DiscoveredFeaturesResponse:
+    """Discover business features from the codebase."""
+    import time
+    from datetime import datetime
+    from sqlalchemy import select
+
+    start_time = time.time()
+
+    try:
+        logger.info(f"[API] Discovering business features for repository: {repository_id}")
+
+        # Get repository info
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(RepositoryDB).where(RepositoryDB.id == repository_id)
+            )
+            db_repo = result.scalar_one_or_none()
+
+            if not db_repo:
+                raise HTTPException(status_code=404, detail=f"Repository not found: {repository_id}")
+
+            if db_repo.analysis_status != DBAnalysisStatus.COMPLETED:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Repository not analyzed. Current status: {db_repo.analysis_status.value}"
+                )
+
+            repository_name = db_repo.name
+
+        # Ensure generator is initialized
+        if not generator._initialized:
+            await generator.initialize()
+
+        features: list[BusinessFeature] = []
+        feature_id = 0
+
+        if generator.neo4j_client:
+            try:
+                # =========================================================
+                # Discovery Method 1: Spring Web Flows
+                # =========================================================
+                webflow_query = """
+                MATCH (wf:SpringWebFlow)
+                WHERE wf.repositoryId = $repository_id
+                OPTIONAL MATCH (wf)-[:HAS_STATE]->(state)
+                OPTIONAL MATCH (wf)-[:USES|DEPENDS_ON]->(service)
+                WHERE service:SpringService OR service.stereotype = 'Service'
+                RETURN
+                    wf.name as name,
+                    wf.filePath as filePath,
+                    collect(DISTINCT state.name) as states,
+                    collect(DISTINCT service.name) as services
+                """
+                webflow_result = await generator.neo4j_client.query_code_structure(
+                    webflow_query,
+                    {"repository_id": repository_id}
+                )
+
+                if webflow_result and webflow_result.get("nodes"):
+                    for node in webflow_result["nodes"]:
+                        wf_name = node.get("name", "")
+                        if not wf_name:
+                            continue
+
+                        feature_id += 1
+                        services = [s for s in (node.get("services") or []) if s]
+                        states = [s for s in (node.get("states") or []) if s]
+
+                        footprint = CodeFootprint(
+                            services=services,
+                            views=states,  # States often correspond to views
+                            total_files=1 + len(services) + len(states),
+                        )
+
+                        category = _categorize_feature(wf_name, paths=[node.get("filePath", "")])
+                        complexity, score = _calculate_complexity(footprint)
+
+                        feature = BusinessFeature(
+                            id=f"FEAT-{feature_id:03d}",
+                            name=wf_name.replace("-flow", "").replace("Flow", "").replace("_", " ").title(),
+                            description=_generate_feature_description(wf_name, category, footprint, []),
+                            category=category,
+                            complexity=complexity,
+                            complexity_score=score,
+                            discovery_source="webflow",
+                            entry_points=[wf_name],
+                            code_footprint=footprint,
+                            has_tests=False,  # Will be updated in test check query
+                        )
+                        features.append(feature)
+
+                # =========================================================
+                # Discovery Method 2: Controllers with Endpoints
+                # =========================================================
+                controller_query = """
+                MATCH (c)
+                WHERE c.repositoryId = $repository_id
+                    AND (c:SpringController OR c.stereotype = 'Controller')
+                OPTIONAL MATCH (c)-[:HAS_METHOD]->(m)
+                WHERE m.isEndpoint = true OR m.httpMethod IS NOT NULL
+                OPTIONAL MATCH (c)-[:USES|DEPENDS_ON|CALLS]->(svc)
+                WHERE svc:SpringService OR svc.stereotype = 'Service'
+                OPTIONAL MATCH (svc)-[:USES|DEPENDS_ON|CALLS]->(repo)
+                WHERE repo.stereotype = 'Repository'
+                RETURN
+                    c.name as controllerName,
+                    c.filePath as filePath,
+                    c.basePath as basePath,
+                    collect(DISTINCT {
+                        method: m.name,
+                        httpMethod: m.httpMethod,
+                        path: m.path
+                    }) as endpoints,
+                    collect(DISTINCT svc.name) as services,
+                    collect(DISTINCT repo.name) as repositories
+                ORDER BY c.name
+                """
+                controller_result = await generator.neo4j_client.query_code_structure(
+                    controller_query,
+                    {"repository_id": repository_id}
+                )
+
+                if controller_result and controller_result.get("nodes"):
+                    for node in controller_result["nodes"]:
+                        ctrl_name = node.get("controllerName", "")
+                        if not ctrl_name:
+                            continue
+
+                        feature_id += 1
+                        services = [s for s in (node.get("services") or []) if s]
+                        repos = [r for r in (node.get("repositories") or []) if r]
+                        raw_endpoints = node.get("endpoints") or []
+                        base_path = node.get("basePath", "")
+
+                        # Build endpoints
+                        endpoints: list[FeatureEndpoint] = []
+                        for ep in raw_endpoints:
+                            if ep and ep.get("method"):
+                                path = ep.get("path") or ""
+                                full_path = f"{base_path}{path}" if base_path else path
+                                endpoints.append(FeatureEndpoint(
+                                    path=full_path or f"/{ctrl_name.lower()}",
+                                    method=ep.get("httpMethod", "GET") or "GET",
+                                    controller=ctrl_name,
+                                    description=ep.get("method"),
+                                ))
+
+                        footprint = CodeFootprint(
+                            controllers=[ctrl_name],
+                            services=services,
+                            repositories=repos,
+                            total_files=1 + len(services) + len(repos),
+                        )
+
+                        # Generate feature name from controller
+                        feature_name = (ctrl_name
+                            .replace("Controller", "")
+                            .replace("Rest", "")
+                            .replace("Api", "")
+                        )
+                        # Convert camelCase to spaces
+                        import re
+                        feature_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', feature_name)
+                        feature_name = feature_name.strip().title()
+                        if not feature_name:
+                            feature_name = ctrl_name
+
+                        category = _categorize_feature(
+                            feature_name,
+                            ctrl_name,
+                            [ep.path for ep in endpoints]
+                        )
+                        complexity, score = _calculate_complexity(footprint)
+
+                        feature = BusinessFeature(
+                            id=f"FEAT-{feature_id:03d}",
+                            name=feature_name,
+                            description=_generate_feature_description(feature_name, category, footprint, endpoints),
+                            category=category,
+                            complexity=complexity,
+                            complexity_score=score,
+                            discovery_source="controller",
+                            entry_points=[ctrl_name],
+                            code_footprint=footprint,
+                            endpoints=endpoints,
+                            has_tests=False,
+                        )
+                        features.append(feature)
+
+                # =========================================================
+                # Discovery Method 3: Service Clusters (services without controllers)
+                # =========================================================
+                service_cluster_query = """
+                MATCH (s)
+                WHERE s.repositoryId = $repository_id
+                    AND (s:SpringService OR s.stereotype = 'Service')
+                    AND NOT EXISTS {
+                        MATCH (c)-[:USES|DEPENDS_ON|CALLS]->(s)
+                        WHERE c:SpringController OR c.stereotype = 'Controller'
+                    }
+                OPTIONAL MATCH (s)-[:USES|DEPENDS_ON|CALLS]->(dep)
+                WHERE dep:SpringService OR dep.stereotype = 'Service' OR dep.stereotype = 'Repository'
+                RETURN
+                    s.name as serviceName,
+                    s.filePath as filePath,
+                    collect(DISTINCT dep.name) as dependencies
+                """
+                service_result = await generator.neo4j_client.query_code_structure(
+                    service_cluster_query,
+                    {"repository_id": repository_id}
+                )
+
+                if service_result and service_result.get("nodes"):
+                    for node in service_result["nodes"]:
+                        svc_name = node.get("serviceName", "")
+                        if not svc_name:
+                            continue
+
+                        feature_id += 1
+                        deps = [d for d in (node.get("dependencies") or []) if d]
+
+                        footprint = CodeFootprint(
+                            services=[svc_name] + [d for d in deps if "Service" in d],
+                            repositories=[d for d in deps if "Repository" in d or "Dao" in d],
+                            total_files=1 + len(deps),
+                        )
+
+                        # Generate feature name
+                        feature_name = (svc_name
+                            .replace("Service", "")
+                            .replace("Impl", "")
+                            .replace("Helper", "")
+                        )
+                        import re
+                        feature_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', feature_name)
+                        feature_name = feature_name.strip().title()
+                        if not feature_name:
+                            feature_name = svc_name
+
+                        category = _categorize_feature(feature_name, svc_name)
+                        complexity, score = _calculate_complexity(footprint)
+
+                        feature = BusinessFeature(
+                            id=f"FEAT-{feature_id:03d}",
+                            name=f"{feature_name} (Background)",
+                            description=_generate_feature_description(feature_name, category, footprint, []),
+                            category=category,
+                            complexity=complexity,
+                            complexity_score=score,
+                            discovery_source="service_cluster",
+                            entry_points=[svc_name],
+                            code_footprint=footprint,
+                            has_tests=False,
+                        )
+                        features.append(feature)
+
+                # =========================================================
+                # Enrich with JSP/View information
+                # =========================================================
+                jsp_query = """
+                MATCH (j:JSPPage)
+                WHERE j.repositoryId = $repository_id
+                RETURN j.name as name, j.filePath as filePath
+                """
+                jsp_result = await generator.neo4j_client.query_code_structure(
+                    jsp_query,
+                    {"repository_id": repository_id}
+                )
+
+                if jsp_result and jsp_result.get("nodes"):
+                    jsp_files = [n.get("name", "") for n in jsp_result["nodes"] if n.get("name")]
+
+                    # Match JSPs to features by name similarity
+                    for feature in features:
+                        feature_keywords = feature.name.lower().replace(" ", "").split()
+                        matched_views = []
+                        for jsp in jsp_files:
+                            jsp_lower = jsp.lower()
+                            if any(kw in jsp_lower for kw in feature_keywords if len(kw) > 3):
+                                matched_views.append(jsp)
+                        if matched_views:
+                            feature.code_footprint.views = matched_views[:5]  # Limit to 5
+                            feature.code_footprint.total_files += len(matched_views)
+
+                # =========================================================
+                # Check test coverage for features
+                # =========================================================
+                for feature in features:
+                    # Check if any component has tests
+                    components = (
+                        feature.code_footprint.controllers +
+                        feature.code_footprint.services
+                    )
+                    if components:
+                        test_check_query = """
+                        MATCH (f:File)
+                        WHERE f.repositoryId = $repository_id
+                            AND (f.name CONTAINS 'Test' OR f.name CONTAINS 'Spec'
+                                 OR f.filePath CONTAINS '/test/')
+                            AND ANY(comp IN $components WHERE f.name CONTAINS comp OR f.filePath CONTAINS comp)
+                        RETURN count(f) as test_count
+                        """
+                        test_result = await generator.neo4j_client.query_code_structure(
+                            test_check_query,
+                            {"repository_id": repository_id, "components": components}
+                        )
+                        if test_result and test_result.get("nodes"):
+                            test_count = int(test_result["nodes"][0].get("test_count", 0) or 0)
+                            feature.has_tests = test_count > 0
+                            if test_count > 0:
+                                # Rough estimate: assume each test file covers ~30%
+                                feature.test_coverage_estimate = min(test_count * 30, 100)
+
+            except Exception as neo4j_error:
+                logger.warning(f"Neo4j query failed during feature discovery: {neo4j_error}")
+
+        # Calculate summary statistics
+        summary = FeaturesSummary(
+            total_features=len(features),
+            by_category={cat.value: 0 for cat in FeatureCategory},
+            by_complexity={comp.value: 0 for comp in FeatureComplexity},
+            by_discovery_source={"webflow": 0, "controller": 0, "service_cluster": 0},
+            features_with_tests=0,
+            features_with_brd=0,
+            avg_complexity_score=0.0,
+        )
+
+        total_complexity = 0
+        for feature in features:
+            summary.by_category[feature.category.value] = summary.by_category.get(feature.category.value, 0) + 1
+            summary.by_complexity[feature.complexity.value] = summary.by_complexity.get(feature.complexity.value, 0) + 1
+            summary.by_discovery_source[feature.discovery_source] = summary.by_discovery_source.get(feature.discovery_source, 0) + 1
+            if feature.has_tests:
+                summary.features_with_tests += 1
+            if feature.brd_generated:
+                summary.features_with_brd += 1
+            total_complexity += feature.complexity_score
+
+        if features:
+            summary.avg_complexity_score = round(total_complexity / len(features), 1)
+
+        # Calculate duration
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        return DiscoveredFeaturesResponse(
+            success=True,
+            repository_id=repository_id,
+            repository_name=repository_name,
+            generated_at=datetime.now(),
+            features=features,
+            summary=summary,
+            discovery_method="hybrid",
+            discovery_duration_ms=duration_ms,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to discover business features")
         raise HTTPException(status_code=500, detail=str(e))

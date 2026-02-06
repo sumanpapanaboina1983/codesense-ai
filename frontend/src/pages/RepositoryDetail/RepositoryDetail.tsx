@@ -32,11 +32,14 @@ import {
   getRepository,
   getReadinessReport,
   getCodebaseStatistics,
+  getDiscoveredFeatures,
   enrichDocumentation,
   enrichTests,
   type RepositoryDetail as RepoDetail,
   type AgenticReadinessResponse,
   type CodebaseStatisticsResponse,
+  type DiscoveredFeaturesResponse,
+  type BusinessFeature,
   type EnrichmentResponse,
 } from '../../services/api';
 import { analyzeRepository } from '../../api/client';
@@ -66,9 +69,12 @@ export function RepositoryDetail() {
   const [repository, setRepository] = useState<RepoDetail | null>(null);
   const [readinessReport, setReadinessReport] = useState<AgenticReadinessResponse | null>(null);
   const [statistics, setStatistics] = useState<CodebaseStatisticsResponse | null>(null);
+  const [discoveredFeatures, setDiscoveredFeatures] = useState<DiscoveredFeaturesResponse | null>(null);
+  const [selectedFeature, setSelectedFeature] = useState<BusinessFeature | null>(null);
   const [loading, setLoading] = useState(true);
   const [readinessLoading, setReadinessLoading] = useState(false);
   const [statisticsLoading, setStatisticsLoading] = useState(false);
+  const [featuresLoading, setFeaturesLoading] = useState(false);
   const [enrichmentLoading, setEnrichmentLoading] = useState<string | null>(null);
   const [enrichmentResult, setEnrichmentResult] = useState<EnrichmentResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -122,6 +128,19 @@ export function RepositoryDetail() {
       console.error('Failed to fetch codebase statistics:', err);
     } finally {
       setStatisticsLoading(false);
+    }
+  };
+
+  const fetchDiscoveredFeatures = async () => {
+    if (!id) return;
+    setFeaturesLoading(true);
+    try {
+      const features = await getDiscoveredFeatures(id);
+      setDiscoveredFeatures(features);
+    } catch (err) {
+      console.error('Failed to fetch discovered features:', err);
+    } finally {
+      setFeaturesLoading(false);
     }
   };
 
@@ -188,6 +207,7 @@ export function RepositoryDetail() {
     if (repository?.analysis_status === 'completed') {
       fetchReadinessReport();
       fetchStatistics();
+      fetchDiscoveredFeatures();
     }
   }, [repository?.analysis_status]);
 
@@ -531,6 +551,267 @@ export function RepositoryDetail() {
                   <button className="btn btn-primary" onClick={fetchStatistics}>
                     <RefreshCw size={16} />
                     Load Statistics
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Business Features Section */}
+      {isAnalyzed && (
+        <section className="detail-section">
+          <div
+            className="section-header"
+            onClick={() => toggleSection('features')}
+          >
+            <div className="section-title">
+              <Boxes size={20} />
+              <h2>Discovered Business Features</h2>
+              {discoveredFeatures && (
+                <span className="feature-count-badge">
+                  {discoveredFeatures.summary.total_features} features
+                </span>
+              )}
+            </div>
+            {expandedSections.has('features') ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
+          </div>
+          {expandedSections.has('features') && (
+            <div className="section-content">
+              {featuresLoading ? (
+                <div className="loading-inline">
+                  <RefreshCw size={20} className="spin" />
+                  <span>Discovering business features...</span>
+                </div>
+              ) : discoveredFeatures && discoveredFeatures.features.length > 0 ? (
+                <div className="features-content">
+                  {/* Features Summary */}
+                  <div className="features-summary">
+                    <div className="summary-stat">
+                      <span className="summary-number">{discoveredFeatures.summary.total_features}</span>
+                      <span className="summary-label">Total Features</span>
+                    </div>
+                    <div className="summary-stat">
+                      <span className="summary-number">{discoveredFeatures.summary.features_with_tests}</span>
+                      <span className="summary-label">With Tests</span>
+                    </div>
+                    <div className="summary-stat">
+                      <span className="summary-number">{discoveredFeatures.summary.avg_complexity_score.toFixed(0)}</span>
+                      <span className="summary-label">Avg Complexity</span>
+                    </div>
+                    <div className="summary-stat">
+                      <span className="summary-number">{discoveredFeatures.discovery_duration_ms}ms</span>
+                      <span className="summary-label">Discovery Time</span>
+                    </div>
+                  </div>
+
+                  {/* Features Table */}
+                  <div className="features-table-container">
+                    <table className="features-table">
+                      <thead>
+                        <tr>
+                          <th>Feature</th>
+                          <th>Category</th>
+                          <th>Complexity</th>
+                          <th>Source</th>
+                          <th>Components</th>
+                          <th>Tests</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {discoveredFeatures.features.map((feature) => (
+                          <tr
+                            key={feature.id}
+                            className={selectedFeature?.id === feature.id ? 'selected' : ''}
+                            onClick={() => setSelectedFeature(selectedFeature?.id === feature.id ? null : feature)}
+                          >
+                            <td className="feature-name-cell">
+                              <div className="feature-name">{feature.name}</div>
+                              <div className="feature-id">{feature.id}</div>
+                            </td>
+                            <td>
+                              <span className={`category-badge category-${feature.category}`}>
+                                {feature.category.replace('_', ' ')}
+                              </span>
+                            </td>
+                            <td>
+                              <div className="complexity-indicator">
+                                <div
+                                  className={`complexity-bar complexity-${feature.complexity}`}
+                                  style={{ width: `${feature.complexity_score}%` }}
+                                />
+                                <span className="complexity-score">{feature.complexity_score}</span>
+                              </div>
+                            </td>
+                            <td>
+                              <span className={`source-badge source-${feature.discovery_source}`}>
+                                {feature.discovery_source === 'service_cluster' ? 'service' : feature.discovery_source}
+                              </span>
+                            </td>
+                            <td className="components-cell">
+                              <span title="Controllers">{feature.code_footprint.controllers.length} ctrl</span>
+                              <span title="Services">{feature.code_footprint.services.length} svc</span>
+                              {feature.endpoints.length > 0 && (
+                                <span title="Endpoints">{feature.endpoints.length} api</span>
+                              )}
+                            </td>
+                            <td>
+                              {feature.has_tests ? (
+                                <CheckCircle2 size={16} className="test-yes" />
+                              ) : (
+                                <XCircle size={16} className="test-no" />
+                              )}
+                            </td>
+                            <td>
+                              <Link
+                                to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(feature.name)}`}
+                                className="btn btn-small btn-primary"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <FileText size={14} />
+                                BRD
+                              </Link>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Feature Detail Panel */}
+                  {selectedFeature && (
+                    <div className="feature-detail-panel">
+                      <div className="feature-detail-header">
+                        <h3>{selectedFeature.name}</h3>
+                        <button
+                          className="close-btn"
+                          onClick={() => setSelectedFeature(null)}
+                        >
+                          <XCircle size={20} />
+                        </button>
+                      </div>
+                      <div className="feature-detail-content">
+                        <p className="feature-description">{selectedFeature.description}</p>
+
+                        <div className="detail-grid">
+                          <div className="detail-item">
+                            <span className="detail-label">Category</span>
+                            <span className={`category-badge category-${selectedFeature.category}`}>
+                              {selectedFeature.category.replace('_', ' ')}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <span className="detail-label">Complexity</span>
+                            <span>{selectedFeature.complexity} ({selectedFeature.complexity_score}/100)</span>
+                          </div>
+                          <div className="detail-item">
+                            <span className="detail-label">Discovery Source</span>
+                            <span>{selectedFeature.discovery_source}</span>
+                          </div>
+                          <div className="detail-item">
+                            <span className="detail-label">Test Coverage</span>
+                            <span>
+                              {selectedFeature.has_tests
+                                ? `~${selectedFeature.test_coverage_estimate || 0}%`
+                                : 'No tests'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Code Footprint */}
+                        <div className="footprint-section">
+                          <h4>Code Footprint</h4>
+                          <div className="footprint-grid">
+                            {selectedFeature.code_footprint.controllers.length > 0 && (
+                              <div className="footprint-item">
+                                <span className="footprint-label">Controllers</span>
+                                <ul>
+                                  {selectedFeature.code_footprint.controllers.map((c, i) => (
+                                    <li key={i}>{c}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {selectedFeature.code_footprint.services.length > 0 && (
+                              <div className="footprint-item">
+                                <span className="footprint-label">Services</span>
+                                <ul>
+                                  {selectedFeature.code_footprint.services.map((s, i) => (
+                                    <li key={i}>{s}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {selectedFeature.code_footprint.repositories.length > 0 && (
+                              <div className="footprint-item">
+                                <span className="footprint-label">Repositories</span>
+                                <ul>
+                                  {selectedFeature.code_footprint.repositories.map((r, i) => (
+                                    <li key={i}>{r}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {selectedFeature.code_footprint.views.length > 0 && (
+                              <div className="footprint-item">
+                                <span className="footprint-label">Views</span>
+                                <ul>
+                                  {selectedFeature.code_footprint.views.map((v, i) => (
+                                    <li key={i}>{v}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* API Endpoints */}
+                        {selectedFeature.endpoints.length > 0 && (
+                          <div className="endpoints-section">
+                            <h4>API Endpoints ({selectedFeature.endpoints.length})</h4>
+                            <div className="endpoints-list">
+                              {selectedFeature.endpoints.map((ep, i) => (
+                                <div key={i} className="endpoint-item">
+                                  <span className={`method-badge method-${ep.method.toLowerCase()}`}>
+                                    {ep.method}
+                                  </span>
+                                  <code className="endpoint-path">{ep.path}</code>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="feature-actions">
+                          <Link
+                            to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(selectedFeature.name)}&description=${encodeURIComponent(selectedFeature.description)}`}
+                            className="btn btn-primary"
+                          >
+                            <FileText size={16} />
+                            Generate BRD for this Feature
+                          </Link>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : discoveredFeatures ? (
+                <div className="empty-state-inline">
+                  <Boxes size={32} />
+                  <p>No business features discovered in this codebase.</p>
+                  <p className="empty-hint">
+                    Features are discovered from Controllers, Web Flows, and Service clusters.
+                  </p>
+                </div>
+              ) : (
+                <div className="empty-state-inline">
+                  <Boxes size={32} />
+                  <p>Click to discover business features from the codebase</p>
+                  <button className="btn btn-primary" onClick={fetchDiscoveredFeatures}>
+                    <RefreshCw size={16} />
+                    Discover Features
                   </button>
                 </div>
               )}

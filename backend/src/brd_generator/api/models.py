@@ -1377,3 +1377,111 @@ class CodebaseStatisticsResponse(BaseModel):
         default_factory=dict,
         description="Quick summary stats for dashboard display"
     )
+
+
+# =============================================================================
+# Business Features Discovery - Request/Response Models
+# =============================================================================
+
+class FeatureCategory(str, Enum):
+    """Category of discovered business feature."""
+    AUTHENTICATION = "authentication"
+    USER_MANAGEMENT = "user_management"
+    DATA_MANAGEMENT = "data_management"
+    WORKFLOW = "workflow"
+    REPORTING = "reporting"
+    INTEGRATION = "integration"
+    PAYMENT = "payment"
+    NOTIFICATION = "notification"
+    SEARCH = "search"
+    ADMIN = "admin"
+    CONFIGURATION = "configuration"
+    OTHER = "other"
+
+
+class FeatureComplexity(str, Enum):
+    """Complexity level of a feature."""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    VERY_HIGH = "very_high"
+
+
+class CodeFootprint(BaseModel):
+    """Code footprint for a discovered feature."""
+    controllers: list[str] = Field(default_factory=list, description="Controller classes")
+    services: list[str] = Field(default_factory=list, description="Service classes")
+    repositories: list[str] = Field(default_factory=list, description="Repository classes")
+    models: list[str] = Field(default_factory=list, description="Model/Entity classes")
+    views: list[str] = Field(default_factory=list, description="View/JSP/Template files")
+    config_files: list[str] = Field(default_factory=list, description="Configuration files")
+    test_files: list[str] = Field(default_factory=list, description="Test files")
+    total_files: int = Field(0, description="Total number of files")
+    total_lines: int = Field(0, description="Estimated lines of code")
+
+
+class FeatureEndpoint(BaseModel):
+    """API endpoint associated with a feature."""
+    path: str = Field(..., description="Endpoint path (e.g., /api/users)")
+    method: str = Field("GET", description="HTTP method")
+    controller: str = Field(..., description="Controller handling this endpoint")
+    description: Optional[str] = Field(None, description="Endpoint description")
+
+
+class BusinessFeature(BaseModel):
+    """A discovered business feature from the codebase."""
+    id: str = Field(..., description="Unique feature identifier")
+    name: str = Field(..., description="Feature name")
+    description: str = Field(..., description="Auto-generated description of the feature")
+    category: FeatureCategory = Field(FeatureCategory.OTHER, description="Feature category")
+    complexity: FeatureComplexity = Field(FeatureComplexity.MEDIUM, description="Estimated complexity")
+    complexity_score: int = Field(50, ge=0, le=100, description="Complexity score 0-100")
+
+    # Discovery metadata
+    discovery_source: str = Field(..., description="How the feature was discovered (webflow, controller, service_cluster)")
+    entry_points: list[str] = Field(default_factory=list, description="Entry point classes/methods")
+
+    # Code analysis
+    code_footprint: CodeFootprint = Field(default_factory=CodeFootprint)
+    endpoints: list[FeatureEndpoint] = Field(default_factory=list, description="Associated API endpoints")
+
+    # Dependencies
+    depends_on: list[str] = Field(default_factory=list, description="Other features this depends on")
+    depended_by: list[str] = Field(default_factory=list, description="Features that depend on this")
+
+    # Testing
+    has_tests: bool = Field(False, description="Whether the feature has test coverage")
+    test_coverage_estimate: Optional[float] = Field(None, description="Estimated test coverage %")
+
+    # BRD generation
+    brd_generated: bool = Field(False, description="Whether a BRD has been generated")
+    brd_id: Optional[str] = Field(None, description="Associated BRD ID if generated")
+
+
+class FeaturesSummary(BaseModel):
+    """Summary statistics for discovered features."""
+    total_features: int = Field(0)
+    by_category: dict[str, int] = Field(default_factory=dict)
+    by_complexity: dict[str, int] = Field(default_factory=dict)
+    by_discovery_source: dict[str, int] = Field(default_factory=dict)
+    features_with_tests: int = Field(0)
+    features_with_brd: int = Field(0)
+    avg_complexity_score: float = Field(0.0)
+
+
+class DiscoveredFeaturesResponse(BaseModel):
+    """Response model for discovered business features."""
+    success: bool = True
+    repository_id: str
+    repository_name: str
+    generated_at: datetime
+
+    features: list[BusinessFeature] = Field(default_factory=list)
+    summary: FeaturesSummary = Field(default_factory=FeaturesSummary)
+
+    # Metadata
+    discovery_method: str = Field(
+        "hybrid",
+        description="Discovery method used: webflow, controller, service_cluster, hybrid"
+    )
+    discovery_duration_ms: Optional[int] = Field(None, description="Time taken for discovery")
