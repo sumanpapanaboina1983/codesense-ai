@@ -28,6 +28,13 @@ from ..utils.logger import get_logger, get_progress_logger
 logger = get_logger(__name__)
 progress = get_progress_logger(__name__, "ContextAggregator")
 
+# Relevance thresholds for score-based filtering (no hardcoded LIMIT)
+DEFAULT_FULLTEXT_SCORE_THRESHOLD = 0.5  # Minimum fulltext relevance score (0-1 normalized)
+DEFAULT_PAGERANK_WEIGHT = 0.3  # Weight for PageRank in combined score
+DEFAULT_FULLTEXT_WEIGHT = 0.7  # Weight for fulltext score in combined score
+MIN_COMPONENTS_TO_RETURN = 5  # Minimum components even if scores are low
+MAX_COMPONENTS_CAP = 100  # Safety cap to prevent runaway queries
+
 # Type for progress callback: async function that takes (step: str, detail: str)
 ProgressCallback = Callable[[str, str], Awaitable[None]]
 
@@ -149,6 +156,12 @@ class ContextAggregator:
     This class uses the Copilot SDK to let the LLM dynamically discover the
     code graph schema and write appropriate queries, rather than using
     hardcoded technology-specific queries.
+
+    IMPROVED: Uses relevance-based retrieval instead of hardcoded limits:
+    - Full-text search with relevance scores
+    - PageRank-boosted ranking for structural importance
+    - LLM concept extraction for semantic understanding
+    - Score-based thresholds instead of fixed LIMIT
     """
 
     def __init__(
@@ -157,6 +170,8 @@ class ContextAggregator:
         filesystem_client: FilesystemMCPClient,
         copilot_session: Any = None,
         max_tokens: int = 100000,
+        fulltext_score_threshold: float = DEFAULT_FULLTEXT_SCORE_THRESHOLD,
+        pagerank_weight: float = DEFAULT_PAGERANK_WEIGHT,
     ):
         """
         Initialize the context aggregator.
@@ -166,14 +181,21 @@ class ContextAggregator:
             filesystem_client: Filesystem MCP client
             copilot_session: Copilot SDK session for agentic queries
             max_tokens: Maximum tokens for context (used for dynamic limiting)
+            fulltext_score_threshold: Minimum relevance score to include component
+            pagerank_weight: Weight for PageRank in combined relevance score
         """
         self.neo4j = neo4j_client
         self.filesystem = filesystem_client
         self.copilot_session = copilot_session
         self.max_tokens = max_tokens
+        self.fulltext_score_threshold = fulltext_score_threshold
+        self.pagerank_weight = pagerank_weight
+        self.fulltext_weight = 1.0 - pagerank_weight
 
         # Cache for discovered schema
         self._schema_cache: Optional[dict[str, Any]] = None
+        # Cache for fulltext index availability
+        self._fulltext_available: Optional[bool] = None
 
     def _calculate_dynamic_limit(self, estimated_tokens_per_item: int = 100) -> int:
         """Calculate dynamic limit based on token budget.
@@ -382,90 +404,313 @@ class ContextAggregator:
             dependency_relationships=dep_rels,
         )
 
+    async def _check_fulltext_index_available(self) -> bool:
+        """Check if full-text search index is available in Neo4j."""
+        if self._fulltext_available is not None:
+            return self._fulltext_available
+
+        try:
+            result = await self.neo4j.query_code_structure(
+                "SHOW INDEXES YIELD name WHERE name = 'component_fulltext_search' RETURN name"
+            )
+            self._fulltext_available = len(result.get("nodes", [])) > 0
+            if self._fulltext_available:
+                logger.info("[FULLTEXT] Full-text search index available")
+            else:
+                logger.info("[FULLTEXT] Full-text search index not found, using fallback")
+            return self._fulltext_available
+        except Exception as e:
+            logger.warning(f"[FULLTEXT] Could not check index availability: {e}")
+            self._fulltext_available = False
+            return False
+
+    async def _extract_concepts_with_llm(self, feature_request: str) -> list[str]:
+        """
+        Use LLM to extract semantic concepts from feature request.
+
+        This goes beyond simple word splitting to understand:
+        - Technical synonyms (login = authentication = auth)
+        - Related concepts (payment → billing, checkout, order)
+        - Domain-specific terms
+
+        Returns:
+            List of concept keywords for searching
+        """
+        if not self.copilot_session:
+            # Fallback to simple extraction
+            return self._extract_keywords_simple(feature_request)
+
+        prompt = f"""Extract search keywords from this feature request for finding relevant code components.
+
+Feature request: "{feature_request}"
+
+Instructions:
+1. Extract the main technical concepts (nouns, verbs related to functionality)
+2. Add common synonyms and related terms (e.g., "login" → also search "auth", "authentication")
+3. Include both business terms and technical terms
+4. Return 5-15 keywords, prioritized by relevance
+
+Return ONLY a JSON array of keywords, no explanation:
+["keyword1", "keyword2", "keyword3"]"""
+
+        try:
+            response = await self._send_to_copilot(prompt)
+            concepts = self._extract_json_from_response(response)
+            if isinstance(concepts, list) and len(concepts) > 0:
+                logger.info(f"[LLM-CONCEPTS] Extracted {len(concepts)} concepts: {concepts[:10]}")
+                return concepts[:15]  # Cap at 15 concepts
+        except Exception as e:
+            logger.warning(f"[LLM-CONCEPTS] LLM concept extraction failed: {e}")
+
+        # Fallback to simple extraction
+        return self._extract_keywords_simple(feature_request)
+
+    def _extract_keywords_simple(self, text: str) -> list[str]:
+        """Simple keyword extraction fallback."""
+        # Extract meaningful words (length > 3, not common stopwords)
+        stopwords = {'with', 'from', 'that', 'this', 'have', 'will', 'should', 'would', 'could', 'need', 'want'}
+        words = [w.lower() for w in text.split() if len(w) > 3 and w.lower() not in stopwords]
+        return list(dict.fromkeys(words))[:10]  # Dedupe and limit
+
+    async def _search_components_fulltext(
+        self,
+        keywords: list[str],
+        schema: "SchemaInfo",
+        min_score: float = 0.3,
+    ) -> list[tuple[ComponentInfo, float]]:
+        """
+        Search components using Neo4j full-text search with relevance scores.
+
+        Returns components with their relevance scores for threshold-based filtering.
+        """
+        if not keywords:
+            return []
+
+        # Build search query string (Lucene syntax)
+        search_terms = " OR ".join(keywords)
+
+        try:
+            # Use full-text index with score
+            query = f"""
+                CALL db.index.fulltext.queryNodes('component_fulltext_search', $searchTerms)
+                YIELD node, score
+                WHERE score >= $minScore
+                OPTIONAL MATCH (node)
+                WHERE node.pageRank IS NOT NULL
+                WITH node, score, COALESCE(node.pageRank, 0.1) AS pageRank
+                WITH node,
+                     score AS fulltextScore,
+                     pageRank,
+                     (score * $fulltextWeight + pageRank * $pagerankWeight) AS combinedScore
+                RETURN node.name AS name,
+                       labels(node)[0] AS type,
+                       node.filePath AS path,
+                       node.description AS description,
+                       fulltextScore,
+                       pageRank,
+                       combinedScore
+                ORDER BY combinedScore DESC
+            """
+
+            result = await self.neo4j.query_code_structure(query, {
+                "searchTerms": search_terms,
+                "minScore": min_score,
+                "fulltextWeight": self.fulltext_weight,
+                "pagerankWeight": self.pagerank_weight,
+            })
+
+            components = []
+            for node in result.get("nodes", []):
+                name = node.get("name", "")
+                if name:
+                    comp = ComponentInfo(
+                        name=name,
+                        type=node.get("type", "component"),
+                        path=node.get("path") or "",
+                        description=node.get("description") or "",
+                        dependencies=[],
+                        dependents=[],
+                    )
+                    score = node.get("combinedScore", 0.5)
+                    components.append((comp, score))
+
+            logger.info(f"[FULLTEXT-SEARCH] Found {len(components)} components with scores >= {min_score}")
+            return components
+
+        except Exception as e:
+            logger.warning(f"[FULLTEXT-SEARCH] Full-text search failed: {e}")
+            return []
+
+    async def _search_components_fallback(
+        self,
+        keywords: list[str],
+        schema: "SchemaInfo",
+    ) -> list[tuple[ComponentInfo, float]]:
+        """
+        Fallback search using CONTAINS with PageRank boosting.
+
+        Used when full-text index is not available.
+        """
+        if not keywords:
+            return []
+
+        # Build label filter
+        label_filter = " OR ".join([f"n:{label}" for label in schema.component_labels])
+        if not label_filter:
+            label_filter = "n:Class OR n:Function OR n:Module"
+
+        # Build keyword conditions
+        keyword_conditions = " OR ".join([f"toLower(n.name) CONTAINS '{kw}'" for kw in keywords])
+
+        query = f"""
+            MATCH (n)
+            WHERE ({label_filter}) AND ({keyword_conditions})
+            WITH n, COALESCE(n.pageRank, 0.1) AS pageRank
+            RETURN n.name AS name,
+                   labels(n)[0] AS type,
+                   n.filePath AS path,
+                   n.description AS description,
+                   pageRank
+            ORDER BY pageRank DESC
+            LIMIT {MAX_COMPONENTS_CAP}
+        """
+
+        try:
+            result = await self.neo4j.query_code_structure(query)
+            components = []
+            for node in result.get("nodes", []):
+                name = node.get("name", "")
+                if name:
+                    comp = ComponentInfo(
+                        name=name,
+                        type=node.get("type", "component"),
+                        path=node.get("path") or "",
+                        description=node.get("description") or "",
+                        dependencies=[],
+                        dependents=[],
+                    )
+                    # Use PageRank as score (normalized)
+                    score = min(1.0, node.get("pageRank", 0.1) + 0.5)
+                    components.append((comp, score))
+
+            logger.info(f"[FALLBACK-SEARCH] Found {len(components)} components using CONTAINS")
+            return components
+
+        except Exception as e:
+            logger.warning(f"[FALLBACK-SEARCH] Fallback search failed: {e}")
+            return []
+
+    def _apply_relevance_threshold(
+        self,
+        scored_components: list[tuple[ComponentInfo, float]],
+        min_score: float = None,
+    ) -> list[ComponentInfo]:
+        """
+        Apply relevance threshold to filter components.
+
+        Uses score-based filtering instead of hardcoded LIMIT:
+        - Components above threshold are included
+        - Ensures minimum number of components
+        - Caps at maximum to prevent token overflow
+        """
+        if min_score is None:
+            min_score = self.fulltext_score_threshold
+
+        # Sort by score descending
+        sorted_components = sorted(scored_components, key=lambda x: x[1], reverse=True)
+
+        # Find natural cutoff using elbow detection
+        # or use threshold, whichever gives more components
+        above_threshold = [(c, s) for c, s in sorted_components if s >= min_score]
+
+        if len(above_threshold) >= MIN_COMPONENTS_TO_RETURN:
+            # Enough components above threshold
+            selected = above_threshold
+        else:
+            # Take at least MIN_COMPONENTS_TO_RETURN
+            selected = sorted_components[:max(MIN_COMPONENTS_TO_RETURN, len(above_threshold))]
+
+        # Apply maximum cap (for token budget safety)
+        selected = selected[:MAX_COMPONENTS_CAP]
+
+        # Log score distribution
+        if selected:
+            scores = [s for _, s in selected]
+            logger.info(
+                f"[RELEVANCE] Selected {len(selected)} components, "
+                f"score range: {min(scores):.3f} - {max(scores):.3f}, "
+                f"threshold: {min_score}"
+            )
+
+        return [comp for comp, _ in selected]
+
     async def _get_architecture_direct(
         self,
         request: str,
         affected_components: Optional[list[str]],
         schema: "SchemaInfo",
     ) -> ArchitectureContext:
-        """Get architecture using direct Neo4j queries."""
-        components = []
+        """Get architecture using direct Neo4j queries with relevance-based retrieval.
+
+        IMPROVED: Uses full-text search + PageRank instead of hardcoded LIMIT:
+        - Full-text search for semantic matching (when available)
+        - PageRank for structural importance
+        - Score-based thresholds instead of fixed limits
+        - LLM concept extraction for better keyword discovery
+        """
+        components: list[ComponentInfo] = []
         dependencies: dict[str, list[str]] = {}
         api_contracts = []
 
         try:
-            # Build label filter using ALL discovered component labels (not just first 5)
-            # This ensures we search WebFlowDefinition, FlowState, JSPPage, etc.
-            label_filter = " OR ".join([f"n:{label}" for label in schema.component_labels])
-            if not label_filter:
-                label_filter = "n:Class OR n:Function OR n:Module"
-
             logger.info(f"[ARCH-DIRECT] Searching across {len(schema.component_labels)} label types")
 
-            # Extract keywords from request - use all meaningful keywords (no artificial limit)
-            keywords = [word.lower() for word in request.split() if len(word) > 3]
-
-            # Calculate dynamic limit based on token budget
-            component_limit = self._calculate_dynamic_limit(estimated_tokens_per_item=150)
-            logger.info(f"[ARCH-DIRECT] Dynamic component limit: {component_limit}")
-
+            # Step 1: Extract concepts using LLM (or fallback to simple extraction)
             if affected_components:
-                # Search for specific components
-                name_conditions = " OR ".join([f"toLower(n.name) CONTAINS toLower('{comp}')" for comp in affected_components])
-                query = f"""
-                    MATCH (n)
-                    WHERE ({label_filter}) AND ({name_conditions})
-                    RETURN n.name as name, labels(n)[0] as type, n.filePath as path, n.description as description
-                    LIMIT {component_limit}
-                """
-            elif keywords:
-                # Search by keywords from request
-                keyword_conditions = " OR ".join([f"toLower(n.name) CONTAINS '{kw}'" for kw in keywords])
-                query = f"""
-                    MATCH (n)
-                    WHERE ({label_filter}) AND ({keyword_conditions})
-                    RETURN n.name as name, labels(n)[0] as type, n.filePath as path, n.description as description
-                    LIMIT {component_limit}
-                """
+                # User specified components - search for those directly
+                keywords = affected_components
+                logger.info(f"[ARCH-DIRECT] Using user-specified components: {keywords}")
             else:
-                # Get a sample of components
-                query = f"""
-                    MATCH (n)
-                    WHERE {label_filter}
-                    RETURN n.name as name, labels(n)[0] as type, n.filePath as path, n.description as description
-                    LIMIT {component_limit}
-                """
+                # Extract semantic concepts from request
+                keywords = await self._extract_concepts_with_llm(request)
+                logger.info(f"[ARCH-DIRECT] Extracted concepts: {keywords}")
 
-            logger.info(f"[ARCH-DIRECT] Executing query: {query[:200]}...")
-            result = await self.neo4j.query_code_structure(query)
+            # Step 2: Search using full-text index (with fallback)
+            fulltext_available = await self._check_fulltext_index_available()
 
-            for node in result.get("nodes", []):
-                name = node.get("name", "")
-                if name:
-                    components.append(ComponentInfo(
-                        name=name,
-                        type=node.get("type", "component"),
-                        path=node.get("path") or "",
-                        description=node.get("description") or "",  # Handle None values
-                        dependencies=[],
-                        dependents=[],
-                    ))
+            scored_components: list[tuple[ComponentInfo, float]] = []
 
-            logger.info(f"[ARCH-DIRECT] Found {len(components)} components")
+            if fulltext_available and not affected_components:
+                # Use full-text search with relevance scores
+                scored_components = await self._search_components_fulltext(
+                    keywords, schema, min_score=0.2
+                )
+            else:
+                # Fallback to CONTAINS with PageRank boosting
+                scored_components = await self._search_components_fallback(
+                    keywords, schema
+                )
 
-            # Get dependencies for found components - use all relationships and components
+            # Step 3: Apply relevance threshold (no hardcoded LIMIT)
+            components = self._apply_relevance_threshold(scored_components)
+
+            logger.info(f"[ARCH-DIRECT] Found {len(components)} relevant components (threshold-based)")
+
+            # Get dependencies for found components using graph expansion
+            # No hardcoded limit - include dependencies based on relevance
             if components and schema.dependency_relationships:
                 rel_filter = " OR ".join([f"type(r) = '{rel}'" for rel in schema.dependency_relationships])
-                comp_names = [c.name for c in components]
+                comp_names = [c.name for c in components[:50]]  # Safety: limit source components
                 name_filter = " OR ".join([f"c1.name = '{name}'" for name in comp_names])
 
-                # Dynamic limit for dependencies
-                dep_limit = self._calculate_dynamic_limit(estimated_tokens_per_item=50)
+                # Query dependencies with PageRank ordering (most important dependencies first)
                 dep_query = f"""
                     MATCH (c1)-[r]->(c2)
                     WHERE ({name_filter}) AND ({rel_filter})
-                    RETURN c1.name as source, type(r) as rel, c2.name as target
-                    LIMIT {dep_limit}
+                    WITH c1.name AS source, type(r) AS rel, c2.name AS target,
+                         COALESCE(c2.pageRank, 0.1) AS targetRank
+                    RETURN source, rel, target, targetRank
+                    ORDER BY targetRank DESC
                 """
 
                 dep_result = await self.neo4j.query_code_structure(dep_query)

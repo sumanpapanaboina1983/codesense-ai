@@ -7,6 +7,7 @@ const logger = createContextLogger('SchemaManager');
 // Define Node Labels used in the graph
 export const NODE_LABELS = [
     'Repository', // Root node for multi-repository support
+    'IndexState', // Tracks last indexed state per repository for incremental indexing
     'File', 'Directory', 'Class', 'Interface', 'Function', 'Method',
     'Variable', 'Parameter', 'TypeAlias', 'Import', 'Export',
     'Component', 'JSXElement', 'JSXAttribute',
@@ -56,6 +57,7 @@ export const NODE_LABELS = [
 // Define Relationship Types used in the graph
 export const RELATIONSHIP_TYPES = [
     'BELONGS_TO',    // File->Repository (for multi-repository support)
+    'HAS_INDEX_STATE', // Repository->IndexState (for incremental indexing)
     'CONTAINS',      // Directory->File
     'IMPORTS',       // File->File or File->Module (Placeholder)
     'EXPORTS',       // File->Variable/Function/Class/Interface/TypeAlias
@@ -174,6 +176,17 @@ const REPOSITORY_CONSTRAINTS = [
     `CREATE CONSTRAINT repository_id_unique IF NOT EXISTS FOR (n:Repository) REQUIRE n.repositoryId IS UNIQUE`,
 ];
 
+// Add IndexState-specific constraints for incremental indexing
+const INDEX_STATE_CONSTRAINTS = [
+    `CREATE CONSTRAINT indexstate_repoid_unique IF NOT EXISTS FOR (n:IndexState) REQUIRE n.repositoryId IS UNIQUE`,
+];
+
+// Add IndexState-specific indexes
+const INDEX_STATE_INDEXES = [
+    `CREATE INDEX indexstate_lastindexedat_idx IF NOT EXISTS FOR (n:IndexState) ON (n.lastIndexedAt)`,
+    `CREATE INDEX indexstate_lastcommitsha_idx IF NOT EXISTS FOR (n:IndexState) ON (n.lastCommitSha)`,
+];
+
 // Add Repository-specific indexes
 const REPOSITORY_INDEXES = [
     `CREATE INDEX repository_name_idx IF NOT EXISTS FOR (n:Repository) ON (n.name)`,
@@ -249,6 +262,30 @@ const ENTRY_POINT_INDEXES = [
     `CREATE INDEX feature_confidence_idx IF NOT EXISTS FOR (n:Feature) ON (n.confidence)`,
 ];
 
+// Full-text search indexes for semantic relevance-based queries
+const FULLTEXT_INDEXES = [
+    // Component full-text search (name + description + docstring)
+    `CREATE FULLTEXT INDEX component_fulltext_search IF NOT EXISTS
+     FOR (n:Class|Interface|Function|Method|JavaClass|JavaInterface|JavaMethod|SpringController|SpringService|PythonClass|PythonFunction|CSharpClass|GoFunction|GoStruct|Component)
+     ON EACH [n.name, n.description, n.docstring]`,
+    // File full-text search
+    `CREATE FULLTEXT INDEX file_fulltext_search IF NOT EXISTS
+     FOR (n:File)
+     ON EACH [n.name, n.filePath]`,
+    // API endpoint full-text search
+    `CREATE FULLTEXT INDEX api_fulltext_search IF NOT EXISTS
+     FOR (n:RestEndpoint|GraphQLOperation)
+     ON EACH [n.name, n.path, n.fullPath, n.description]`,
+    // Feature full-text search
+    `CREATE FULLTEXT INDEX feature_fulltext_search IF NOT EXISTS
+     FOR (n:Feature)
+     ON EACH [n.featureName, n.description, n.category]`,
+    // JSP/Spring full-text search
+    `CREATE FULLTEXT INDEX jsp_spring_fulltext_search IF NOT EXISTS
+     FOR (n:JSPPage|WebFlowDefinition|FlowState)
+     ON EACH [n.name, n.description, n.servletPath, n.flowId]`,
+];
+
 // Repository Overview Feature - Analysis property indexes (for AstNode properties)
 const ANALYSIS_INDEXES = [
     // Stereotype index for architecture analysis
@@ -269,6 +306,13 @@ const ANALYSIS_INDEXES = [
     // Entry point type index
     `CREATE INDEX node_entrypoint_idx IF NOT EXISTS FOR (n:Function) ON (n.entryPointType)`,
     `CREATE INDEX method_entrypoint_idx IF NOT EXISTS FOR (n:Method) ON (n.entryPointType)`,
+    // PageRank index for relevance-based retrieval
+    `CREATE INDEX class_pagerank_idx IF NOT EXISTS FOR (n:Class) ON (n.pageRank)`,
+    `CREATE INDEX javaclass_pagerank_idx IF NOT EXISTS FOR (n:JavaClass) ON (n.pageRank)`,
+    `CREATE INDEX function_pagerank_idx IF NOT EXISTS FOR (n:Function) ON (n.pageRank)`,
+    `CREATE INDEX method_pagerank_idx IF NOT EXISTS FOR (n:Method) ON (n.pageRank)`,
+    `CREATE INDEX springcontroller_pagerank_idx IF NOT EXISTS FOR (n:SpringController) ON (n.pageRank)`,
+    `CREATE INDEX springservice_pagerank_idx IF NOT EXISTS FOR (n:SpringService) ON (n.pageRank)`,
 ];
 
 // Node Uniqueness Constraints (Crucial for merging nodes correctly)
@@ -278,6 +322,7 @@ const nodeUniquenessConstraints = [
     ),
     ...JSP_SPRING_CONSTRAINTS,
     ...REPOSITORY_CONSTRAINTS,
+    ...INDEX_STATE_CONSTRAINTS,
     ...MODULE_CONSTRAINTS,
     ...ENTRY_POINT_CONSTRAINTS,
 ];
@@ -289,9 +334,11 @@ const indexes = [
     `CREATE INDEX file_kind_index IF NOT EXISTS FOR (n:File) ON (n.kind)`,
     ...JSP_SPRING_INDEXES,
     ...REPOSITORY_INDEXES,
+    ...INDEX_STATE_INDEXES,
     ...MODULE_INDEXES,
     ...ENTRY_POINT_INDEXES,
     ...ANALYSIS_INDEXES,
+    ...FULLTEXT_INDEXES,
 ];
 
 // Export schema arrays

@@ -134,6 +134,11 @@ class Neo4jMCPClient(MCPClient):
             "get_component_dependencies": self._get_component_dependencies,
             "get_api_contracts": self._get_api_contracts,
             "search_similar_features": self._search_similar_features,
+            # New agentic tools for iterative retrieval
+            "get_callers_of": self._get_callers_of,
+            "get_related_components": self._get_related_components,
+            "search_by_relevance": self._search_by_relevance,
+            "expand_from_seeds": self._expand_from_seeds,
         }
 
         handler = tool_handlers.get(tool_name)
@@ -285,4 +290,335 @@ class Neo4jMCPClient(MCPClient):
         return await self.call_tool("search_similar_features", {
             "description": description,
             "limit": limit,
+        })
+
+    # ==========================================================================
+    # New Agentic Tools for Iterative Retrieval
+    # ==========================================================================
+
+    async def _get_callers_of(
+        self,
+        component_name: str,
+        max_depth: int = 2,
+    ) -> dict[str, Any]:
+        """
+        Get all components that call/use the specified component.
+
+        This enables agents to understand "who uses this component"
+        for impact analysis and dependency understanding.
+
+        Args:
+            component_name: Name of the component to find callers for
+            max_depth: Maximum depth of call chain to traverse (default 2)
+
+        Returns:
+            Dict with callers list and call chain paths
+        """
+        if not self._driver:
+            raise MCPToolError("Neo4j not connected")
+
+        async with self._driver.session(database=self.neo4j_database) as session:
+            # Find direct and indirect callers with relevance scores
+            query = """
+                MATCH (caller)-[r:CALLS|IMPORTS|USES_COMPONENT|DEPENDS_ON*1..$maxDepth]->(target)
+                WHERE target.name = $name
+                WITH caller, min(length(r)) AS depth, COALESCE(caller.pageRank, 0.1) AS pageRank
+                RETURN caller.name AS name,
+                       labels(caller)[0] AS type,
+                       caller.filePath AS path,
+                       depth,
+                       pageRank
+                ORDER BY depth ASC, pageRank DESC
+                LIMIT 30
+            """
+            result = await session.run(query, name=component_name, maxDepth=max_depth)
+            records = await result.data()
+
+        callers = [
+            {
+                "name": r.get("name"),
+                "type": r.get("type"),
+                "path": r.get("path"),
+                "depth": r.get("depth"),
+                "importance": r.get("pageRank"),
+            }
+            for r in records if r.get("name")
+        ]
+
+        logger.info(f"[MCP-TOOL] get_callers_of({component_name}): Found {len(callers)} callers")
+        return {"component": component_name, "callers": callers}
+
+    async def _get_related_components(
+        self,
+        component_name: str,
+        relationship_types: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """
+        Get components related to the specified component via any relationship.
+
+        This enables agents to explore the neighborhood of a component
+        to understand its context and connections.
+
+        Args:
+            component_name: Name of the component
+            relationship_types: Optional list of relationship types to filter
+
+        Returns:
+            Dict with related components grouped by relationship type
+        """
+        if not self._driver:
+            raise MCPToolError("Neo4j not connected")
+
+        rel_filter = ""
+        if relationship_types:
+            rel_types = "|".join(relationship_types)
+            rel_filter = f":{rel_types}"
+
+        async with self._driver.session(database=self.neo4j_database) as session:
+            query = f"""
+                MATCH (source)-[r{rel_filter}]-(related)
+                WHERE source.name = $name
+                WITH type(r) AS relType,
+                     CASE WHEN startNode(r) = source THEN 'outgoing' ELSE 'incoming' END AS direction,
+                     related,
+                     COALESCE(related.pageRank, 0.1) AS pageRank
+                RETURN relType,
+                       direction,
+                       related.name AS name,
+                       labels(related)[0] AS type,
+                       related.filePath AS path,
+                       pageRank
+                ORDER BY pageRank DESC
+            """
+            result = await session.run(query, name=component_name)
+            records = await result.data()
+
+        # Group by relationship type and direction
+        grouped: dict[str, list[dict]] = {}
+        for r in records:
+            key = f"{r.get('direction')}_{r.get('relType')}"
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append({
+                "name": r.get("name"),
+                "type": r.get("type"),
+                "path": r.get("path"),
+                "importance": r.get("pageRank"),
+            })
+
+        logger.info(f"[MCP-TOOL] get_related_components({component_name}): Found {len(records)} related")
+        return {"component": component_name, "relationships": grouped}
+
+    async def _search_by_relevance(
+        self,
+        search_terms: str,
+        min_score: float = 0.3,
+        include_pagerank: bool = True,
+    ) -> list[dict[str, Any]]:
+        """
+        Search components using full-text search with relevance scoring.
+
+        Returns components ranked by combined relevance (fulltext + pagerank).
+        No hardcoded limit - returns all components above score threshold.
+
+        Args:
+            search_terms: Space-separated search terms (Lucene syntax supported)
+            min_score: Minimum relevance score (0-1) to include
+            include_pagerank: Whether to boost results by PageRank
+
+        Returns:
+            List of components with relevance scores
+        """
+        if not self._driver:
+            raise MCPToolError("Neo4j not connected")
+
+        async with self._driver.session(database=self.neo4j_database) as session:
+            try:
+                if include_pagerank:
+                    query = """
+                        CALL db.index.fulltext.queryNodes('component_fulltext_search', $terms)
+                        YIELD node, score
+                        WHERE score >= $minScore
+                        WITH node, score AS fulltextScore, COALESCE(node.pageRank, 0.1) AS pageRank
+                        WITH node, fulltextScore, pageRank,
+                             (fulltextScore * 0.7 + pageRank * 0.3) AS combinedScore
+                        RETURN node.name AS name,
+                               labels(node)[0] AS type,
+                               node.filePath AS path,
+                               node.description AS description,
+                               fulltextScore,
+                               pageRank,
+                               combinedScore
+                        ORDER BY combinedScore DESC
+                    """
+                else:
+                    query = """
+                        CALL db.index.fulltext.queryNodes('component_fulltext_search', $terms)
+                        YIELD node, score
+                        WHERE score >= $minScore
+                        RETURN node.name AS name,
+                               labels(node)[0] AS type,
+                               node.filePath AS path,
+                               node.description AS description,
+                               score AS combinedScore
+                        ORDER BY combinedScore DESC
+                    """
+
+                result = await session.run(query, terms=search_terms, minScore=min_score)
+                records = await result.data()
+
+                logger.info(f"[MCP-TOOL] search_by_relevance('{search_terms}'): Found {len(records)} results")
+                return records
+
+            except Exception as e:
+                # Fallback if fulltext index not available
+                logger.warning(f"[MCP-TOOL] Fulltext search failed, using fallback: {e}")
+                keywords = search_terms.lower().split()
+                keyword_filter = " OR ".join([f"toLower(n.name) CONTAINS '{kw}'" for kw in keywords])
+
+                fallback_query = f"""
+                    MATCH (n)
+                    WHERE (n:Class OR n:Function OR n:JavaClass OR n:SpringService)
+                      AND ({keyword_filter})
+                    WITH n, COALESCE(n.pageRank, 0.1) AS pageRank
+                    RETURN n.name AS name,
+                           labels(n)[0] AS type,
+                           n.filePath AS path,
+                           pageRank AS combinedScore
+                    ORDER BY combinedScore DESC
+                    LIMIT 50
+                """
+                result = await session.run(fallback_query)
+                records = await result.data()
+                return records
+
+    async def _expand_from_seeds(
+        self,
+        seed_components: list[str],
+        max_hops: int = 2,
+        min_pagerank: float = 0.1,
+    ) -> dict[str, Any]:
+        """
+        Expand context from seed components using graph traversal.
+
+        This implements Personalized PageRank-like expansion:
+        - Start from seed components
+        - Traverse relationships up to max_hops
+        - Include only components above pagerank threshold
+
+        This replaces hardcoded hop limits with importance-based expansion.
+
+        Args:
+            seed_components: List of component names to expand from
+            max_hops: Maximum relationship hops (default 2)
+            min_pagerank: Minimum PageRank to include in expansion
+
+        Returns:
+            Dict with expanded context including components and paths
+        """
+        if not self._driver:
+            raise MCPToolError("Neo4j not connected")
+
+        if not seed_components:
+            return {"seeds": [], "expanded": [], "paths": []}
+
+        async with self._driver.session(database=self.neo4j_database) as session:
+            # Build seed filter
+            seed_filter = " OR ".join([f"seed.name = '{name}'" for name in seed_components])
+
+            query = f"""
+                MATCH (seed)
+                WHERE {seed_filter}
+                CALL {{
+                    WITH seed
+                    MATCH path = (seed)-[*1..{max_hops}]-(connected)
+                    WHERE COALESCE(connected.pageRank, 0.1) >= $minPagerank
+                      AND connected <> seed
+                    WITH connected, length(path) AS distance, path
+                    RETURN connected, distance, path
+                    ORDER BY connected.pageRank DESC
+                    LIMIT 20
+                }}
+                WITH seed, connected, distance,
+                     [node IN nodes(path) | node.name] AS pathNodes
+                RETURN seed.name AS seedName,
+                       connected.name AS name,
+                       labels(connected)[0] AS type,
+                       connected.filePath AS path,
+                       connected.pageRank AS pageRank,
+                       distance,
+                       pathNodes
+                ORDER BY pageRank DESC
+            """
+
+            result = await session.run(query, minPagerank=min_pagerank)
+            records = await result.data()
+
+        # Deduplicate and organize results
+        expanded = {}
+        paths = []
+        for r in records:
+            name = r.get("name")
+            if name and name not in expanded:
+                expanded[name] = {
+                    "name": name,
+                    "type": r.get("type"),
+                    "path": r.get("path"),
+                    "pageRank": r.get("pageRank"),
+                    "distance": r.get("distance"),
+                    "reachedFrom": r.get("seedName"),
+                }
+            if r.get("pathNodes"):
+                paths.append({
+                    "from": r.get("seedName"),
+                    "to": name,
+                    "path": r.get("pathNodes"),
+                })
+
+        logger.info(f"[MCP-TOOL] expand_from_seeds({seed_components}): Expanded to {len(expanded)} components")
+        return {
+            "seeds": seed_components,
+            "expanded": list(expanded.values()),
+            "paths": paths[:20],  # Limit paths to avoid noise
+        }
+
+    # Convenience methods for new tools
+    async def get_callers_of(self, component_name: str, max_depth: int = 2) -> dict[str, Any]:
+        """Get components that call/use the specified component."""
+        return await self.call_tool("get_callers_of", {
+            "component_name": component_name,
+            "max_depth": max_depth,
+        })
+
+    async def get_related_components(
+        self,
+        component_name: str,
+        relationship_types: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Get components related to the specified component."""
+        return await self.call_tool("get_related_components", {
+            "component_name": component_name,
+            "relationship_types": relationship_types,
+        })
+
+    async def search_by_relevance(
+        self,
+        search_terms: str,
+        min_score: float = 0.3,
+    ) -> list[dict[str, Any]]:
+        """Search components using relevance scoring."""
+        return await self.call_tool("search_by_relevance", {
+            "search_terms": search_terms,
+            "min_score": min_score,
+        })
+
+    async def expand_from_seeds(
+        self,
+        seed_components: list[str],
+        max_hops: int = 2,
+    ) -> dict[str, Any]:
+        """Expand context from seed components using graph traversal."""
+        return await self.call_tool("expand_from_seeds", {
+            "seed_components": seed_components,
+            "max_hops": max_hops,
         })

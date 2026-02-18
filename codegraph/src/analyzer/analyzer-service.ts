@@ -5,6 +5,11 @@ import { Parser } from './parser.js';
 import { RelationshipResolver } from './relationship-resolver.js';
 import { StorageManager } from './storage-manager.js';
 import {
+    IncrementalIndexManager,
+    IndexStateData,
+    IncrementalIndexResult,
+} from './incremental-index-manager.js';
+import {
     AstNode,
     RelationshipInfo,
     AnalysisContext,
@@ -21,9 +26,62 @@ import { Project } from 'ts-morph';
 import { Neo4jClient } from '../database/neo4j-client.js';
 import { Neo4jError } from '../utils/errors.js';
 import { GradleParser, isGradleProject, isMavenProject, detectBuildSystem } from './parsers/gradle-parser.js';
+import { getCurrentCommitSha, isGitRepository } from '../utils/git-change-detector.js';
+import type { CallbackClient } from '../api/callback-client.js';
+import { GraphAlgorithms } from './graph-algorithms.js';
 // Removed setTimeout import
 
 const logger = createContextLogger('AnalyzerService');
+
+/**
+ * Checkpoint data for resuming analysis from a specific point.
+ */
+export interface ResumeCheckpoint {
+    /** Phase to resume from */
+    phase: string;
+    /** Number of files already processed */
+    processedFiles: number;
+    /** Total files discovered */
+    totalFiles: number;
+    /** Last file that was processed */
+    lastProcessedFile?: string;
+    /** Nodes created before pause */
+    nodesCreated: number;
+    /** Relationships created before pause */
+    relationshipsCreated: number;
+    /** Additional checkpoint data (e.g., list of processed file paths) */
+    checkpointData?: {
+        processedFilePaths?: string[];
+        [key: string]: any;
+    };
+}
+
+/**
+ * Result returned from analyze() for stats reporting.
+ */
+export interface AnalysisResult {
+    filesScanned: number;
+    nodesCreated: number;
+    relationshipsCreated: number;
+    /** Whether this was an incremental update vs full reindex */
+    wasIncremental: boolean;
+    /** Number of files that were skipped (unchanged) */
+    filesSkipped: number;
+    /** Number of deleted files cleaned up */
+    filesDeleted: number;
+    /** Reason for the indexing type */
+    indexingReason?: string;
+}
+
+/**
+ * Options for controlling incremental indexing behavior.
+ */
+export interface IncrementalIndexOptions {
+    /** Force a complete re-index, ignoring previous state */
+    forceFullReindex?: boolean;
+    /** Enable/disable incremental indexing (default: true) */
+    incrementalMode?: boolean;
+}
 
 /**
  * Orchestrates the code analysis process: scanning, parsing, resolving, and storing.
@@ -32,6 +90,8 @@ export class AnalyzerService {
     private parser: Parser;
     private storageManager: StorageManager;
     private neo4jClient: Neo4jClient;
+    private incrementalIndexManager: IncrementalIndexManager;
+    private graphAlgorithms: GraphAlgorithms;
 
     constructor() {
         this.parser = new Parser();
@@ -39,20 +99,54 @@ export class AnalyzerService {
         this.neo4jClient = new Neo4jClient();
         // Pass the client instance to StorageManager
         this.storageManager = new StorageManager(this.neo4jClient);
+        // Initialize incremental index manager
+        this.incrementalIndexManager = new IncrementalIndexManager(this.neo4jClient);
+        // Initialize graph algorithms for PageRank computation
+        this.graphAlgorithms = new GraphAlgorithms(this.neo4jClient);
         logger.info('AnalyzerService initialized.');
     }
 
     /**
      * Runs the full analysis pipeline for a given directory.
-     * Assumes database is cleared externally (e.g., via test setup).
+     * Supports incremental indexing when context is provided.
      * @param directory - The root directory to analyze.
      * @param context - Optional analysis context for multi-repository support.
+     * @param callback - Optional callback client for progress reporting.
+     * @param resumeFrom - Optional checkpoint data for resuming a paused/failed analysis.
+     * @param incrementalOptions - Options for controlling incremental indexing.
      */
-    async analyze(directory: string, context?: AnalysisContext): Promise<void> {
+    async analyze(
+        directory: string,
+        context?: AnalysisContext,
+        callback?: CallbackClient,
+        resumeFrom?: ResumeCheckpoint,
+        incrementalOptions?: IncrementalIndexOptions
+    ): Promise<AnalysisResult> {
         const repoInfo = context ? ` (Repository: ${context.repositoryName}, ID: ${context.repositoryId})` : '';
-        logger.info(`Starting analysis for directory: ${directory}${repoInfo}`);
+        const isResume = !!resumeFrom;
+
+        if (isResume) {
+            logger.info(`RESUMING analysis for directory: ${directory}${repoInfo}`);
+            logger.info(`  Resume from phase: ${resumeFrom.phase}`);
+            logger.info(`  Previously processed: ${resumeFrom.processedFiles}/${resumeFrom.totalFiles} files`);
+            logger.info(`  Previous nodes created: ${resumeFrom.nodesCreated}`);
+            logger.info(`  Previous relationships: ${resumeFrom.relationshipsCreated}`);
+        } else {
+            logger.info(`Starting analysis for directory: ${directory}${repoInfo}`);
+        }
+
         const absoluteDirectory = path.resolve(directory);
         let scanner: FileScanner;
+        let filesScanned = 0;
+
+        // Get set of already-processed files for resume
+        const processedFilePaths = new Set<string>(
+            resumeFrom?.checkpointData?.processedFilePaths || []
+        );
+        const skipProcessedFiles = isResume && processedFilePaths.size > 0;
+        if (skipProcessedFiles) {
+            logger.info(`Will skip ${processedFilePaths.size} already-processed files`);
+        }
 
         try {
             // Instantiate FileScanner here with directory and config
@@ -79,14 +173,159 @@ export class AnalyzerService {
                 // TODO: Implement Maven parser
             }
 
-            // 1. Scan Files
+            // 1. Scan Files (with hashes for incremental indexing)
             logger.info('Scanning files...');
-            const files: FileInfo[] = await scanner.scan(); // No argument needed
-            if (files.length === 0) {
-                logger.warn('No files found to analyze.');
-                return;
+            if (callback) {
+                await callback.updateProgress({
+                    phase: 'indexing_files',
+                    progress_pct: 15,
+                    total_files: resumeFrom?.totalFiles || 0,
+                    processed_files: resumeFrom?.processedFiles || 0,
+                    nodes_created: resumeFrom?.nodesCreated || 0,
+                    relationships_created: resumeFrom?.relationshipsCreated || 0,
+                    message: isResume ? 'Resuming: Scanning files...' : 'Scanning files...',
+                });
+                callback.addLog({
+                    level: 'info',
+                    phase: 'indexing_files',
+                    message: isResume ? 'Resuming: Scanning files...' : 'Scanning files...'
+                });
             }
-            logger.info(`Found ${files.length} files.`);
+
+            // Determine if we should use incremental indexing
+            const useIncremental = context && (incrementalOptions?.incrementalMode !== false);
+            const forceFullReindex = incrementalOptions?.forceFullReindex === true;
+
+            // Scan files with hashes for incremental comparison
+            let allFiles: FileInfo[];
+            if (useIncremental && !forceFullReindex) {
+                logger.info('Scanning files with hashes for incremental indexing...');
+                allFiles = await scanner.scanWithHashes();
+            } else {
+                allFiles = await scanner.scan();
+            }
+            const totalFilesFound = allFiles.length;
+
+            // Incremental indexing: determine which files need processing
+            let incrementalResult: IncrementalIndexResult | null = null;
+            let files: FileInfo[] = allFiles;
+            let deletedFiles: string[] = [];
+            let unchangedFiles: string[] = [];
+
+            if (useIncremental && context) {
+                logger.info('Determining files to process (incremental mode)...');
+                await this.neo4jClient.initializeDriver('AnalyzerService-Incremental');
+
+                incrementalResult = await this.incrementalIndexManager.determineFilesToProcess(
+                    absoluteDirectory,
+                    context.repositoryId,
+                    allFiles,
+                    forceFullReindex
+                );
+
+                files = incrementalResult.changedFiles;
+                deletedFiles = incrementalResult.deletedFiles;
+                unchangedFiles = incrementalResult.unchangedFiles;
+
+                logger.info(`Incremental analysis: ${files.length} changed, ${unchangedFiles.length} unchanged, ${deletedFiles.length} deleted`);
+                logger.info(`Reason: ${incrementalResult.reason}`);
+
+                if (callback) {
+                    callback.addLog({
+                        level: 'info',
+                        phase: 'indexing_files',
+                        message: incrementalResult.isFullReindex
+                            ? `Full reindex: ${incrementalResult.reason}`
+                            : `Incremental: ${files.length} changed, ${unchangedFiles.length} unchanged, ${deletedFiles.length} deleted`
+                    });
+                }
+
+                // Clean up deleted files FIRST before processing new/changed files
+                if (deletedFiles.length > 0) {
+                    logger.info(`Cleaning up ${deletedFiles.length} deleted files...`);
+                    if (callback) {
+                        callback.addLog({
+                            level: 'info',
+                            phase: 'cleanup',
+                            message: `Cleaning up ${deletedFiles.length} deleted files...`
+                        });
+                    }
+                    const cleanupResult = await this.incrementalIndexManager.cleanupDeletedFiles(
+                        context.repositoryId,
+                        deletedFiles
+                    );
+                    logger.info(`Cleanup complete: ${cleanupResult.nodesDeleted} nodes removed`);
+                }
+            }
+
+            // Filter out already-processed files when resuming
+            if (skipProcessedFiles) {
+                const originalCount = files.length;
+                files = files.filter(f => !processedFilePaths.has(f.path));
+                const skippedCount = originalCount - files.length;
+                logger.info(`Resume: Skipping ${skippedCount} already-processed files, ${files.length} remaining`);
+                if (callback) {
+                    callback.addLog({
+                        level: 'info',
+                        phase: 'indexing_files',
+                        message: `Resume: Skipping ${skippedCount} already-processed files, ${files.length} remaining`
+                    });
+                }
+            }
+
+            filesScanned = totalFilesFound;
+            if (files.length === 0) {
+                if (isResume) {
+                    logger.info('All files already processed. Analysis complete.');
+                    return {
+                        filesScanned: totalFilesFound,
+                        nodesCreated: resumeFrom?.nodesCreated || 0,
+                        relationshipsCreated: resumeFrom?.relationshipsCreated || 0,
+                        wasIncremental: true,
+                        filesSkipped: unchangedFiles.length,
+                        filesDeleted: deletedFiles.length,
+                        indexingReason: 'Resume - all files processed'
+                    };
+                }
+                if (incrementalResult && !incrementalResult.isFullReindex) {
+                    logger.info('No changed files to process. Index is up to date.');
+
+                    // Save index state even when no changes (update timestamp)
+                    if (context) {
+                        const commitSha = await isGitRepository(absoluteDirectory)
+                            ? await getCurrentCommitSha(absoluteDirectory)
+                            : null;
+                        const indexState = this.incrementalIndexManager.createIndexState(
+                            context.repositoryId,
+                            allFiles,
+                            commitSha
+                        );
+                        await this.incrementalIndexManager.saveIndexState(indexState);
+                    }
+
+                    return {
+                        filesScanned: totalFilesFound,
+                        nodesCreated: 0,
+                        relationshipsCreated: 0,
+                        wasIncremental: true,
+                        filesSkipped: unchangedFiles.length,
+                        filesDeleted: deletedFiles.length,
+                        indexingReason: incrementalResult.reason
+                    };
+                }
+                logger.warn('No files found to analyze.');
+                return { filesScanned: 0, nodesCreated: 0, relationshipsCreated: 0, wasIncremental: false, filesSkipped: 0, filesDeleted: 0 };
+            }
+            logger.info(`Found ${totalFilesFound} files total, ${files.length} to process.`);
+            if (callback) {
+                callback.addLog({
+                    level: 'info',
+                    phase: 'indexing_files',
+                    message: isResume
+                        ? `Found ${totalFilesFound} files, ${files.length} remaining to process`
+                        : `Found ${files.length} files to analyze`
+                });
+            }
 
             // 1.5 Enrich files with module information
             let moduleAwareFiles: ModuleAwareFileInfo[] = [];
@@ -101,16 +340,48 @@ export class AnalyzerService {
 
             // 2. Parse Files (Pass 1) - pass context for multi-repository support
             logger.info('Parsing files (Pass 1)...');
+            if (callback) {
+                await callback.updateProgress({
+                    phase: 'parsing_code',
+                    progress_pct: 30,
+                    total_files: filesScanned,
+                    processed_files: 0,
+                    nodes_created: 0,
+                    relationships_created: 0,
+                    message: 'Parsing files (Pass 1)...',
+                });
+                callback.addLog({ level: 'info', phase: 'parsing_code', message: `Parsing ${filesScanned} files...` });
+            }
             await this.parser.parseFiles(files, context);
 
             // 3. Collect Pass 1 Results
             logger.info('Collecting Pass 1 results...');
             const { allNodes: pass1Nodes, allRelationships: pass1Relationships } = await this.parser.collectResults();
             logger.info(`Collected ${pass1Nodes.length} nodes and ${pass1Relationships.length} relationships from Pass 1.`);
+            if (callback) {
+                await callback.updateProgress({
+                    phase: 'parsing_code',
+                    progress_pct: 50,
+                    total_files: filesScanned,
+                    processed_files: filesScanned,
+                    nodes_created: pass1Nodes.length,
+                    relationships_created: pass1Relationships.length,
+                    message: `Collected ${pass1Nodes.length} nodes and ${pass1Relationships.length} relationships`,
+                });
+                callback.addLog({ level: 'info', phase: 'parsing_code', message: `Pass 1 complete: ${pass1Nodes.length} nodes, ${pass1Relationships.length} relationships` });
+            }
 
             if (pass1Nodes.length === 0) {
                 logger.warn('No nodes were generated during Pass 1. Aborting further analysis.');
-                return;
+                return {
+                    filesScanned,
+                    nodesCreated: 0,
+                    relationshipsCreated: 0,
+                    wasIncremental: incrementalResult ? !incrementalResult.isFullReindex : false,
+                    filesSkipped: unchangedFiles.length,
+                    filesDeleted: deletedFiles.length,
+                    indexingReason: 'No nodes generated in Pass 1'
+                };
             }
 
             // 3.5 Create Repository node and BELONGS_TO relationships for multi-repository support
@@ -136,6 +407,16 @@ export class AnalyzerService {
                     pass1Nodes.push(...moduleNodes);
                     pass1Relationships.push(...moduleRelationships);
                     logger.info(`Created ${moduleNodes.length} module nodes and ${moduleRelationships.length} module relationships.`);
+
+                    // Log module details for debugging
+                    for (const moduleNode of moduleNodes) {
+                        logger.debug(`Module node created: ${moduleNode.name}, entityId: ${moduleNode.entityId}, kind: ${moduleNode.kind}`);
+                    }
+                    for (const rel of moduleRelationships.filter(r => r.type === 'HAS_MODULE')) {
+                        logger.debug(`HAS_MODULE relationship: source=${rel.sourceId}, target=${rel.targetId}`);
+                    }
+                } else {
+                    logger.warn(`No modules created: projectStructure=${!!projectStructure}, modules.length=${projectStructure?.modules?.length ?? 0}`);
                 }
             }
 
@@ -153,12 +434,27 @@ export class AnalyzerService {
 
             // 5. Store Results
             logger.info('Storing analysis results...');
+            if (callback) {
+                await callback.updateProgress({
+                    phase: 'building_graph',
+                    progress_pct: 70,
+                    total_files: filesScanned,
+                    processed_files: filesScanned,
+                    nodes_created: finalNodes.length,
+                    relationships_created: uniqueRelationships.length,
+                    message: `Storing ${finalNodes.length} nodes to database...`,
+                });
+                callback.addLog({ level: 'info', phase: 'building_graph', message: `Storing ${finalNodes.length} nodes to Neo4j...` });
+            }
             // Ensure driver is initialized before storing
             await this.neo4jClient.initializeDriver('AnalyzerService-Store');
 
             // --- Database clearing is now handled by beforeEach in tests ---
 
             await this.storageManager.saveNodesBatch(finalNodes);
+            if (callback) {
+                callback.addLog({ level: 'info', phase: 'building_graph', message: `Saved ${finalNodes.length} nodes successfully` });
+            }
 
             // Group relationships by type before saving
             const relationshipsByType: { [type: string]: RelationshipInfo[] } = {};
@@ -171,6 +467,18 @@ export class AnalyzerService {
             }
 
             // Save relationships batch by type
+            if (callback) {
+                await callback.updateProgress({
+                    phase: 'building_graph',
+                    progress_pct: 85,
+                    total_files: filesScanned,
+                    processed_files: filesScanned,
+                    nodes_created: finalNodes.length,
+                    relationships_created: uniqueRelationships.length,
+                    message: `Storing ${uniqueRelationships.length} relationships...`,
+                });
+                callback.addLog({ level: 'info', phase: 'building_graph', message: `Storing ${uniqueRelationships.length} relationships...` });
+            }
             for (const type in relationshipsByType) {
                  const batch = relationshipsByType[type];
                  // --- TEMPORARY DEBUG LOG ---
@@ -186,6 +494,114 @@ export class AnalyzerService {
             }
 
             logger.info('Analysis results stored successfully.');
+
+            // 5.5 Compute PageRank scores for relevance-based retrieval
+            if (context) {
+                logger.info('Computing PageRank scores...');
+                if (callback) {
+                    await callback.updateProgress({
+                        phase: 'computing_relevance',
+                        progress_pct: 92,
+                        total_files: filesScanned,
+                        processed_files: filesScanned,
+                        nodes_created: finalNodes.length,
+                        relationships_created: uniqueRelationships.length,
+                        message: 'Computing relevance scores (PageRank)...',
+                    });
+                    callback.addLog({ level: 'info', phase: 'computing_relevance', message: 'Computing PageRank scores for components...' });
+                }
+
+                try {
+                    const pageRankResult = await this.graphAlgorithms.computePageRank(context.repositoryId);
+                    logger.info(`PageRank computed: ${pageRankResult.nodesUpdated} nodes updated in ${pageRankResult.executionTimeMs}ms`);
+
+                    if (callback && pageRankResult.topNodes.length > 0) {
+                        const topNames = pageRankResult.topNodes.slice(0, 5).map(n => n.name).join(', ');
+                        callback.addLog({
+                            level: 'info',
+                            phase: 'computing_relevance',
+                            message: `PageRank computed. Top components: ${topNames}`
+                        });
+                    }
+                } catch (error: any) {
+                    logger.warn(`PageRank computation failed (non-fatal): ${error.message}`);
+                    if (callback) {
+                        callback.addLog({
+                            level: 'warn',
+                            phase: 'computing_relevance',
+                            message: `PageRank computation skipped: ${error.message}`
+                        });
+                    }
+                }
+            }
+
+            // 6. Save Index State for incremental indexing
+            if (context && useIncremental) {
+                logger.info('Saving index state for future incremental indexing...');
+                try {
+                    const commitSha = await isGitRepository(absoluteDirectory)
+                        ? await getCurrentCommitSha(absoluteDirectory)
+                        : null;
+
+                    // Create or update index state
+                    let indexState: IndexStateData;
+                    const existingState = await this.incrementalIndexManager.loadIndexState(context.repositoryId);
+
+                    if (existingState && !incrementalResult?.isFullReindex) {
+                        // Update existing state with changes
+                        indexState = this.incrementalIndexManager.updateIndexState(
+                            existingState,
+                            files, // changed files
+                            deletedFiles,
+                            commitSha
+                        );
+                    } else {
+                        // Create new state with all files
+                        indexState = this.incrementalIndexManager.createIndexState(
+                            context.repositoryId,
+                            allFiles,
+                            commitSha
+                        );
+                    }
+
+                    await this.incrementalIndexManager.saveIndexState(indexState);
+                    logger.info(`Index state saved: ${indexState.totalFilesIndexed} files tracked`);
+
+                    if (callback) {
+                        callback.addLog({
+                            level: 'info',
+                            phase: 'completed',
+                            message: `Index state saved: ${indexState.totalFilesIndexed} files tracked`
+                        });
+                    }
+                } catch (error: any) {
+                    // Log but don't fail the analysis if index state saving fails
+                    logger.warn(`Failed to save index state: ${error.message}`);
+                }
+            }
+
+            if (callback) {
+                await callback.updateProgress({
+                    phase: 'completed',
+                    progress_pct: 100,
+                    total_files: filesScanned,
+                    processed_files: filesScanned,
+                    nodes_created: finalNodes.length,
+                    relationships_created: uniqueRelationships.length,
+                    message: 'Analysis completed successfully',
+                });
+                callback.addLog({ level: 'info', phase: 'completed', message: 'Analysis completed successfully' });
+            }
+
+            return {
+                filesScanned,
+                nodesCreated: finalNodes.length,
+                relationshipsCreated: uniqueRelationships.length,
+                wasIncremental: incrementalResult ? !incrementalResult.isFullReindex : false,
+                filesSkipped: unchangedFiles.length,
+                filesDeleted: deletedFiles.length,
+                indexingReason: incrementalResult?.reason,
+            };
 
         } catch (error: any) {
             logger.error(`Analysis failed: ${error.message}`, { stack: error.stack });
