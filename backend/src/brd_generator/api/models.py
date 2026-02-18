@@ -472,6 +472,24 @@ class GenerateBRDRequest(BaseModel):
         """
     )
 
+    # Model selection
+    model: Optional[str] = Field(
+        None,
+        description="""
+        LLM model to use for BRD generation.
+
+        Available models (via GitHub Copilot):
+        - 'gpt-4.1': Fast, efficient OpenAI model (default, works on all tiers)
+        - 'gpt-5.1': Latest GPT-5 with improved reasoning
+        - 'claude-sonnet-4.5': Balanced Claude model, excellent for BRDs
+        - 'claude-opus-4.5': Most capable Claude model (requires Pro+)
+        - 'gemini-3-pro-preview': Google's latest with massive context
+
+        If not specified, uses the default model (gpt-4.1) which works on all
+        Copilot subscription tiers. Some models require Pro/Business/Enterprise.
+        """
+    )
+
     # Consistency controls for reproducible outputs
     temperature: float = Field(
         0.0,
@@ -1484,6 +1502,9 @@ class BusinessFeature(BaseModel):
     entry_points: list[str] = Field(default_factory=list, description="Entry point classes/methods")
     file_path: Optional[str] = Field(None, description="Primary file path for this feature")
 
+    # Feature grouping
+    feature_group: Optional[str] = Field(None, description="Inferred group name for related features")
+
     # Code analysis
     code_footprint: CodeFootprint = Field(default_factory=CodeFootprint)
     endpoints: list[FeatureEndpoint] = Field(default_factory=list, description="Associated API endpoints")
@@ -1512,6 +1533,13 @@ class FeaturesSummary(BaseModel):
     avg_complexity_score: float = Field(0.0)
 
 
+class FeatureGroup(BaseModel):
+    """A group of related business features."""
+    name: str = Field(..., description="Group name (inferred from feature name prefixes)")
+    features: list[BusinessFeature] = Field(default_factory=list, description="Features in this group")
+    feature_count: int = Field(0, description="Number of features in this group")
+
+
 class DiscoveredFeaturesResponse(BaseModel):
     """Response model for discovered business features."""
     success: bool = True
@@ -1520,6 +1548,10 @@ class DiscoveredFeaturesResponse(BaseModel):
     generated_at: datetime
 
     features: list[BusinessFeature] = Field(default_factory=list)
+    feature_groups: list[FeatureGroup] = Field(
+        default_factory=list,
+        description="Features grouped by inferred groups (e.g., 'Legal Entity' groups 'Legal Entity Search', 'Legal Entity Address')"
+    )
     summary: FeaturesSummary = Field(default_factory=FeaturesSummary)
 
     # Metadata
@@ -1528,3 +1560,198 @@ class DiscoveredFeaturesResponse(BaseModel):
         description="Discovery method used: webflow, controller, service_cluster, hybrid"
     )
     discovery_duration_ms: Optional[int] = Field(None, description="Time taken for discovery")
+
+
+# =============================================================================
+# BRD Library - Request/Response Models
+# =============================================================================
+
+class DocumentStatus(str, Enum):
+    """Status of a document in the BRD library."""
+    DRAFT = "draft"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    APPROVED = "approved"
+    ARCHIVED = "archived"
+
+
+class StoredBacklog(BaseModel):
+    """A stored backlog item in the library."""
+    id: str
+    backlog_number: str
+    epic_id: str
+    epic_title: Optional[str] = None
+    title: str
+    description: str
+    item_type: str
+    as_a: Optional[str] = None
+    i_want: Optional[str] = None
+    so_that: Optional[str] = None
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    technical_notes: Optional[str] = None
+    files_to_modify: list[str] = Field(default_factory=list)
+    files_to_create: list[str] = Field(default_factory=list)
+    priority: str = "medium"
+    story_points: Optional[int] = None
+    status: str = "draft"
+    refinement_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class StoredEpic(BaseModel):
+    """A stored EPIC in the library."""
+    id: str
+    epic_number: str
+    brd_id: str
+    brd_title: Optional[str] = None
+    repository_id: Optional[str] = None
+    repository_name: Optional[str] = None
+    title: str
+    description: str
+    business_value: Optional[str] = None
+    objectives: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    affected_components: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
+    status: str = "draft"
+    refinement_count: int = 0
+    display_order: int = 0
+    backlog_count: int = 0
+    backlogs: list[StoredBacklog] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class StoredBRD(BaseModel):
+    """A stored BRD in the library."""
+    id: str
+    brd_number: str
+    title: str
+    feature_description: str
+    markdown_content: str
+    sections: Optional[list[dict]] = None
+    repository_id: str
+    repository_name: Optional[str] = None
+    mode: str = "draft"
+    confidence_score: Optional[float] = None
+    verification_report: Optional[dict] = None
+    status: str = "draft"
+    version: int = 1
+    refinement_count: int = 0
+    epic_count: int = 0
+    backlog_count: int = 0
+    epics: list[StoredEpic] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class SaveBRDRequest(BaseModel):
+    """Request to save a newly generated BRD."""
+    repository_id: str = Field(..., description="Repository ID the BRD belongs to")
+    title: str = Field(..., description="BRD title")
+    feature_description: str = Field(..., description="Original feature description")
+    markdown_content: str = Field(..., description="Full BRD markdown content")
+    sections: Optional[list[dict]] = Field(None, description="Parsed sections")
+    mode: str = Field("draft", description="Generation mode (draft/verified)")
+    confidence_score: Optional[float] = Field(None, description="Verification confidence")
+    verification_report: Optional[dict] = Field(None, description="Full verification report")
+
+
+class UpdateBRDRequest(BaseModel):
+    """Request to update an existing BRD."""
+    title: Optional[str] = None
+    markdown_content: Optional[str] = None
+    sections: Optional[list[dict]] = None
+    status: Optional[str] = None
+    confidence_score: Optional[float] = None
+    verification_report: Optional[dict] = None
+
+
+class UpdateBRDStatusRequest(BaseModel):
+    """Request to update BRD status."""
+    status: str = Field(..., description="New status: draft, in_progress, completed, approved, archived")
+
+
+class SaveEpicsRequest(BaseModel):
+    """Request to save EPICs for a BRD."""
+    epics: list[dict] = Field(..., description="List of EPIC data to save")
+
+
+class SaveBacklogsRequest(BaseModel):
+    """Request to save backlogs for an EPIC."""
+    items: list[dict] = Field(..., description="List of backlog item data to save")
+
+
+class BRDListResponse(BaseModel):
+    """Response for BRD listing."""
+    success: bool = True
+    data: list[StoredBRD]
+    total: int
+    limit: int
+    offset: int
+
+
+class BRDDetailResponse(BaseModel):
+    """Response for BRD detail."""
+    success: bool = True
+    data: StoredBRD
+
+
+class EpicDetailResponse(BaseModel):
+    """Response for EPIC detail."""
+    success: bool = True
+    data: StoredEpic
+
+
+class EpicsListResponse(BaseModel):
+    """Response for EPICs listing."""
+    success: bool = True
+    data: list[StoredEpic]
+    total: int
+
+
+class BacklogsListResponse(BaseModel):
+    """Response for backlogs listing."""
+    success: bool = True
+    data: list[StoredBacklog]
+    total: int
+
+
+# =============================================================================
+# Module Dependencies - Request/Response Models
+# =============================================================================
+
+class ModuleInfo(BaseModel):
+    """Information about a single module in the codebase."""
+
+    name: str = Field(..., description="Module name")
+    path: str = Field(..., description="Module path relative to repository root")
+    fileCount: int = Field(0, description="Number of files in the module")
+    classCount: int = Field(0, description="Number of classes in the module")
+    functionCount: int = Field(0, description="Number of functions/methods in the module")
+    totalLoc: int = Field(0, description="Total lines of code in the module")
+    avgComplexity: Optional[float] = Field(None, description="Average cyclomatic complexity")
+    maxComplexity: Optional[int] = Field(None, description="Maximum cyclomatic complexity")
+    dependencies: list[str] = Field(default_factory=list, description="Modules this module depends on")
+    dependents: list[str] = Field(default_factory=list, description="Modules that depend on this module")
+
+
+class ModuleDependencyEdge(BaseModel):
+    """An edge in the module dependency graph."""
+
+    source: str = Field(..., description="Source module name")
+    target: str = Field(..., description="Target module name (dependency)")
+    weight: int = Field(1, description="Edge weight (number of dependencies)")
+
+
+class ModuleDependenciesResponse(BaseModel):
+    """Response model for module dependencies endpoint."""
+
+    success: bool = True
+    repository_id: str
+    repository_name: str
+    modules: list[ModuleInfo] = Field(default_factory=list)
+    dependencyGraph: list[ModuleDependencyEdge] = Field(default_factory=list)
+    totalModules: int = Field(0, description="Total number of modules")
+    avgDependencies: float = Field(0.0, description="Average dependencies per module")

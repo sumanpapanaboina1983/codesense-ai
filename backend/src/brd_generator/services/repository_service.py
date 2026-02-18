@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
 
 import httpx
@@ -260,6 +262,157 @@ class RepositoryService:
 
         return Repository.model_validate(db_repo)
 
+    async def create_from_zip(
+        self,
+        zip_path: str,
+        name: str,
+        session: AsyncSession,
+        auto_analyze: bool = True,
+    ) -> Tuple[Repository, int]:
+        """Create a repository from an uploaded ZIP file.
+
+        Args:
+            zip_path: Path to the uploaded ZIP file.
+            name: Repository name.
+            session: Database session.
+            auto_analyze: Whether to auto-trigger analysis.
+
+        Returns:
+            Tuple of (Repository, files_extracted).
+
+        Raises:
+            ValueError: If repository name already exists or ZIP is invalid.
+        """
+        # Generate repository ID and destination path
+        repo_id = str(uuid4())
+        dest_path = self.storage_root / repo_id
+
+        # Check if name already exists
+        existing = await self._get_by_name(name, session)
+        if existing:
+            raise ValueError(f"Repository with name '{name}' already exists")
+
+        files_extracted = 0
+
+        try:
+            # Create destination directory
+            dest_path.mkdir(parents=True, exist_ok=True)
+
+            # Extract ZIP file
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                # Get list of files
+                file_list = zip_ref.namelist()
+                files_extracted = len([f for f in file_list if not f.endswith('/')])
+
+                # Check if there's a single root directory
+                # Many ZIPs have structure like: repo-name/src/... instead of src/...
+                root_dirs = set()
+                for file_path in file_list:
+                    parts = file_path.split('/')
+                    if len(parts) > 1 and parts[0]:
+                        root_dirs.add(parts[0])
+
+                # If there's exactly one root directory, extract contents from it
+                single_root = len(root_dirs) == 1
+                root_prefix = list(root_dirs)[0] + '/' if single_root else ''
+
+                # Extract files
+                for member in zip_ref.infolist():
+                    # Skip directories and hidden files
+                    if member.is_dir():
+                        continue
+                    if member.filename.startswith('__MACOSX'):
+                        continue
+
+                    # Calculate target path
+                    if single_root and member.filename.startswith(root_prefix):
+                        target_name = member.filename[len(root_prefix):]
+                    else:
+                        target_name = member.filename
+
+                    if not target_name:
+                        continue
+
+                    target_path = dest_path / target_name
+
+                    # Create parent directories
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    # Extract file
+                    with zip_ref.open(member) as source:
+                        with open(target_path, 'wb') as target:
+                            shutil.copyfileobj(source, target)
+
+            # Try to get git info if it's a git repository
+            current_branch = None
+            current_commit = None
+            try:
+                git_status = await self.git_client.get_status(dest_path)
+                current_branch = git_status.branch
+                current_commit = git_status.commit_sha
+            except Exception:
+                # Not a git repo - that's okay for uploaded repos
+                pass
+
+            # Create repository record
+            from ..database.models import RepositoryPlatform as DBRepositoryPlatform
+
+            db_repo = RepositoryDB(
+                id=repo_id,
+                name=name,
+                full_name=f"uploaded/{name}",
+                url=f"upload://{name}",
+                clone_url=f"upload://{name}",
+                platform=DBRepositoryPlatform.LOCAL,
+                description=f"Uploaded repository: {name}",
+                default_branch=current_branch or "main",
+                is_private=True,
+                local_path=str(dest_path),
+                current_branch=current_branch,
+                current_commit=current_commit,
+                status=DBRepositoryStatus.CLONED,
+                cloned_at=datetime.utcnow(),
+                analysis_status=DBAnalysisStatus.NOT_ANALYZED,
+                auto_analyze_on_sync=auto_analyze,
+            )
+
+            session.add(db_repo)
+            await session.flush()
+
+            logger.info(
+                f"Created repository from ZIP: {name} ({repo_id}), "
+                f"extracted {files_extracted} files to {dest_path}"
+            )
+
+            repository = Repository.model_validate(db_repo)
+
+            # Schedule auto-analysis as a background task (runs after transaction commits)
+            if auto_analyze:
+                logger.info(f"Scheduling auto-analysis for uploaded repository: {name}")
+                task = asyncio.create_task(
+                    self._delayed_auto_trigger_analysis(repo_id, name)
+                )
+                self._background_tasks[f"auto-analyze-{repo_id}"] = task
+
+            return repository, files_extracted
+
+        except Exception as e:
+            # Cleanup on failure
+            if dest_path.exists():
+                shutil.rmtree(dest_path, ignore_errors=True)
+            raise
+
+    async def _get_by_name(
+        self,
+        name: str,
+        session: AsyncSession,
+    ) -> Optional[RepositoryDB]:
+        """Get repository by name."""
+        result = await session.execute(
+            select(RepositoryDB).where(RepositoryDB.name == name)
+        )
+        return result.scalar_one_or_none()
+
     async def _get_by_local_path(
         self,
         local_path: str,
@@ -388,6 +541,7 @@ class RepositoryService:
         repository_id: str,
         session: AsyncSession,
         delete_files: bool = True,
+        force: bool = False,
     ) -> bool:
         """Delete a repository.
 
@@ -395,9 +549,13 @@ class RepositoryService:
             repository_id: Repository ID.
             session: Database session.
             delete_files: Whether to delete local files.
+            force: If True, cancel running jobs and delete anyway.
 
         Returns:
             True if deleted.
+
+        Raises:
+            ValueError: If repository has running analysis jobs and force=False.
         """
         result = await session.execute(
             select(RepositoryDB).where(RepositoryDB.id == repository_id)
@@ -407,12 +565,39 @@ class RepositoryService:
         if not db_repo:
             return False
 
+        # Check for running analysis jobs
+        running_jobs_result = await session.execute(
+            select(AnalysisRunDB).where(
+                AnalysisRunDB.repository_id == repository_id,
+                AnalysisRunDB.status.in_([
+                    DBAnalysisStatus.PENDING,
+                    DBAnalysisStatus.RUNNING,
+                ])
+            )
+        )
+        running_jobs = running_jobs_result.scalars().all()
+
+        if running_jobs and not force:
+            job_ids = [job.id for job in running_jobs]
+            raise ValueError(
+                f"Cannot delete repository with running analysis jobs. "
+                f"Running jobs: {job_ids}. Use force=true to cancel jobs and delete."
+            )
+
         # Cancel any background tasks
         for task_key in [f"clone-{repository_id}", f"analysis-{repository_id}"]:
             if task_key in self._background_tasks:
                 task = self._background_tasks.pop(task_key)
                 if not task.done():
                     task.cancel()
+
+        # Cancel running jobs if force=True
+        if running_jobs and force:
+            for job in running_jobs:
+                job.status = DBAnalysisStatus.FAILED
+                job.status_message = "Cancelled due to repository deletion"
+                job.completed_at = datetime.utcnow()
+            await session.flush()
 
         # Delete local files
         if delete_files and db_repo.local_path:
@@ -484,11 +669,101 @@ class RepositoryService:
 
                 logger.info(f"Cloned repository: {db_repo.full_name} at {git_status.commit_sha}")
 
+                # Auto-trigger analysis if enabled
+                if db_repo.auto_analyze_on_sync:
+                    logger.info(f"Auto-triggering analysis for {db_repo.full_name}")
+                    await self._auto_trigger_analysis(repository_id)
+
             except Exception as e:
                 logger.exception(f"Failed to clone repository: {db_repo.full_name}")
                 db_repo.status = DBRepositoryStatus.CLONE_FAILED
                 db_repo.status_message = str(e)
                 await session.commit()
+
+    async def _auto_trigger_analysis(self, repository_id: str) -> None:
+        """Auto-trigger analysis after successful clone.
+
+        Args:
+            repository_id: Repository ID to analyze.
+        """
+        try:
+            async with get_async_session() as session:
+                # Create analysis run
+                from ..models.repository import AnalysisRunCreate
+
+                analysis_data = AnalysisRunCreate(
+                    reset_graph=False,
+                    triggered_by="auto_clone",
+                )
+
+                await self.trigger_analysis(repository_id, analysis_data, session)
+                await session.commit()
+
+        except Exception as e:
+            logger.warning(f"Failed to auto-trigger analysis: {e}")
+            # Don't fail the clone if analysis trigger fails
+
+    async def _delayed_auto_trigger_analysis(
+        self,
+        repository_id: str,
+        repo_name: str,
+        max_retries: int = 5,
+        retry_delay: float = 1.0,
+    ) -> None:
+        """Auto-trigger analysis after ZIP upload with retry logic.
+
+        This runs as a background task to ensure the transaction that created
+        the repository record has committed before we try to trigger analysis.
+
+        Args:
+            repository_id: Repository ID to analyze.
+            repo_name: Repository name for logging.
+            max_retries: Maximum retry attempts to find the repository.
+            retry_delay: Seconds to wait between retries.
+        """
+        for attempt in range(max_retries):
+            try:
+                # Wait for transaction to commit
+                await asyncio.sleep(retry_delay)
+
+                async with get_async_session() as session:
+                    # Verify repository exists
+                    result = await session.execute(
+                        select(RepositoryDB).where(RepositoryDB.id == repository_id)
+                    )
+                    db_repo = result.scalar_one_or_none()
+
+                    if not db_repo:
+                        logger.warning(
+                            f"Repository {repository_id} not found yet, "
+                            f"attempt {attempt + 1}/{max_retries}"
+                        )
+                        continue
+
+                    # Create analysis run
+                    from ..models.repository import AnalysisRunCreate
+
+                    analysis_data = AnalysisRunCreate(
+                        reset_graph=False,
+                        triggered_by="auto_upload",
+                    )
+
+                    await self.trigger_analysis(repository_id, analysis_data, session)
+                    await session.commit()
+
+                    logger.info(f"Auto-triggered analysis for uploaded repository: {repo_name}")
+                    return
+
+            except Exception as e:
+                logger.warning(
+                    f"Failed to auto-trigger analysis (attempt {attempt + 1}): {e}"
+                )
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    logger.error(
+                        f"Giving up auto-trigger analysis for {repo_name} after {max_retries} attempts"
+                    )
 
     async def sync_repository(
         self,
@@ -574,7 +849,11 @@ class RepositoryService:
         if db_repo.status != DBRepositoryStatus.CLONED:
             raise ValueError(f"Repository not cloned. Status: {db_repo.status}")
 
-        # Create analysis run
+        # Create analysis run with wiki options
+        wiki_options_dict = None
+        if hasattr(data, 'wiki_options') and data.wiki_options:
+            wiki_options_dict = data.wiki_options.model_dump()
+
         analysis_run = AnalysisRunDB(
             id=str(uuid4()),
             repository_id=repository_id,
@@ -583,6 +862,7 @@ class RepositoryService:
             branch=db_repo.current_branch,
             reset_graph=data.reset_graph,
             triggered_by=data.triggered_by,
+            wiki_options=wiki_options_dict,
         )
         session.add(analysis_run)
 
@@ -629,6 +909,10 @@ class RepositoryService:
                 return
 
             try:
+                # Build callback URL for codegraph to report progress
+                # Use internal Docker network URL if running in Docker
+                backend_url = os.environ.get("BACKEND_INTERNAL_URL", "http://backend:8000")
+
                 # Call codegraph API with repository metadata for multi-repository support
                 client = await self._get_http_client()
                 response = await client.post(
@@ -640,6 +924,9 @@ class RepositoryService:
                         "repositoryUrl": db_repo.url,      # Original repository URL
                         "resetDb": analysis.reset_graph,
                         "updateSchema": True,
+                        # Callback parameters for progress reporting
+                        "callbackUrl": backend_url,
+                        "analysisRunId": str(analysis.id),
                     },
                 )
                 response.raise_for_status()
@@ -652,9 +939,9 @@ class RepositoryService:
                 db_repo.analysis_status = DBAnalysisStatus.RUNNING
                 await session.commit()
 
-                logger.info(f"Started codegraph analysis: {codegraph_job_id}")
+                logger.info(f"Started codegraph analysis: {codegraph_job_id} with callback to {backend_url}")
 
-                # Poll for completion
+                # Poll for completion (as fallback, codegraph also reports via callback)
                 await self._poll_analysis(analysis_id, codegraph_job_id)
 
             except Exception as e:
@@ -706,7 +993,9 @@ class RepositoryService:
                     db_repo = repo_result.scalar_one_or_none()
 
                     if status == "completed":
-                        stats = result.get("stats", {})
+                        raw_stats = result.get("stats", {})
+                        # Normalize camelCase stats from codegraph to snake_case
+                        stats = self._normalize_stats(raw_stats)
                         analysis.mark_completed(stats)
                         if db_repo:
                             db_repo.analysis_status = DBAnalysisStatus.COMPLETED
@@ -715,9 +1004,20 @@ class RepositoryService:
 
                         logger.info(
                             f"Analysis completed: {analysis_id} - "
-                            f"{stats.get('nodesCreated', 0)} nodes, "
-                            f"{stats.get('relationshipsCreated', 0)} relationships"
+                            f"{stats.get('nodes_created', 0)} nodes, "
+                            f"{stats.get('relationships_created', 0)} relationships"
                         )
+
+                        # Trigger wiki generation if enabled
+                        wiki_options = analysis.wiki_options
+                        if wiki_options and wiki_options.get("enabled", True):
+                            logger.info(f"Triggering wiki generation for {analysis.repository_id}")
+                            await self._trigger_wiki_generation(
+                                repository_id=analysis.repository_id,
+                                analysis_id=analysis_id,
+                                wiki_options=wiki_options,
+                            )
+
                         return
 
                     elif status == "failed":
@@ -808,9 +1108,138 @@ class RepositoryService:
 
         return [AnalysisRunSummary.model_validate(r) for r in runs]
 
+    async def resume_analysis(
+        self,
+        analysis_id: str,
+        repository_id: str,
+        local_path: str,
+        resume_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Resume a paused or failed analysis from its checkpoint.
+
+        Args:
+            analysis_id: Analysis run ID.
+            repository_id: Repository ID.
+            local_path: Local path to the repository.
+            resume_data: Checkpoint data for resuming (phase, processed_files, etc.)
+        """
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(AnalysisRunDB).where(AnalysisRunDB.id == analysis_id)
+            )
+            analysis = result.scalar_one_or_none()
+
+            if not analysis:
+                logger.error(f"Analysis run not found for resume: {analysis_id}")
+                return
+
+            # Get repository
+            repo_result = await session.execute(
+                select(RepositoryDB).where(RepositoryDB.id == repository_id)
+            )
+            db_repo = repo_result.scalar_one_or_none()
+
+            if not db_repo:
+                logger.error(f"Repository not found for resume: {repository_id}")
+                return
+
+            try:
+                # Build callback URL for codegraph to report progress
+                backend_url = os.environ.get("BACKEND_INTERNAL_URL", "http://backend:8000")
+
+                # Build resume request with checkpoint data
+                request_data = {
+                    "directory": local_path,
+                    "repositoryId": str(repository_id),
+                    "repositoryName": db_repo.name,
+                    "repositoryUrl": db_repo.url,
+                    "resetDb": False,  # Don't reset on resume
+                    "updateSchema": False,  # Schema already exists
+                    "callbackUrl": backend_url,
+                    "analysisRunId": str(analysis_id),
+                }
+
+                # Add resume checkpoint data if available
+                if resume_data:
+                    request_data["resumeFrom"] = {
+                        "phase": resume_data.get("phase", "pending"),
+                        "processedFiles": resume_data.get("processed_files", 0),
+                        "totalFiles": resume_data.get("total_files", 0),
+                        "lastProcessedFile": resume_data.get("last_processed_file"),
+                        "nodesCreated": resume_data.get("nodes_created", 0),
+                        "relationshipsCreated": resume_data.get("relationships_created", 0),
+                        "checkpointData": resume_data.get("checkpoint_data", {}),
+                    }
+
+                # Call codegraph API
+                client = await self._get_http_client()
+                response = await client.post(
+                    f"{self.codegraph_url}/analyze",
+                    json=request_data,
+                )
+                response.raise_for_status()
+                result_data = response.json()
+
+                codegraph_job_id = result_data.get("jobId")
+
+                # Update to running
+                analysis.codegraph_job_id = codegraph_job_id
+                db_repo.analysis_status = DBAnalysisStatus.RUNNING
+                await session.commit()
+
+                logger.info(
+                    f"Resumed analysis: {analysis_id} -> codegraph job {codegraph_job_id}, "
+                    f"resuming from phase: {resume_data.get('phase') if resume_data else 'start'}"
+                )
+
+                # Poll for completion (as fallback, codegraph also reports via callback)
+                await self._poll_analysis(analysis_id, codegraph_job_id)
+
+            except Exception as e:
+                logger.exception(f"Failed to resume analysis: {analysis_id}")
+                analysis.mark_failed(f"Resume failed: {str(e)}")
+                db_repo.analysis_status = DBAnalysisStatus.FAILED
+                await session.commit()
+
     # =========================================================================
     # Helper Methods
     # =========================================================================
+
+    def _normalize_stats(self, stats: dict) -> dict:
+        """Convert camelCase stats keys to snake_case.
+
+        Codegraph sends camelCase keys (nodesCreated, relationshipsCreated)
+        but the frontend expects snake_case (nodes_created, relationships_created).
+
+        Args:
+            stats: Raw stats dict from codegraph.
+
+        Returns:
+            Normalized stats with snake_case keys.
+        """
+        if not stats:
+            return {}
+
+        # Map of camelCase to snake_case
+        key_map = {
+            "nodesCreated": "nodes_created",
+            "relationshipsCreated": "relationships_created",
+            "filesScanned": "files_scanned",
+            "totalFiles": "total_files",
+            "classesFound": "classes_found",
+            "methodsFound": "methods_found",
+            "functionsFound": "functions_found",
+            "currentPhase": "current_phase",
+            "progressPct": "progress_pct",
+        }
+
+        normalized = {}
+        for key, value in stats.items():
+            # Use the mapped key if exists, otherwise keep original
+            normalized_key = key_map.get(key, key)
+            normalized[normalized_key] = value
+
+        return normalized
 
     async def _get_by_url(
         self,
@@ -837,3 +1266,92 @@ class RepositoryService:
     ) -> Optional[RepositoryCredentials]:
         """Get credentials from memory."""
         return self._credentials.get(repository_id)
+
+    async def _trigger_wiki_generation(
+        self,
+        repository_id: str,
+        analysis_id: str,
+        wiki_options: Dict[str, Any],
+    ) -> None:
+        """Trigger wiki generation after analysis completes.
+
+        This is called automatically when analysis completes if wiki generation
+        is enabled in the analysis options.
+
+        Args:
+            repository_id: Repository ID.
+            analysis_id: Analysis run ID that triggered this.
+            wiki_options: Wiki generation options from the analysis run.
+        """
+        try:
+            from .wiki_service import get_wiki_service
+
+            # Map wiki_options to depth
+            # If include_code_structure is True, use comprehensive
+            # Otherwise use the depth from options (basic, standard, etc.)
+            depth = wiki_options.get("depth", "basic")
+
+            # Adjust depth based on include options
+            include_code_structure = wiki_options.get("include_code_structure", False)
+            include_api_reference = wiki_options.get("include_api_reference", False)
+            include_data_models = wiki_options.get("include_data_models", False)
+
+            # If any advanced options are enabled, ensure at least standard depth
+            if include_api_reference or include_data_models:
+                if depth in ["quick", "basic"]:
+                    depth = "standard"
+
+            # If code structure is enabled, use comprehensive
+            if include_code_structure:
+                depth = "comprehensive"
+
+            logger.info(
+                f"Starting wiki generation for repository {repository_id} "
+                f"(analysis: {analysis_id}, depth: {depth}, mode: {wiki_options.get('mode', 'standard')})"
+            )
+
+            async with get_async_session() as session:
+                # Get repository for commit SHA
+                repo_result = await session.execute(
+                    select(RepositoryDB).where(RepositoryDB.id == repository_id)
+                )
+                db_repo = repo_result.scalar_one_or_none()
+
+                if not db_repo:
+                    logger.error(f"Repository not found for wiki generation: {repository_id}")
+                    return
+
+                # Get wiki service (should already be initialized by app.py)
+                wiki_service = get_wiki_service()
+
+                # Generate wiki with full options
+                await wiki_service.generate_wiki(
+                    session=session,
+                    repository_id=repository_id,
+                    commit_sha=db_repo.current_commit,
+                    depth=depth,
+                    wiki_options=wiki_options,  # Pass full options for advanced mode
+                    progress_callback=None,  # Could add logging callback
+                )
+
+                # Mark analysis as having wiki generated
+                analysis_result = await session.execute(
+                    select(AnalysisRunDB).where(AnalysisRunDB.id == analysis_id)
+                )
+                analysis = analysis_result.scalar_one_or_none()
+                if analysis:
+                    analysis.wiki_generated = True
+
+                await session.commit()
+
+                logger.info(
+                    f"Wiki generation completed for repository {repository_id} "
+                    f"(analysis: {analysis_id})"
+                )
+
+        except Exception as e:
+            logger.exception(
+                f"Wiki generation failed for repository {repository_id}: {e}"
+            )
+            # Don't fail the analysis if wiki generation fails
+            # Just log the error

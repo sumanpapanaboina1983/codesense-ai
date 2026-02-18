@@ -52,11 +52,15 @@ services:
       - NEO4J_DATABASE=neo4j
       - LOG_LEVEL=info
       - PYTHON_EXECUTABLE=python3
+      # Backend URL for callback reporting (internal Docker network)
+      - BACKEND_CALLBACK_URL=http://backend:8000
     volumes:
       # Mount for analyzing local repositories
       - ./repos:/app/repos:ro
       # Temp directory for git clones
       - codegraph_temp:/tmp/codegraph
+      # Shared repository storage (same as backend) for analyzing uploaded/cloned repos
+      - backend_repos:/data/repositories:ro
     depends_on:
       neo4j:
         condition: service_healthy
@@ -116,6 +120,8 @@ services:
       - CODEBASE_ROOT=/codebase
       # Codegraph API URL
       - CODEGRAPH_URL=http://codegraph:3001
+      # Internal URL for codegraph callbacks
+      - BACKEND_INTERNAL_URL=http://backend:8000
       # GitHub Copilot Configuration
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}

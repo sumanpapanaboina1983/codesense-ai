@@ -11,6 +11,10 @@ from fastapi.responses import JSONResponse
 
 from .routes import router
 from .repository_routes import router as repository_router
+from .jobs_routes import router as jobs_router
+from .chat_routes import router as chat_router
+from .analysis_callback_routes import router as callback_router
+from .wiki_routes import router as wiki_router
 from ..core.generator import BRDGenerator
 from ..database.config import init_db, close_db
 from ..services.repository_service import RepositoryService
@@ -86,6 +90,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from .routes import _generator
     import brd_generator.api.routes as routes_module
     import brd_generator.api.repository_routes as repo_routes_module
+    from ..services.wiki_service import get_wiki_service, reset_wiki_service
 
     generator = BRDGenerator()
     await generator.initialize()
@@ -94,6 +99,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize repository service
     repository_service = RepositoryService()
     repo_routes_module._repository_service = repository_service
+
+    # Initialize wiki service with Copilot session for LLM-powered generation
+    # Uses same MCP clients as BRD generator: Neo4j for metadata, Filesystem for source code
+    reset_wiki_service()  # Reset to ensure fresh initialization
+    wiki_service = get_wiki_service(
+        neo4j_client=generator.neo4j_client,
+        filesystem_client=generator.filesystem_client,  # For reading actual source code
+        copilot_session=generator._copilot_session,
+    )
+    if generator._copilot_session:
+        logger.info("Wiki service initialized with Copilot SDK for LLM-powered generation")
+    else:
+        logger.warning("Wiki service initialized without Copilot SDK - using template fallback")
+    logger.info("Wiki service using Filesystem MCP for source code (same as BRD generator)")
 
     logger.info("BRD Generator API started successfully")
 
@@ -105,6 +124,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await routes_module._generator.cleanup()
     if repo_routes_module._repository_service:
         await repo_routes_module._repository_service.close()
+
+    # Reset wiki service (Copilot session is cleaned up with generator)
+    reset_wiki_service()
 
     # Close database connections
     await close_db()
@@ -135,6 +157,10 @@ def create_app() -> FastAPI:
     # Include API routes
     app.include_router(router, prefix="/api/v1")
     app.include_router(repository_router, prefix="/api/v1")
+    app.include_router(jobs_router, prefix="/api/v1")
+    app.include_router(chat_router, prefix="/api/v1")
+    app.include_router(callback_router, prefix="/api/v1")
+    app.include_router(wiki_router, prefix="/api/v1")
 
     # Root endpoint
     @app.get("/", tags=["Root"])
@@ -148,6 +174,7 @@ def create_app() -> FastAPI:
             "endpoints": {
                 "health": "/api/v1/health",
                 "repositories": "/api/v1/repositories",
+                "chat": "/api/v1/repositories/{repo_id}/chat",
                 "generate_brd": "/api/v1/brd/generate",
                 "generate_epics": "/api/v1/epics/generate",
                 "generate_backlogs": "/api/v1/backlogs/generate",

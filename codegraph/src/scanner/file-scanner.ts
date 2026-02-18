@@ -1,6 +1,7 @@
 import fsPromises from 'fs/promises';
 import { Dirent } from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import micromatch from 'micromatch'; // For glob pattern matching
 import { createContextLogger } from '../utils/logger.js';
 import { FileSystemError } from '../utils/errors.js';
@@ -19,9 +20,12 @@ export interface FileInfo {
     name: string;
     /** File extension (including the dot). */
     extension: string;
-    // Optional: Add size, modified time if needed later
-    // size?: number;
-    // modifiedTime?: Date;
+    /** SHA-256 hash of file content (for incremental indexing). */
+    contentHash?: string;
+    /** Last modified time as Unix timestamp in milliseconds (mtime). */
+    lastModified?: number;
+    /** File size in bytes. */
+    size?: number;
 }
 
 /**
@@ -183,6 +187,77 @@ export class FileScanner {
         // }
         return isMatch;
         // --- End restore ---
+    }
+
+    /**
+     * Performs the recursive file scan with hash computation for incremental indexing.
+     * @returns A promise that resolves to an array of FileInfo objects with hashes.
+     * @throws {FileSystemError} If the target directory cannot be accessed.
+     */
+    async scanWithHashes(): Promise<FileInfo[]> {
+        logger.info(`Starting scan with hashes of directory: ${this.targetDirectory}`);
+        const files = await this.scan();
+
+        // Compute hashes and stats for each file
+        const filesWithHashes: FileInfo[] = await Promise.all(
+            files.map(async (file) => {
+                try {
+                    const [hash, stats] = await Promise.all([
+                        this.computeFileHash(file.path),
+                        fsPromises.stat(file.path),
+                    ]);
+                    return {
+                        ...file,
+                        contentHash: hash,
+                        lastModified: stats.mtimeMs,
+                        size: stats.size,
+                    };
+                } catch (error: any) {
+                    logger.warn(`Failed to compute hash for file: ${file.path}`, { error: error.message });
+                    return file; // Return without hash if error
+                }
+            })
+        );
+
+        logger.info(`Scan with hashes completed: ${filesWithHashes.length} files processed`);
+        return filesWithHashes;
+    }
+
+    /**
+     * Computes SHA-256 hash of a file's content.
+     * @param filePath - Absolute path to the file.
+     * @returns Promise resolving to the hex-encoded hash string.
+     */
+    async computeFileHash(filePath: string): Promise<string> {
+        const content = await fsPromises.readFile(filePath);
+        return crypto.createHash('sha256').update(content).digest('hex');
+    }
+
+    /**
+     * Computes hashes for a subset of files (for incremental re-hashing).
+     * @param files - Array of FileInfo objects to compute hashes for.
+     * @returns Promise resolving to FileInfo array with hashes.
+     */
+    async computeHashesForFiles(files: FileInfo[]): Promise<FileInfo[]> {
+        return Promise.all(
+            files.map(async (file) => {
+                try {
+                    const [hash, stats] = await Promise.all([
+                        this.computeFileHash(file.path),
+                        fsPromises.stat(file.path),
+                    ]);
+                    return {
+                        ...file,
+                        contentHash: hash,
+                        lastModified: stats.mtimeMs,
+                        size: stats.size,
+                    };
+                } catch (error: any) {
+                    logger.warn(`Failed to compute hash for file: ${file.path}`, { error: error.message });
+                    return file;
+                }
+            })
+        );
     }
 
     /**

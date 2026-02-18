@@ -139,6 +139,7 @@ class MultiAgentOrchestrator:
         seed: Optional[int] = None,
         claims_per_section: int = 5,
         default_section_words: int = 300,
+        skip_verification: bool = False,
     ):
         """
         Initialize the orchestrator.
@@ -226,6 +227,13 @@ class MultiAgentOrchestrator:
         self.claims_per_section = max(3, min(15, claims_per_section))  # Clamp to 3-15
         self.default_section_words = max(100, min(2000, default_section_words))  # Clamp to 100-2000
         logger.info(f"Content controls: claims_per_section={self.claims_per_section}, default_section_words={self.default_section_words}")
+
+        # Draft mode - skip verification for faster generation
+        self.skip_verification = skip_verification
+        if skip_verification:
+            logger.info("DRAFT MODE: Verification will be skipped (single-pass generation)")
+        else:
+            logger.info("VERIFIED MODE: Claims will be verified against codebase")
 
         # Get sections from template, custom_sections, or defaults (from best practices)
         if custom_sections:
@@ -427,6 +435,29 @@ class MultiAgentOrchestrator:
         Returns:
             Dict with 'content' and 'evidence'
         """
+        # DRAFT MODE: Skip verification loop, just generate once
+        if self.skip_verification:
+            logger.info(f"[{section_name}] DRAFT MODE: Generating content (no verification)")
+            await self._emit_progress("generator", f"✍️ Generating content for: {section_name}")
+
+            content = await self._generate_section(
+                section_name=section_name,
+                context=context,
+                previous_sections=previous_sections,
+                feedback=None,
+            )
+            logger.info(f"[{section_name}] Generated {len(content)} chars")
+
+            # Create empty evidence (no verification in draft mode)
+            evidence = SectionVerificationResult(
+                section_name=section_name,
+                claims=[],
+            )
+            evidence.calculate_stats()
+
+            return {"content": content, "evidence": evidence}
+
+        # VERIFIED MODE: Full verification loop
         feedback = None
         best_content = ""
         best_evidence = None
@@ -612,22 +643,41 @@ IMPORTANT:
         try:
             json_match = self._extract_json(response)
             if json_match:
-                claim_data_list = json.loads(json_match)
+                parsed = json.loads(json_match)
+
+                # Handle different response formats
+                claim_data_list = []
+                if isinstance(parsed, list):
+                    claim_data_list = parsed
+                elif isinstance(parsed, dict):
+                    # Maybe the LLM wrapped claims in an object
+                    claim_data_list = parsed.get("claims", [])
+                    if not claim_data_list and "text" in parsed:
+                        # Single claim returned as object
+                        claim_data_list = [parsed]
+
                 # Take exactly the target number of claims
                 for claim_data in claim_data_list[:target_claims]:
+                    if not isinstance(claim_data, dict):
+                        continue
+                    text = claim_data.get("text", "")
+                    if not text:
+                        continue
                     claims.append(Claim(
-                        text=claim_data.get("text", ""),
+                        text=text,
                         section=section_name,
                         claim_type=claim_data.get("type", "general"),
-                        mentioned_entities=claim_data.get("mentioned_entities", []),
-                        search_patterns=claim_data.get("search_patterns", []),
+                        mentioned_entities=claim_data.get("mentioned_entities", []) if isinstance(claim_data.get("mentioned_entities"), list) else [],
+                        search_patterns=claim_data.get("search_patterns", []) if isinstance(claim_data.get("search_patterns"), list) else [],
                     ))
 
                 # If we got fewer claims than requested, log it
                 if len(claims) < target_claims:
                     logger.info(f"[{section_name}] Extracted {len(claims)} claims (target: {target_claims})")
+        except json.JSONDecodeError as e:
+            logger.warning(f"[{section_name}] Invalid JSON in claims response: {e}")
         except Exception as e:
-            logger.warning(f"[{section_name}] Failed to parse claims: {e}")
+            logger.warning(f"[{section_name}] Failed to parse claims: {type(e).__name__}: {e}")
 
         return claims
 
@@ -677,8 +727,14 @@ IMPORTANT:
                         snippet = node.get("sourceCode") or node.get("body")
                         if not snippet and self.filesystem_client:
                             try:
+                                # Translate Neo4j path to backend filesystem path
+                                # Neo4j stores: /app/repos/... but backend has: /codebase/...
+                                actual_file_path = file_path
+                                if file_path.startswith("/app/repos/"):
+                                    actual_file_path = file_path.replace("/app/repos/", "/codebase/", 1)
+
                                 # Fetch code from file
-                                file_content = await self.filesystem_client.read_file(file_path)
+                                file_content = await self.filesystem_client.read_file(actual_file_path)
                                 if file_content:
                                     lines = file_content.split('\n')
                                     # Get lines around the entity (±10 lines for context)
@@ -688,16 +744,18 @@ IMPORTANT:
                             except Exception as e:
                                 logger.debug(f"Could not read file {file_path}: {e}")
 
-                        if snippet:
-                            code_snippets_found.append({
-                                "file_path": file_path,
-                                "start_line": start_line,
-                                "end_line": end_line,
-                                "snippet": snippet[:500],  # Limit snippet size
-                                "entity_name": entity_name,
-                                "entity_type": entity_type,
-                                "members": node.get("members", []),
-                            })
+                        # Add entity even without snippet (partial evidence)
+                        # Having file location is valuable for verification
+                        code_snippets_found.append({
+                            "file_path": file_path,
+                            "start_line": start_line,
+                            "end_line": end_line,
+                            "snippet": snippet[:500] if snippet else f"[Entity found: {entity_name} in {file_path}:{start_line}]",
+                            "entity_name": entity_name,
+                            "entity_type": entity_type,
+                            "members": node.get("members", []),
+                            "has_full_snippet": bool(snippet),  # Track if we have actual code
+                        })
 
             # Search using patterns for additional evidence
             for pattern in claim.search_patterns[:max_patterns]:
@@ -714,28 +772,57 @@ IMPORTANT:
                     if result and result.get("nodes"):
                         for node in result["nodes"][:2]:  # Limit pattern results
                             file_path = node.get("filePath")
+                            if not file_path:
+                                continue
                             snippet = node.get("sourceCode")
-                            if file_path and snippet:
-                                code_snippets_found.append({
-                                    "file_path": file_path,
-                                    "start_line": node.get("startLine", 1) or 1,
-                                    "end_line": node.get("endLine", 10) or 10,
-                                    "snippet": snippet[:500],
-                                    "entity_name": node.get("name", pattern),
-                                    "entity_type": node.get("labels", ["Code"])[0] if node.get("labels") else "Code",
-                                })
+                            entity_name = node.get("name", pattern)
+                            start_line = node.get("startLine", 1) or 1
+                            end_line = node.get("endLine", 10) or 10
+                            # Add entity even without snippet (partial evidence)
+                            code_snippets_found.append({
+                                "file_path": file_path,
+                                "start_line": start_line,
+                                "end_line": end_line,
+                                "snippet": snippet[:500] if snippet else f"[Pattern match: {entity_name} in {file_path}:{start_line}]",
+                                "entity_name": entity_name,
+                                "entity_type": node.get("labels", ["Code"])[0] if node.get("labels") else "Code",
+                                "has_full_snippet": bool(snippet),
+                            })
                 except Exception as e:
                     logger.debug(f"Pattern search failed for '{pattern}': {e}")
 
             # If we found code, use LLM to explain how it supports the claim
             if code_snippets_found:
-                explanation = await self._explain_code_evidence(claim.text, code_snippets_found[:3])
+                # Check how many have full snippets vs just entity locations
+                full_snippet_count = sum(1 for s in code_snippets_found if s.get("has_full_snippet", True))
+                has_any_full_snippets = full_snippet_count > 0
+
+                # Only call LLM if we have actual code snippets to analyze
+                if has_any_full_snippets:
+                    explanation = await self._explain_code_evidence(claim.text, code_snippets_found[:3])
+                else:
+                    # Partial evidence - entities found but no code snippets
+                    entity_names = [s["entity_name"] for s in code_snippets_found[:3]]
+                    explanation = {
+                        "supports": True,
+                        "summary": f"Code entities found: {', '.join(entity_names)}. Located in codebase but source code not available for detailed analysis.",
+                        "explanation": "Entities matching the claim were found in the code graph. Their presence indicates the functionality exists, though detailed code analysis was not possible.",
+                    }
+
+                # Adjust confidence based on evidence quality
+                if explanation.get("supports"):
+                    if has_any_full_snippets:
+                        base_confidence = 0.9  # Full evidence with code
+                    else:
+                        base_confidence = 0.6  # Partial evidence - entities found but no snippets
+                else:
+                    base_confidence = 0.4 if has_any_full_snippets else 0.3
 
                 evidence = EvidenceItem(
                     evidence_type=EvidenceType.CODE_REFERENCE,
                     category="primary",
                     description=explanation.get("summary", "Code found that implements this functionality"),
-                    confidence=0.9 if explanation.get("supports") else 0.5,
+                    confidence=base_confidence,
                     source="neo4j",
                     supports_claim=explanation.get("supports", True),
                     notes=explanation.get("explanation"),
@@ -1605,6 +1692,7 @@ class VerifiedBRDGenerator:
         seed: Optional[int] = None,
         claims_per_section: int = 5,
         default_section_words: int = 300,
+        skip_verification: bool = False,
     ):
         self.orchestrator = MultiAgentOrchestrator(
             copilot_session=copilot_session,
@@ -1622,8 +1710,10 @@ class VerifiedBRDGenerator:
             seed=seed,
             claims_per_section=claims_per_section,
             default_section_words=default_section_words,
+            skip_verification=skip_verification,
         )
         self._last_output: Optional[BRDOutput] = None
+        self._skip_verification = skip_verification
 
     async def generate(self, context: AggregatedContext) -> BRDOutput:
         """Generate a verified BRD."""

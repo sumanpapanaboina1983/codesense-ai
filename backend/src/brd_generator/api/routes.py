@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import asyncio
+import re
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Optional
 
 from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, Field
 from fastapi.responses import StreamingResponse
 
 from .models import (
@@ -68,6 +70,7 @@ from .models import (
     FeatureComplexity,
     CodeFootprint,
     FeatureEndpoint,
+    FeatureGroup,
 )
 from ..core.generator import BRDGenerator
 from ..core.synthesizer import TemplateConfig
@@ -84,6 +87,40 @@ router = APIRouter()
 
 # Global generator instance (initialized on startup)
 _generator: BRDGenerator | None = None
+
+# Active BRD generation tasks - tracks cancellation state
+# Key: generation_id (repository_id), Value: {"cancelled": bool, "task": asyncio.Task}
+_active_generations: dict[str, dict] = {}
+
+
+def _register_generation(generation_id: str, task: asyncio.Task) -> None:
+    """Register an active generation task."""
+    _active_generations[generation_id] = {"cancelled": False, "task": task}
+    logger.info(f"Registered generation: {generation_id}")
+
+
+def _unregister_generation(generation_id: str) -> None:
+    """Unregister a generation task."""
+    _active_generations.pop(generation_id, None)
+    logger.info(f"Unregistered generation: {generation_id}")
+
+
+def _is_generation_cancelled(generation_id: str) -> bool:
+    """Check if a generation has been cancelled."""
+    gen = _active_generations.get(generation_id)
+    return gen["cancelled"] if gen else False
+
+
+def _cancel_generation(generation_id: str) -> bool:
+    """Cancel an active generation."""
+    gen = _active_generations.get(generation_id)
+    if gen:
+        gen["cancelled"] = True
+        if gen.get("task") and not gen["task"].done():
+            gen["task"].cancel()
+        logger.info(f"Cancelled generation: {generation_id}")
+        return True
+    return False
 
 
 async def get_generator() -> BRDGenerator:
@@ -327,6 +364,373 @@ async def get_default_template() -> dict:
     }
 
 
+class ParseTemplateSectionsRequest(BaseModel):
+    """Request to parse sections from a BRD template."""
+    template_content: str = Field(..., description="The template content to parse")
+
+
+class TemplateSectionInfo(BaseModel):
+    """Information about a section in the template."""
+    name: str = Field(..., description="Section name")
+    description: Optional[str] = Field(None, description="What this section should contain")
+    suggested_words: int = Field(300, description="Suggested word count for this section")
+
+
+class ParseTemplateSectionsResponse(BaseModel):
+    """Response with parsed template sections."""
+    success: bool
+    sections: list[TemplateSectionInfo]
+    error: Optional[str] = None
+
+
+@router.post(
+    "/brd/template/parse-sections",
+    tags=["BRD Generation"],
+    summary="Parse sections from a BRD template using LLM",
+    response_model=ParseTemplateSectionsResponse,
+)
+async def parse_template_sections(request: ParseTemplateSectionsRequest) -> ParseTemplateSectionsResponse:
+    """
+    Use LLM to extract sections from a BRD template.
+
+    This is more reliable than regex-based parsing as it understands
+    the semantic structure of the template.
+    """
+    try:
+        # Get Copilot session
+        generator = BRDGenerator()
+        await generator.initialize()
+
+        if not generator._copilot_session:
+            # Fallback to simple parsing if no LLM available
+            return _parse_sections_fallback(request.template_content)
+
+        # Use LLM to parse sections
+        prompt = f"""Analyze this BRD template and extract the section structure.
+
+## Template Content:
+{request.template_content[:4000]}
+
+## Task:
+Identify all the main sections that should be generated for a BRD.
+For each section, provide:
+1. The section name (clean, without numbers or special formatting)
+2. A brief description of what the section should contain
+3. A suggested word count (based on section complexity)
+
+Skip meta-sections like "Required Structure", "Template", "Version History", etc.
+Only include content sections that need to be written.
+
+Return as JSON:
+```json
+{{
+  "sections": [
+    {{
+      "name": "Feature Overview",
+      "description": "Plain English summary of what the feature enables",
+      "suggested_words": 250
+    }},
+    {{
+      "name": "Functional Requirements",
+      "description": "What the system must do in terms of business behavior",
+      "suggested_words": 400
+    }}
+  ]
+}}
+```
+"""
+        response = await generator._copilot_session.send_and_wait({"prompt": prompt})
+
+        # Parse the response
+        if response and hasattr(response, 'text'):
+            response_text = response.text
+        elif isinstance(response, str):
+            response_text = response
+        else:
+            response_text = str(response) if response else ""
+
+        # Extract JSON from response
+        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response_text)
+        if json_match:
+            json_str = json_match.group(1).strip()
+            if json_str:
+                try:
+                    data = json.loads(json_str)
+                    sections = [
+                        TemplateSectionInfo(
+                            name=s.get("name", "Unknown"),
+                            description=s.get("description"),
+                            suggested_words=s.get("suggested_words", 300)
+                        )
+                        for s in data.get("sections", [])
+                    ]
+                    if sections:
+                        return ParseTemplateSectionsResponse(success=True, sections=sections)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse JSON from code block: {e}")
+
+        # Try parsing without code blocks
+        try:
+            # Try to find any JSON object in the response
+            json_obj_match = re.search(r'\{[\s\S]*\}', response_text)
+            if json_obj_match:
+                data = json.loads(json_obj_match.group(0))
+                sections = [
+                    TemplateSectionInfo(
+                        name=s.get("name", "Unknown"),
+                        description=s.get("description"),
+                        suggested_words=s.get("suggested_words", 300)
+                    )
+                    for s in data.get("sections", [])
+                ]
+                if sections:
+                    return ParseTemplateSectionsResponse(success=True, sections=sections)
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback if LLM response couldn't be parsed
+        return _parse_sections_fallback(request.template_content)
+
+    except Exception as e:
+        logger.error(f"Failed to parse template sections: {e}")
+        return _parse_sections_fallback(request.template_content)
+
+
+def _parse_sections_fallback(template_content: str) -> ParseTemplateSectionsResponse:
+    """Fallback regex-based parsing if LLM is unavailable."""
+    sections = []
+    lines = template_content.split('\n')
+
+    for line in lines:
+        # Match ## or ### headings
+        match = re.match(r'^(#{2,3})\s+(?:\d+\.\s*)?(.+?)(?:\s*\{words:\s*(\d+)\})?\s*$', line)
+        if not match:
+            continue
+
+        name = match.group(2).strip()
+        words = int(match.group(3)) if match.group(3) else 300
+
+        # Skip meta sections
+        lower_name = name.lower()
+        if any(skip in lower_name for skip in [
+            'metadata', 'version', 'approval', 'template', 'structure',
+            'optional', 'recommended', 'example', 'format'
+        ]):
+            continue
+
+        # Skip duplicates
+        if any(s.name.lower() == name.lower() for s in sections):
+            continue
+
+        sections.append(TemplateSectionInfo(
+            name=name,
+            description=None,
+            suggested_words=words
+        ))
+
+    # Default sections if none found
+    if not sections:
+        sections = [
+            TemplateSectionInfo(name="Feature Overview", description="Summary of the feature", suggested_words=250),
+            TemplateSectionInfo(name="Functional Requirements", description="What the system must do", suggested_words=400),
+            TemplateSectionInfo(name="Business Validations", description="Logic constraints and rules", suggested_words=300),
+            TemplateSectionInfo(name="Actors and Interactions", description="User roles and system interactions", suggested_words=250),
+            TemplateSectionInfo(name="Process Flow", description="Step-by-step process description", suggested_words=350),
+            TemplateSectionInfo(name="Acceptance Criteria", description="Conditions for completion", suggested_words=250),
+        ]
+
+    return ParseTemplateSectionsResponse(success=True, sections=sections)
+
+
+# =============================================================================
+# Model Selection Endpoint
+# =============================================================================
+
+class ModelInfoResponse(BaseModel):
+    """Response model for model information."""
+    id: str
+    name: str
+    provider: str
+    description: str
+    min_tier: str
+    is_recommended: bool
+    is_default: bool
+    context_window: Optional[int] = None
+    strengths: list[str] = []
+    status: str = "ga"
+
+
+class ListModelsResponse(BaseModel):
+    """Response for listing available models."""
+    models: list[ModelInfoResponse]
+    default_model: str
+    recommended_models: list[str]
+
+
+@router.get(
+    "/brd/models",
+    tags=["BRD Generation"],
+    summary="List available LLM models for BRD generation",
+    response_model=ListModelsResponse,
+)
+async def list_available_models() -> ListModelsResponse:
+    """
+    Get the list of available LLM models that can be used for BRD generation.
+
+    Models are fetched dynamically from GitHub Copilot SDK and include options from:
+    - OpenAI (GPT-4.1, GPT-5 series)
+    - Anthropic (Claude Haiku, Sonnet, Opus)
+    - Google (Gemini)
+
+    Note: Some models require higher Copilot subscription tiers.
+    """
+    try:
+        # Try to fetch models dynamically from Copilot SDK
+        from copilot import CopilotClient
+
+        client = CopilotClient()
+        await client.start()
+        sdk_models = await client.list_models()
+        await client.stop()
+
+        # Recommended models for BRD generation
+        recommended_ids = {"claude-sonnet-4.5", "gpt-5.1", "claude-opus-4.5"}
+        default_model_id = "gpt-4.1"  # Available on all tiers
+
+        models = []
+        for m in sdk_models:
+            # Access attributes directly from SDK ModelInfo objects
+            model_id = m.id if hasattr(m, 'id') else ""
+            model_name = m.name if hasattr(m, 'name') else model_id
+
+            # Get capabilities
+            caps = m.capabilities if hasattr(m, 'capabilities') else None
+            limits = caps.limits if caps and hasattr(caps, 'limits') else None
+            supports = caps.supports if caps and hasattr(caps, 'supports') else None
+
+            # Get context window
+            context_window = 128000
+            if limits and hasattr(limits, 'max_context_window_tokens'):
+                context_window = limits.max_context_window_tokens or 128000
+
+            # Get billing info
+            billing = m.billing if hasattr(m, 'billing') else None
+            multiplier = billing.multiplier if billing and hasattr(billing, 'multiplier') else 1.0
+
+            # Determine provider from model ID (most reliable)
+            model_id_lower = model_id.lower()
+            if "claude" in model_id_lower:
+                provider = "anthropic"
+            elif "gemini" in model_id_lower:
+                provider = "google"
+            elif "grok" in model_id_lower:
+                provider = "xai"
+            else:
+                provider = "openai"
+
+            # Determine tier based on model ID patterns and multiplier
+            # Free tier: gpt-4.1, gpt-5-mini (multiplier 0), claude-haiku (multiplier < 0.5)
+            # Pro tier: most other models
+            # Business: codex-max variants
+            if model_id in ["gpt-4.1", "gpt-5-mini"] or multiplier == 0:
+                min_tier = "free"
+            elif "codex-max" in model_id_lower:
+                min_tier = "business"
+            elif "opus" in model_id_lower or multiplier >= 3:
+                min_tier = "pro+"
+            elif "haiku" in model_id_lower and multiplier < 0.5:
+                min_tier = "free"
+            else:
+                min_tier = "pro"
+
+            # Build strengths based on capabilities
+            strengths = []
+            if supports:
+                if hasattr(supports, 'vision') and supports.vision:
+                    strengths.append("Vision")
+                if hasattr(supports, 'tool_calls') and supports.tool_calls:
+                    strengths.append("Tool use")
+                if hasattr(supports, 'reasoning_effort') and supports.reasoning_effort:
+                    strengths.append("Reasoning")
+            if context_window >= 200000:
+                strengths.append("Long context")
+
+            # Generate description
+            ctx_k = context_window // 1000
+            if "codex" in model_id.lower():
+                description = f"Optimized for code generation ({ctx_k}K context)"
+            elif "mini" in model_id.lower():
+                description = f"Fast and efficient ({ctx_k}K context)"
+            elif "opus" in model_id.lower():
+                description = f"Most capable model ({ctx_k}K context)"
+            elif "sonnet" in model_id.lower():
+                description = f"Balanced performance ({ctx_k}K context)"
+            elif "haiku" in model_id.lower():
+                description = f"Fast responses ({ctx_k}K context)"
+            else:
+                description = f"General purpose ({ctx_k}K context)"
+
+            models.append(ModelInfoResponse(
+                id=model_id,
+                name=model_name,
+                provider=provider,
+                description=description,
+                min_tier=min_tier,
+                is_recommended=model_id in recommended_ids,
+                is_default=model_id == default_model_id,
+                context_window=context_window,
+                strengths=strengths,
+                status="ga",
+            ))
+
+        # Sort: default first, then recommended, then by name
+        models.sort(key=lambda m: (
+            not m.is_default,
+            not m.is_recommended,
+            m.name
+        ))
+
+        return ListModelsResponse(
+            models=models,
+            default_model=default_model_id,
+            recommended_models=list(recommended_ids),
+        )
+
+    except Exception as e:
+        # Fallback to static config if SDK is unavailable
+        logger.warning(f"Failed to fetch models from Copilot SDK, using static config: {e}")
+        from ..config.models import (
+            SUPPORTED_MODELS,
+            get_default_model,
+            get_recommended_models,
+        )
+
+        models = [
+            ModelInfoResponse(
+                id=m.id,
+                name=m.name,
+                provider=m.provider.value,
+                description=m.description,
+                min_tier=m.min_tier.value,
+                is_recommended=m.is_recommended,
+                is_default=m.is_default,
+                context_window=m.context_window,
+                strengths=m.strengths,
+                status=m.status,
+            )
+            for m in SUPPORTED_MODELS
+        ]
+
+        default_model = get_default_model()
+        recommended = get_recommended_models()
+
+        return ListModelsResponse(
+            models=models,
+            default_model=default_model.id,
+            recommended_models=[m.id for m in recommended],
+        )
+
+
 # =============================================================================
 # Progress Queue for Streaming
 # =============================================================================
@@ -376,22 +780,26 @@ async def _generate_brd_draft_stream(
     request: GenerateBRDRequest,
     generator: BRDGenerator,
 ) -> AsyncGenerator[str, None]:
-    """Generate BRD using selected approach.
+    """Generate BRD using the same infrastructure as verified mode, but without verification.
 
-    CONTEXT_FIRST approach:
-    - Aggregator gathers context from codebase (Neo4j + Filesystem)
-    - Context is explicitly passed to LLM for BRD generation
-    - More reliable, context is visible in logs
+    Draft mode uses the same section-by-section generation as verified mode:
+    - Template parsing
+    - Context gathering
+    - Section-by-section BRD generation
+    - All configuration options (sections, detail level, etc.)
 
-    SKILLS_ONLY approach:
-    - Simple prompt triggers generate-brd skill
-    - Skill instructs LLM to use MCP tools directly
-    - Faster, single unified session
+    The only difference is skip_verification=True, which skips:
+    - Claim extraction and verification
+    - Multi-iteration refinement loop
+    - Evidence gathering
+
+    This ensures consistent BRD output between draft and verified modes.
     """
     from sqlalchemy import select
     from ..models.repository import Repository as RepositorySchema
+    from ..core.multi_agent_orchestrator import VerifiedBRDGenerator
     from ..core.aggregator import ContextAggregator
-    from .models import GenerationApproach
+    from ..core.template_parser import BRDTemplateParser, ParsedBRDTemplate
 
     progress_queue = ProgressQueue()
 
@@ -400,13 +808,7 @@ async def _generate_brd_draft_stream(
             async def progress_callback(step: str, detail: str) -> None:
                 await progress_queue.put(step, detail)
 
-            # Determine approach
-            approach = request.approach
-            if approach == GenerationApproach.AUTO:
-                approach = GenerationApproach.SKILLS_ONLY  # Default for draft mode
-
-            approach_name = "Context-First" if approach == GenerationApproach.CONTEXT_FIRST else "Skills-Only"
-            await progress_callback("init", f"🚀 Starting BRD generation ({approach_name})...")
+            await progress_callback("init", "🚀 Starting BRD generation (Draft Mode)...")
 
             # Get repository
             await progress_callback("database", "Loading repository information...")
@@ -437,69 +839,79 @@ async def _generate_brd_draft_stream(
                 await progress_callback("init", "Initializing generator components...")
                 await generator.initialize()
 
+            # Build context
+            await progress_callback("context", "📊 Building codebase context...")
+
             workspace_root = Path(repository.local_path) if repository.local_path else generator.workspace_root
 
-            if approach == GenerationApproach.CONTEXT_FIRST:
-                # ==========================================
-                # CONTEXT-FIRST APPROACH
-                # ==========================================
-                await progress_callback("context", "📊 Gathering context from codebase...")
-                await progress_callback("context", "Using aggregator to query Neo4j and read files")
+            from ..mcp_clients.filesystem_client import FilesystemMCPClient
+            repo_filesystem_client = FilesystemMCPClient(workspace_root=workspace_root)
+            await repo_filesystem_client.connect()
 
-                from ..mcp_clients.filesystem_client import FilesystemMCPClient
-                repo_filesystem_client = FilesystemMCPClient(workspace_root=workspace_root)
-                await repo_filesystem_client.connect()
+            aggregator = ContextAggregator(
+                generator.neo4j_client,
+                repo_filesystem_client,
+                copilot_session=generator._copilot_session,
+            )
 
-                aggregator = ContextAggregator(
-                    generator.neo4j_client,
-                    repo_filesystem_client,
-                    copilot_session=generator._copilot_session,
-                )
+            context = await aggregator.build_context(
+                request=request.feature_description,
+                affected_components=request.affected_components,
+                include_similar=request.include_similar_features,
+            )
 
-                context = await aggregator.build_context(
-                    request=request.feature_description,
-                    affected_components=request.affected_components,
-                    include_similar=request.include_similar_features,
-                )
+            await progress_callback("context", f"Context ready: {len(context.architecture.components)} components")
 
-                await progress_callback("context", f"Context ready: {len(context.architecture.components)} components, {len(context.implementation.key_files)} files")
+            # Parse BRD template if provided
+            parsed_template: ParsedBRDTemplate | None = None
+            if request.brd_template:
+                await progress_callback("template", "📋 Parsing BRD template...")
+                template_parser = BRDTemplateParser(copilot_session=generator._copilot_session)
+                parsed_template = await template_parser.parse_template(request.brd_template)
+                await progress_callback("template", f"Template parsed: {len(parsed_template.sections)} sections")
+                logger.info(f"Template sections: {parsed_template.get_section_names()}")
 
-                await progress_callback("generate", f"📝 Generating BRD with gathered context (detail: {request.detail_level.value})...")
+            # Convert sections to dict format if provided
+            custom_sections = None
+            if request.sections:
+                custom_sections = [
+                    {
+                        "name": s.name,
+                        "description": s.description,
+                        "required": s.required,
+                        "target_words": s.target_words,
+                    }
+                    for s in request.sections
+                ]
 
-                # Convert sections to dict format if provided
-                custom_sections = None
-                if request.sections:
-                    custom_sections = [
-                        {"name": s.name, "description": s.description, "required": s.required}
-                        for s in request.sections
-                    ]
+            # Create draft generator (same as verified, but with skip_verification=True)
+            await progress_callback("generator", "📝 Starting section-by-section BRD generation...")
 
-                # Generate BRD with explicit context
-                brd = await generator.synthesizer.generate_brd_with_context(
-                    context=context,
-                    feature_request=request.feature_description,
-                    detail_level=request.detail_level.value,
-                    custom_sections=custom_sections,
-                )
+            draft_generator = VerifiedBRDGenerator(
+                copilot_session=generator._copilot_session,
+                neo4j_client=generator.neo4j_client,
+                filesystem_client=repo_filesystem_client,
+                max_iterations=1,  # Single pass in draft mode
+                parsed_template=parsed_template,
+                detail_level=request.detail_level.value,
+                custom_sections=custom_sections,
+                progress_callback=progress_callback,
+                temperature=request.temperature,
+                seed=request.seed,
+                default_section_words=request.default_section_words,
+                skip_verification=True,  # KEY: Skip verification for draft mode
+            )
 
-                await repo_filesystem_client.disconnect()
+            # Run generation (same flow as verified, but no verification loop)
+            output = await draft_generator.generate(context)
 
-            else:
-                # ==========================================
-                # SKILLS-ONLY APPROACH
-                # ==========================================
-                await progress_callback("generate", "📝 Triggering generate-brd skill...")
-                await progress_callback("generate", "SDK will use MCP tools to gather context and generate BRD")
+            # Cleanup
+            await repo_filesystem_client.disconnect()
+            await draft_generator.cleanup()
 
-                # Use synthesizer's skill-based method
-                brd = await generator.synthesizer.generate_brd_with_skill(
-                    feature_request=request.feature_description,
-                    affected_components=request.affected_components,
-                )
+            await progress_callback("complete", f"✅ Draft BRD complete: {output.brd.title}")
 
-            await progress_callback("complete", f"✅ Draft BRD complete: {brd.title}")
-
-            return brd, repository
+            return output, repository
 
         except Exception as e:
             logger.exception("Failed to generate BRD (draft mode)")
@@ -511,47 +923,70 @@ async def _generate_brd_draft_stream(
     # Start generation task
     generation_task = asyncio.create_task(run_generation())
 
-    # Stream progress
+    # Register the generation for cancellation tracking
+    _register_generation(repository_id, generation_task)
+
+    # Stream progress (same icons as verified mode for consistency)
     step_icons = {
         "init": "🚀",
         "database": "🗄️",
         "context": "📊",
         "template": "📋",
-        "generate": "📝",
+        "generator": "📝",
+        "section": "📄",
+        "section_complete": "✅",
         "complete": "✅",
+        "cancelled": "⏹️",
     }
 
-    while not progress_queue.is_done or not generation_task.done():
-        event = await progress_queue.get()
-        if event:
-            step = event["step"]
-            detail = event["detail"]
-
-            if step == "error":
-                yield f"data: {json.dumps({'type': 'error', 'content': detail})}\n\n"
-            else:
-                icon = step_icons.get(step, "▶️")
-                yield f"data: {json.dumps({'type': 'thinking', 'content': f'{icon} {detail}'})}\n\n"
-
-        await asyncio.sleep(0.05)
-
-        if generation_task.done() and progress_queue.is_done:
-            break
-
-    # Get result
     try:
-        result = await generation_task
-    except Exception as e:
-        yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
-        return
+        while not progress_queue.is_done or not generation_task.done():
+            # Check for cancellation
+            if _is_generation_cancelled(repository_id):
+                yield f"data: {json.dumps({'type': 'cancelled', 'content': '⏹️ Generation cancelled by user'})}\n\n"
+                generation_task.cancel()
+                break
 
-    if result is None:
-        return
+            event = await progress_queue.get()
+            if event:
+                step = event["step"]
+                detail = event["detail"]
 
-    brd, repository = result
+                if step == "error":
+                    yield f"data: {json.dumps({'type': 'error', 'content': detail})}\n\n"
+                else:
+                    icon = step_icons.get(step, "▶️")
+                    yield f"data: {json.dumps({'type': 'thinking', 'content': f'{icon} {detail}'})}\n\n"
 
-    # Convert to BRD response
-    brd_response = _brd_to_response(brd)
+            await asyncio.sleep(0.05)
+
+            if generation_task.done() and progress_queue.is_done:
+                break
+
+        # Check if cancelled
+        if _is_generation_cancelled(repository_id):
+            _unregister_generation(repository_id)
+            return
+
+        # Get result
+        try:
+            result = await generation_task
+        except asyncio.CancelledError:
+            yield f"data: {json.dumps({'type': 'cancelled', 'content': '⏹️ Generation cancelled'})}\n\n"
+            return
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+            return
+
+        if result is None:
+            return
+    finally:
+        _unregister_generation(repository_id)
+
+    output, repository = result
+
+    # Convert to BRD response (output is BRDOutput from VerifiedBRDGenerator)
+    brd_response = _brd_to_response(output.brd)
 
     # Stream content
     markdown_content = brd_response.markdown
@@ -577,10 +1012,10 @@ async def _generate_brd_draft_stream(
         sme_review_claims=[],
         draft_warning="This is a draft BRD generated without verification. It may contain inaccuracies or unsupported claims. Use 'verified' mode for production-quality documentation.",
         metadata={
+            **output.metadata,
             "mode": "draft",
             "repository_id": repository.id,
             "repository_name": repository.name,
-            "components_found": len(brd.functional_requirements) + len(brd.technical_requirements),
         },
     )
     yield f"data: {json.dumps({'type': 'complete', 'data': response_data.model_dump(mode='json')})}\n\n"
@@ -711,11 +1146,16 @@ async def _generate_brd_verified_stream(
                 }
                 await progress_callback("config", f"Custom sufficiency criteria: {len(request.sufficiency_criteria.dimensions)} dimensions")
 
-            # Convert sections to dict format if provided
+            # Convert sections to dict format if provided (including target_words for length control)
             custom_sections_verified = None
             if request.sections:
                 custom_sections_verified = [
-                    {"name": s.name, "description": s.description, "required": s.required}
+                    {
+                        "name": s.name,
+                        "description": s.description,
+                        "required": s.required,
+                        "target_words": s.target_words,
+                    }
                     for s in request.sections
                 ]
 
@@ -777,6 +1217,9 @@ async def _generate_brd_verified_stream(
     # Start generation task
     generation_task = asyncio.create_task(run_generation())
 
+    # Register the generation for cancellation tracking
+    _register_generation(repository_id, generation_task)
+
     # Stream progress
     step_icons = {
         "init": "🚀",
@@ -793,36 +1236,54 @@ async def _generate_brd_verified_stream(
         "verifying": "🔍",
         "feedback": "🔄",
         "complete": "✅",
+        "cancelled": "⏹️",
     }
 
-    while not progress_queue.is_done or not generation_task.done():
-        event = await progress_queue.get()
-        if event:
-            step = event["step"]
-            detail = event["detail"]
-
-            if step == "error":
-                yield f"data: {json.dumps({'type': 'error', 'content': detail})}\n\n"
-            else:
-                icon = step_icons.get(step, "▶️")
-                yield f"data: {json.dumps({'type': 'thinking', 'content': f'{icon} {detail}'})}\n\n"
-
-        await asyncio.sleep(0.05)
-
-        if generation_task.done() and progress_queue.is_done:
-            break
-
-    # Get result
     try:
-        result = await generation_task
-    except Exception as e:
-        yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
-        return
+        while not progress_queue.is_done or not generation_task.done():
+            # Check for cancellation
+            if _is_generation_cancelled(repository_id):
+                yield f"data: {json.dumps({'type': 'cancelled', 'content': '⏹️ Generation cancelled by user'})}\n\n"
+                generation_task.cancel()
+                break
 
-    if result is None:
-        return
+            event = await progress_queue.get()
+            if event:
+                step = event["step"]
+                detail = event["detail"]
 
-    output, evidence_bundle, repository = result
+                if step == "error":
+                    yield f"data: {json.dumps({'type': 'error', 'content': detail})}\n\n"
+                else:
+                    icon = step_icons.get(step, "▶️")
+                    yield f"data: {json.dumps({'type': 'thinking', 'content': f'{icon} {detail}'})}\n\n"
+
+            await asyncio.sleep(0.05)
+
+            if generation_task.done() and progress_queue.is_done:
+                break
+
+        # Check if cancelled
+        if _is_generation_cancelled(repository_id):
+            _unregister_generation(repository_id)
+            return
+
+        # Get result
+        try:
+            result = await generation_task
+        except asyncio.CancelledError:
+            yield f"data: {json.dumps({'type': 'cancelled', 'content': '⏹️ Generation cancelled'})}\n\n"
+            return
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+            return
+
+        if result is None:
+            return
+
+        output, evidence_bundle, repository = result
+    finally:
+        _unregister_generation(repository_id)
 
     # Convert to BRD response
     brd_response = _brd_to_response(output.brd)
@@ -1133,11 +1594,21 @@ async def generate_brd(
     generator: BRDGenerator = Depends(get_generator),
 ) -> StreamingResponse:
     """Generate BRD with selected mode (draft or verified)."""
+    # Check if a specific model is requested
+    if request.model and request.model != generator.copilot_model:
+        # Create a new generator with the specified model
+        logger.info(f"Creating generator with model: {request.model}")
+        custom_generator = BRDGenerator(copilot_model=request.model)
+        await custom_generator.initialize()
+        use_generator = custom_generator
+    else:
+        use_generator = generator
+
     # Dispatch based on mode
     if request.mode == GenerationMode.DRAFT:
-        stream_generator = _generate_brd_draft_stream(repository_id, request, generator)
+        stream_generator = _generate_brd_draft_stream(repository_id, request, use_generator)
     else:
-        stream_generator = _generate_brd_verified_stream(repository_id, request, generator)
+        stream_generator = _generate_brd_verified_stream(repository_id, request, use_generator)
 
     return StreamingResponse(
         stream_generator,
@@ -1148,6 +1619,21 @@ async def generate_brd(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post(
+    "/brd/generate/{repository_id}/cancel",
+    tags=["Phase 1: BRD"],
+    summary="Cancel BRD Generation",
+    description="Cancel an ongoing BRD generation for a repository.",
+)
+async def cancel_brd_generation(repository_id: str) -> dict:
+    """Cancel an ongoing BRD generation."""
+    cancelled = _cancel_generation(repository_id)
+    if cancelled:
+        return {"success": True, "message": f"Generation cancelled for repository: {repository_id}"}
+    else:
+        return {"success": False, "message": f"No active generation found for repository: {repository_id}"}
 
 
 @router.get(
@@ -1336,21 +1822,24 @@ async def get_evidence_trail(
 # =============================================================================
 
 @router.post(
-    "/epics/generate",
+    "/epics/generate-legacy",
     response_model=GenerateEpicsResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     tags=["Phase 2: Epics"],
-    summary="Generate Epics from approved BRD",
+    summary="Generate Epics from approved BRD (Legacy)",
     description="""
-    **Phase 2**: Generate Epics from an approved BRD.
+    **Phase 2 (Legacy)**: Generate Epics from an approved BRD.
+
+    NOTE: This is the legacy endpoint. Use `/epics/generate` for the new streaming API.
 
     This endpoint takes the approved BRD from Phase 1 and breaks it down into
     Epics that can be delivered in 2-4 weeks each.
 
     The generated Epics should be reviewed and approved before proceeding to Phase 3.
     """,
+    deprecated=True,
 )
-async def generate_epics(
+async def generate_epics_legacy(
     request: GenerateEpicsRequest,
     generator: BRDGenerator = Depends(get_generator),
 ) -> GenerateEpicsResponse:
@@ -1384,13 +1873,15 @@ async def generate_epics(
 # =============================================================================
 
 @router.post(
-    "/backlogs/generate",
+    "/backlogs/generate-legacy",
     response_model=GenerateBacklogsResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     tags=["Phase 3: Backlogs"],
-    summary="Generate User Stories from approved Epics",
+    summary="Generate User Stories from approved Epics (Legacy)",
     description="""
-    **Phase 3**: Generate User Stories (Backlogs) from approved Epics.
+    **Phase 3 (Legacy)**: Generate User Stories (Backlogs) from approved Epics.
+
+    NOTE: This is the legacy endpoint. Use `/backlogs/generate` for the new streaming API.
 
     This endpoint takes the approved Epics from Phase 2 and the original BRD
     for context, and breaks each Epic into User Stories that can be completed
@@ -1398,8 +1889,9 @@ async def generate_epics(
 
     The generated Stories should be reviewed and approved before proceeding to Phase 4.
     """,
+    deprecated=True,
 )
-async def generate_backlogs(
+async def generate_backlogs_legacy(
     request: GenerateBacklogsRequest,
     generator: BRDGenerator = Depends(get_generator),
 ) -> GenerateBacklogsResponse:
@@ -1789,10 +2281,14 @@ async def get_codebase_statistics(
         # Query Neo4j for statistics if client is available
         if generator.neo4j_client:
             try:
+                # Note: Graph structure is Repository -> HAS_MODULE -> Module -> CONTAINS_FILE -> File
+                # We traverse from Repository node to get files for this specific repository
+
                 # Query 1: Basic file and LOC statistics
+                # Try traversing from Repository first, fall back to direct query
                 file_stats_query = """
-                MATCH (f:File)
-                WHERE f.repositoryId = $repository_id
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)
+                WHERE r.repositoryId = $repository_id
                 RETURN
                     count(f) as total_files,
                     sum(COALESCE(f.loc, f.lineCount, 0)) as total_loc,
@@ -1808,10 +2304,10 @@ async def get_codebase_statistics(
                     stats.total_lines_of_code = int(node.get("total_loc", 0) or 0)
                     stats.avg_file_size = float(node.get("avg_file_size", 0) or 0)
 
-                # Query 2: Language breakdown
+                # Query 2: Language breakdown (including JSP pages)
                 lang_query = """
-                MATCH (f:File)
-                WHERE f.repositoryId = $repository_id AND f.language IS NOT NULL
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)
+                WHERE r.repositoryId = $repository_id AND f.language IS NOT NULL
                 RETURN
                     f.language as language,
                     count(f) as file_count,
@@ -1835,10 +2331,43 @@ async def get_codebase_statistics(
                     if languages:
                         stats.primary_language = languages[0].language
 
-                # Query 3: Classes and interfaces
+                # Query 2b: Add JSP pages to language breakdown
+                jsp_lang_query = """
+                MATCH (j:JSPPage)
+                WHERE j.filePath CONTAINS $repository_id
+                RETURN
+                    'JSP' as language,
+                    count(j) as file_count,
+                    sum(COALESCE(j.loc, j.lineCount, 0)) as loc
+                """
+                jsp_lang_result = await generator.neo4j_client.query_code_structure(
+                    jsp_lang_query,
+                    {"repository_id": repository_id}
+                )
+                if jsp_lang_result and jsp_lang_result.get("nodes"):
+                    node = jsp_lang_result["nodes"][0]
+                    jsp_count = int(node.get("file_count", 0) or 0)
+                    jsp_loc = int(node.get("loc", 0) or 0)
+                    if jsp_count > 0:
+                        # Add JSP files to total
+                        stats.total_files += jsp_count
+                        stats.total_lines_of_code += jsp_loc
+                        total_loc = stats.total_lines_of_code or 1
+                        # Add JSP to languages
+                        languages.append(LanguageBreakdown(
+                            language="JSP",
+                            file_count=jsp_count,
+                            lines_of_code=jsp_loc,
+                            percentage=round((jsp_loc / total_loc) * 100, 1) if total_loc > 0 else 0
+                        ))
+                        # Recalculate percentages for existing languages
+                        for lang in languages[:-1]:  # All except JSP we just added
+                            lang.percentage = round((lang.lines_of_code / total_loc) * 100, 1) if total_loc > 0 else 0
+
+                # Query 3: Classes - traverse from Repository through modules to files to classes
                 class_query = """
-                MATCH (c)
-                WHERE c.repositoryId = $repository_id
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(c)
+                WHERE r.repositoryId = $repository_id
                     AND (c:Class OR c:JavaClass OR c:CSharpClass OR c:CppClass OR c:PythonClass)
                 RETURN count(c) as count
                 """
@@ -1849,9 +2378,10 @@ async def get_codebase_statistics(
                 if class_result and class_result.get("nodes"):
                     stats.total_classes = int(class_result["nodes"][0].get("count", 0) or 0)
 
+                # Query 4: Interfaces
                 interface_query = """
-                MATCH (i)
-                WHERE i.repositoryId = $repository_id
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(i)
+                WHERE r.repositoryId = $repository_id
                     AND (i:Interface OR i:JavaInterface OR i:CSharpInterface OR i:GoInterface)
                 RETURN count(i) as count
                 """
@@ -1862,13 +2392,11 @@ async def get_codebase_statistics(
                 if interface_result and interface_result.get("nodes"):
                     stats.total_interfaces = int(interface_result["nodes"][0].get("count", 0) or 0)
 
-                # Query 4: Functions/Methods
+                # Query 5: Functions/Methods - traverse from classes
                 func_query = """
-                MATCH (f)
-                WHERE f.repositoryId = $repository_id
-                    AND (f:Function OR f:Method OR f:PythonFunction OR f:PythonMethod
-                         OR f:JavaMethod OR f:CSharpMethod OR f:GoFunction OR f:GoMethod OR f:CFunction)
-                RETURN count(f) as count
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(c)-[:HAS_METHOD]->(method)
+                WHERE r.repositoryId = $repository_id
+                RETURN count(method) as count
                 """
                 func_result = await generator.neo4j_client.query_code_structure(
                     func_query,
@@ -1877,10 +2405,10 @@ async def get_codebase_statistics(
                 if func_result and func_result.get("nodes"):
                     stats.total_functions = int(func_result["nodes"][0].get("count", 0) or 0)
 
-                # Query 5: UI Components
+                # Query 6: UI Components - traverse from Repository
                 component_query = """
-                MATCH (c:Component)
-                WHERE c.repositoryId = $repository_id
+                MATCH (r:Repository)-[*1..4]->(c:Component)
+                WHERE r.repositoryId = $repository_id
                 RETURN count(c) as count
                 """
                 comp_result = await generator.neo4j_client.query_code_structure(
@@ -1891,10 +2419,10 @@ async def get_codebase_statistics(
                     stats.total_components = int(comp_result["nodes"][0].get("count", 0) or 0)
                     stats.ui_components = stats.total_components
 
-                # Query 6: REST Endpoints (check RestEndpoint or SpringController)
+                # Query 7: REST Endpoints - check SpringController or RestEndpoint through Repository
                 rest_query = """
-                MATCH (e)
-                WHERE e.repositoryId = $repository_id
+                MATCH (r:Repository)-[*1..4]->(e)
+                WHERE r.repositoryId = $repository_id
                     AND (e:RestEndpoint OR e:SpringController)
                 RETURN count(e) as count
                 """
@@ -1905,10 +2433,10 @@ async def get_codebase_statistics(
                 if rest_result and rest_result.get("nodes"):
                     stats.rest_endpoints = int(rest_result["nodes"][0].get("count", 0) or 0)
 
-                # Query 7: GraphQL Operations
+                # Query 8: GraphQL Operations
                 graphql_query = """
-                MATCH (g:GraphQLOperation)
-                WHERE g.repositoryId = $repository_id
+                MATCH (r:Repository)-[*1..4]->(g:GraphQLOperation)
+                WHERE r.repositoryId = $repository_id
                 RETURN count(g) as count
                 """
                 gql_result = await generator.neo4j_client.query_code_structure(
@@ -1920,10 +2448,10 @@ async def get_codebase_statistics(
 
                 stats.total_api_endpoints = stats.rest_endpoints + stats.graphql_operations
 
-                # Query 8: Test Files (by name pattern or TestFile label)
+                # Query 9: Test Files (by name pattern or TestFile label)
                 test_query = """
-                MATCH (f:File)
-                WHERE f.repositoryId = $repository_id
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)
+                WHERE r.repositoryId = $repository_id
                     AND (f.name CONTAINS 'Test' OR f.name CONTAINS 'test'
                          OR f.filePath CONTAINS '/test/' OR f.filePath CONTAINS '/tests/')
                 RETURN count(f) as file_count
@@ -1937,10 +2465,10 @@ async def get_codebase_statistics(
                     # Estimate test cases (avg 5 tests per test file)
                     stats.total_test_cases = stats.total_test_files * 5
 
-                # Query 9: Dependencies (external imports/dependencies)
+                # Query 10: Dependencies (external imports/dependencies) - traverse from Repository
                 dep_query = """
-                MATCH (d)
-                WHERE d.repositoryId = $repository_id
+                MATCH (r:Repository)-[*1..3]->(d)
+                WHERE r.repositoryId = $repository_id
                     AND (d:GradleDependency OR d:MavenDependency OR d:NpmDependency)
                 RETURN count(d) as count
                 """
@@ -1951,17 +2479,13 @@ async def get_codebase_statistics(
                 if dep_result and dep_result.get("nodes"):
                     stats.total_dependencies = int(dep_result["nodes"][0].get("count", 0) or 0)
 
-                # If no explicit dependencies, count unique external imports (top-level packages)
+                # If no explicit dependencies, count unique imports
                 if stats.total_dependencies == 0:
+                    # Count JAVA_IMPORTS relationships as proxy for dependencies
                     import_query = """
-                    MATCH (i:ImportDeclaration)
-                    WHERE i.repositoryId = $repository_id
-                        AND i.importPath IS NOT NULL
-                    WITH split(i.importPath, '.')[0] as topPackage
-                    WHERE topPackage IS NOT NULL
-                        AND NOT topPackage STARTS WITH 'com'
-                        AND NOT topPackage STARTS WITH 'org'
-                    RETURN count(DISTINCT topPackage) as count
+                    MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(c)-[:JAVA_IMPORTS]->(imported)
+                    WHERE r.repositoryId = $repository_id
+                    RETURN count(DISTINCT imported) as count
                     """
                     import_result = await generator.neo4j_client.query_code_structure(
                         import_query,
@@ -1969,31 +2493,16 @@ async def get_codebase_statistics(
                     )
                     if import_result and import_result.get("nodes"):
                         dep_count = int(import_result["nodes"][0].get("count", 0) or 0)
-                        # If still 0, just count unique import packages
-                        if dep_count == 0:
-                            fallback_query = """
-                            MATCH (i:ImportDeclaration)
-                            WHERE i.repositoryId = $repository_id
-                                AND i.importPath IS NOT NULL
-                            WITH split(i.importPath, '.')[0] + '.' + split(i.importPath, '.')[1] as pkg
-                            RETURN count(DISTINCT pkg) as count
-                            """
-                            fallback_result = await generator.neo4j_client.query_code_structure(
-                                fallback_query,
-                                {"repository_id": repository_id}
-                            )
-                            if fallback_result and fallback_result.get("nodes"):
-                                dep_count = int(fallback_result["nodes"][0].get("count", 0) or 0)
                         stats.total_dependencies = dep_count
 
-                # Query 10: Database Models (SQL tables, Entity classes, or classes with Entity/Table annotation)
+                # Query 11: Database Models - traverse from Repository to Entity classes
                 db_query = """
-                MATCH (m)
-                WHERE m.repositoryId = $repository_id
-                    AND (m:SQLTable OR m:Entity
-                         OR m.stereotype = 'Entity'
-                         OR (m:JavaClass AND (m.name ENDS WITH 'Entity' OR m.name ENDS WITH 'Model')))
-                RETURN count(m) as count
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(c)
+                WHERE r.repositoryId = $repository_id
+                    AND (c:Entity
+                         OR c.stereotype = 'Entity'
+                         OR (c:JavaClass AND (c.name ENDS WITH 'Entity' OR c.name ENDS WITH 'Model')))
+                RETURN count(c) as count
                 """
                 db_result = await generator.neo4j_client.query_code_structure(
                     db_query,
@@ -2003,14 +2512,14 @@ async def get_codebase_statistics(
                     stats.total_database_models = int(db_result["nodes"][0].get("count", 0) or 0)
 
                 # Query 11: Complexity Metrics
+                # Query 12: Complexity Metrics - traverse from Repository
                 complexity_query = """
-                MATCH (f)
-                WHERE f.repositoryId = $repository_id
-                    AND f.complexity IS NOT NULL
-                    AND (f:Function OR f:Method)
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(c)-[:HAS_METHOD]->(method)
+                WHERE r.repositoryId = $repository_id
+                    AND method.complexity IS NOT NULL
                 RETURN
-                    avg(f.complexity) as avg_complexity,
-                    max(f.complexity) as max_complexity
+                    avg(method.complexity) as avg_complexity,
+                    max(method.complexity) as max_complexity
                 """
                 complexity_result = await generator.neo4j_client.query_code_structure(
                     complexity_query,
@@ -2025,10 +2534,10 @@ async def get_codebase_statistics(
                     if max_c is not None:
                         stats.max_cyclomatic_complexity = int(max_c)
 
-                # Query 12: Services, Controllers, Repositories
+                # Query 13: Services, Controllers, Repositories - traverse from Repository
                 service_query = """
-                MATCH (s)
-                WHERE s.repositoryId = $repository_id
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(s)
+                WHERE r.repositoryId = $repository_id
                     AND (s:SpringService OR s.stereotype = 'Service')
                 RETURN count(s) as count
                 """
@@ -2040,10 +2549,10 @@ async def get_codebase_statistics(
                     stats.services_count = int(svc_result["nodes"][0].get("count", 0) or 0)
 
                 controller_query = """
-                MATCH (c)
-                WHERE c.repositoryId = $repository_id
-                    AND (c:SpringController OR c.stereotype = 'Controller')
-                RETURN count(c) as count
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(ctrl)
+                WHERE r.repositoryId = $repository_id
+                    AND (ctrl:SpringController OR ctrl.stereotype = 'Controller')
+                RETURN count(ctrl) as count
                 """
                 ctrl_result = await generator.neo4j_client.query_code_structure(
                     controller_query,
@@ -2052,45 +2561,67 @@ async def get_codebase_statistics(
                 if ctrl_result and ctrl_result.get("nodes"):
                     stats.controllers_count = int(ctrl_result["nodes"][0].get("count", 0) or 0)
 
-                repo_query = """
-                MATCH (r)
+                repo_class_query = """
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(repo_class)
                 WHERE r.repositoryId = $repository_id
-                    AND r.stereotype = 'Repository'
-                RETURN count(r) as count
+                    AND repo_class.stereotype = 'Repository'
+                RETURN count(repo_class) as count
                 """
                 repo_result = await generator.neo4j_client.query_code_structure(
-                    repo_query,
+                    repo_class_query,
                     {"repository_id": repository_id}
                 )
                 if repo_result and repo_result.get("nodes"):
                     stats.repositories_count = int(repo_result["nodes"][0].get("count", 0) or 0)
 
-                # Query 13: UI Routes/Pages (check UIRoute, UIPage, JSPPage, Component)
+                # Query 14: UI Routes/Pages - count JSP pages as UI components for Java web apps
+                # JSP pages may be orphaned, so filter by filePath instead of traversing
                 route_query = """
-                MATCH (r)
-                WHERE r.repositoryId = $repository_id
-                    AND (r:UIRoute OR r:UIPage OR r:JSPPage OR r:Component)
-                RETURN count(r) as count
+                MATCH (j:JSPPage)
+                WHERE j.filePath CONTAINS $repository_id
+                RETURN count(j) as count
                 """
                 route_result = await generator.neo4j_client.query_code_structure(
                     route_query,
                     {"repository_id": repository_id}
                 )
                 if route_result and route_result.get("nodes"):
-                    count = int(route_result["nodes"][0].get("count", 0) or 0)
-                    stats.ui_routes = count
-                    stats.ui_components = count
+                    jsp_count = int(route_result["nodes"][0].get("count", 0) or 0)
+                    stats.ui_routes = jsp_count
+                    stats.ui_components = jsp_count
+                    stats.total_components = jsp_count
 
-                # Query 14: Documentation Coverage
+                # Also check for React/Vue components via Repository traversal
+                component_query2 = """
+                MATCH (r:Repository)-[*1..4]->(page)
+                WHERE r.repositoryId = $repository_id
+                    AND (page:UIRoute OR page:UIPage OR page:Component)
+                RETURN count(page) as count
+                """
+                comp_result2 = await generator.neo4j_client.query_code_structure(
+                    component_query2,
+                    {"repository_id": repository_id}
+                )
+                if comp_result2 and comp_result2.get("nodes"):
+                    count = int(comp_result2["nodes"][0].get("count", 0) or 0)
+                    if count > 0:
+                        stats.ui_routes += count
+                        stats.ui_components += count
+                        stats.total_components += count
+
+                # Query 15: Documentation Coverage - traverse from Repository
                 doc_query = """
-                MATCH (f)
-                WHERE f.repositoryId = $repository_id
-                    AND (f:Function OR f:Method OR f:JavaMethod OR f:Class OR f:JavaClass)
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(c)
+                WHERE r.repositoryId = $repository_id
+                OPTIONAL MATCH (c)-[:HAS_METHOD]->(method)
+                WITH c, method
                 RETURN
-                    count(f) as total,
-                    sum(CASE WHEN f.hasDocumentation = true
-                             OR (f.javadoc IS NOT NULL AND f.javadoc <> '')
-                             OR (f.docstring IS NOT NULL AND f.docstring <> '')
+                    count(DISTINCT c) + count(method) as total,
+                    sum(CASE WHEN c.hasDocumentation = true
+                             OR (c.javadoc IS NOT NULL AND c.javadoc <> '')
+                        THEN 1 ELSE 0 END) +
+                    sum(CASE WHEN method.hasDocumentation = true
+                             OR (method.javadoc IS NOT NULL AND method.javadoc <> '')
                         THEN 1 ELSE 0 END) as documented
                 """
                 doc_result = await generator.neo4j_client.query_code_structure(
@@ -2105,10 +2636,10 @@ async def get_codebase_statistics(
                     if total > 0:
                         stats.documentation_coverage = round((documented / total) * 100, 1)
 
-                # Query 15: Config Files (XML, properties, yaml, json, etc.)
+                # Query 16: Config Files - traverse from Repository
                 config_query = """
-                MATCH (f:File)
-                WHERE f.repositoryId = $repository_id
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)
+                WHERE r.repositoryId = $repository_id
                     AND (f.name ENDS WITH '.xml' OR f.name ENDS WITH '.properties'
                          OR f.name ENDS WITH '.yaml' OR f.name ENDS WITH '.yml'
                          OR f.name ENDS WITH '.json' OR f.name ENDS WITH '.toml'
@@ -2527,6 +3058,42 @@ def _camel_to_title(camel_str: str) -> str:
     return ' '.join(result_words)
 
 
+def _infer_feature_group(feature_name: str) -> str:
+    """Infer the feature group from feature name by removing common action suffixes.
+
+    Examples:
+    - "Legal Entity Search" → "Legal Entity"
+    - "Legal Entity Address" → "Legal Entity"
+    - "User Management Settings" → "User Management"
+    - "Dashboard" → "Dashboard" (no suffix to remove)
+
+    Args:
+        feature_name: The full feature name
+
+    Returns:
+        The inferred group name (prefix without action suffix)
+    """
+    # Common action/view suffixes to strip for grouping
+    suffixes = [
+        'Search', 'List', 'Detail', 'Details', 'Edit', 'Create', 'Update',
+        'Delete', 'View', 'Entry', 'Results', 'Lookup', 'Address', 'Contact',
+        'History', 'Management', 'Configuration', 'Settings', 'Overview',
+        'Summary', 'Report', 'Reports', 'Dashboard', 'Form', 'Wizard',
+        'Add', 'New', 'Info', 'Information', 'Profile', 'Status',
+    ]
+
+    group = feature_name.strip()
+
+    # Try to remove suffixes (only remove one suffix)
+    for suffix in suffixes:
+        if group.endswith(f' {suffix}'):
+            group = group[:-len(suffix)-1].strip()
+            break
+
+    # Return original name if no suffix was removed or result is empty
+    return group if group else feature_name
+
+
 def _is_likely_business_feature(prefix: str, jsp_names: list[str], controllers: list[str]) -> bool:
     """Use smart heuristics to determine if this is likely a business feature.
 
@@ -2752,9 +3319,9 @@ async def discover_business_features(
                 # =========================================================
                 logger.info("[FEATURES] Step 1: Discovering Web Flows...")
                 webflow_query = """
-                MATCH (wf:SpringWebFlow)
-                WHERE wf.repositoryId = $repository_id
-                OPTIONAL MATCH (wf)-[:HAS_STATE]->(state)
+                MATCH (r:Repository)-[*1..4]->(wf:WebFlowDefinition)
+                WHERE r.repositoryId = $repository_id
+                OPTIONAL MATCH (wf)-[:FLOW_DEFINES_STATE]->(state:FlowState)
                 OPTIONAL MATCH (wf)-[:USES|DEPENDS_ON]->(svc)
                 WHERE svc:SpringService OR svc.stereotype = 'Service'
                 RETURN
@@ -2803,6 +3370,7 @@ async def discover_business_features(
                             discovery_source="webflow",
                             entry_points=[wf_name],
                             file_path=node.get("filePath"),
+                            feature_group=_infer_feature_group(feature_name),
                             code_footprint=footprint,
                             has_tests=False,
                         )
@@ -2812,11 +3380,14 @@ async def discover_business_features(
 
                 # =========================================================
                 # Step 2: Query all JSP pages
+                # Note: JSP pages may be orphaned (not connected to Repository)
+                # Filter by filePath containing the repository_id instead
                 # =========================================================
                 logger.info("[FEATURES] Step 2: Querying JSP pages...")
                 jsp_query = """
                 MATCH (j:JSPPage)
-                WHERE j.repositoryId = $repository_id
+                WHERE j.filePath CONTAINS $repository_id
+                   OR j.filePath CONTAINS '/ple-web/'
                 RETURN j.name as name, j.filePath as filePath
                 ORDER BY j.name
                 """
@@ -2843,8 +3414,8 @@ async def discover_business_features(
                 # =========================================================
                 logger.info("[FEATURES] Step 4: Querying controllers...")
                 controller_query = """
-                MATCH (c)
-                WHERE c.repositoryId = $repository_id
+                MATCH (r:Repository)-[:HAS_MODULE]->(m)-[:CONTAINS_FILE]->(f:File)-[:DEFINES_CLASS]->(c)
+                WHERE r.repositoryId = $repository_id
                     AND (c:SpringController OR c.stereotype = 'Controller')
                 OPTIONAL MATCH (c)-[:USES|DEPENDS_ON|CALLS]->(svc)
                 WHERE svc:SpringService OR svc.stereotype = 'Service'
@@ -2951,6 +3522,7 @@ async def discover_business_features(
                         discovery_source="screen",
                         entry_points=matched_controllers[:3] if matched_controllers else [prefix],
                         file_path=primary_file_path,
+                        feature_group=_infer_feature_group(feature_name),
                         code_footprint=footprint,
                         has_tests=False,
                     )
@@ -2988,6 +3560,21 @@ async def discover_business_features(
         if features:
             summary.avg_complexity_score = round(total_complexity / len(features), 1)
 
+        # Build feature groups from discovered features
+        groups_dict: dict[str, list[BusinessFeature]] = {}
+        for feature in features:
+            group_name = feature.feature_group or feature.name
+            if group_name not in groups_dict:
+                groups_dict[group_name] = []
+            groups_dict[group_name].append(feature)
+
+        feature_groups = [
+            FeatureGroup(name=name, features=feats, feature_count=len(feats))
+            for name, feats in sorted(groups_dict.items())
+        ]
+
+        logger.info(f"[FEATURES] Grouped {len(features)} features into {len(feature_groups)} groups")
+
         # Calculate duration
         duration_ms = int((time.time() - start_time) * 1000)
 
@@ -2997,6 +3584,7 @@ async def discover_business_features(
             repository_name=repository_name,
             generated_at=datetime.now(),
             features=features,
+            feature_groups=feature_groups,
             summary=summary,
             discovery_method="screen-centric",
             discovery_duration_ms=duration_ms,
@@ -3006,4 +3594,1919 @@ async def discover_business_features(
         raise
     except Exception as e:
         logger.exception("Failed to discover business features")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Phase 2: EPIC Generation Endpoints
+# =============================================================================
+
+from ..models.epic import (
+    Epic as TrackedEpic,
+    BacklogItem,
+    ProjectContext,
+    GenerateEpicsRequest as EpicsGenRequest,
+    RefineEpicRequest,
+    RefineAllEpicsRequest,
+    GenerateEpicsResponse as EpicsGenResponse,
+    GenerateBacklogsRequest as BacklogsGenRequest,
+    RefineBacklogItemRequest,
+    GenerateBacklogsResponse as BacklogsGenResponse,
+    EpicStreamEvent,
+    BacklogStreamEvent,
+)
+from ..agents.epic_generator_agent import EpicGeneratorAgent
+from ..agents.epic_verifier_agent import EpicVerifierAgent, EpicsVerificationBundle
+from ..agents.backlog_generator_agent import BacklogGeneratorAgent
+from ..agents.backlog_verifier_agent import BacklogVerifierAgent, BacklogsVerificationBundle
+
+
+# Global agent instances
+_epic_agent: EpicGeneratorAgent | None = None
+_epic_verifier: EpicVerifierAgent | None = None
+_backlog_agent: BacklogGeneratorAgent | None = None
+_backlog_verifier: BacklogVerifierAgent | None = None
+
+
+async def get_epic_agent(generator: BRDGenerator = Depends(get_generator)) -> EpicGeneratorAgent:
+    """Get or create EPIC generator agent."""
+    global _epic_agent
+    if _epic_agent is None:
+        _epic_agent = EpicGeneratorAgent(
+            copilot_session=generator._copilot_session if generator else None,
+            config={"max_epics": 10},
+        )
+    return _epic_agent
+
+
+async def get_epic_verifier(generator: BRDGenerator = Depends(get_generator)) -> EpicVerifierAgent:
+    """Get or create EPIC verifier agent."""
+    global _epic_verifier
+    if _epic_verifier is None:
+        _epic_verifier = EpicVerifierAgent(
+            copilot_session=generator._copilot_session if generator else None,
+            config={"min_confidence": 0.6},
+        )
+    return _epic_verifier
+
+
+async def get_backlog_agent(generator: BRDGenerator = Depends(get_generator)) -> BacklogGeneratorAgent:
+    """Get or create Backlog generator agent."""
+    global _backlog_agent
+    if _backlog_agent is None:
+        from ..core.epic_template_parser import EpicBacklogTemplateParser, DEFAULT_BACKLOG_FIELDS
+        from ..models.epic import BacklogTemplateConfig
+
+        # Create default template config with comprehensive story settings
+        default_template_config = BacklogTemplateConfig(
+            backlog_template=DEFAULT_BACKLOG_TEMPLATE,
+            field_configs=DEFAULT_BACKLOG_FIELDS,
+            default_description_words=150,  # Comprehensive descriptions
+            default_acceptance_criteria_count=7,  # At least 5-7 criteria
+            default_technical_notes_words=80,
+            require_user_story_format=True,
+            include_technical_notes=True,
+            include_file_references=True,
+            include_story_points=False,  # No story points
+        )
+
+        # Get parsed template
+        parser = EpicBacklogTemplateParser(
+            copilot_session=generator._copilot_session if generator else None
+        )
+        parsed_template = parser._get_default_backlog_template()
+
+        _backlog_agent = BacklogGeneratorAgent(
+            copilot_session=generator._copilot_session if generator else None,
+            config={"items_per_epic": 5},
+            template_config=default_template_config,
+            parsed_template=parsed_template,
+        )
+    return _backlog_agent
+
+
+async def get_backlog_verifier(generator: BRDGenerator = Depends(get_generator)) -> BacklogVerifierAgent:
+    """Get or create Backlog verifier agent."""
+    global _backlog_verifier
+    if _backlog_verifier is None:
+        _backlog_verifier = BacklogVerifierAgent(
+            copilot_session=generator._copilot_session if generator else None,
+            config={"min_confidence": 0.6},
+        )
+    return _backlog_verifier
+
+
+# =============================================================================
+# Phase 1: Pre-Analysis Endpoints (Intelligent Count Determination)
+# =============================================================================
+
+from ..models.epic import (
+    AnalyzeBRDRequest,
+    BRDAnalysisResult,
+    AnalyzeEpicsForBacklogsRequest,
+    AnalyzeEpicsForBacklogsResponse,
+)
+from ..core.brd_epic_analyzer import BRDAnalyzer, EpicAnalyzer
+
+# Global analyzer instances
+_brd_analyzer: BRDAnalyzer | None = None
+_epic_analyzer: EpicAnalyzer | None = None
+
+
+async def get_brd_analyzer(generator: BRDGenerator = Depends(get_generator)) -> BRDAnalyzer:
+    """Get or create BRD analyzer."""
+    global _brd_analyzer
+    if _brd_analyzer is None:
+        _brd_analyzer = BRDAnalyzer(
+            copilot_session=generator._copilot_session if generator else None,
+        )
+    return _brd_analyzer
+
+
+async def get_epic_analyzer(generator: BRDGenerator = Depends(get_generator)) -> EpicAnalyzer:
+    """Get or create EPIC analyzer for backlog decomposition."""
+    global _epic_analyzer
+    if _epic_analyzer is None:
+        _epic_analyzer = EpicAnalyzer(
+            copilot_session=generator._copilot_session if generator else None,
+        )
+    return _epic_analyzer
+
+
+@router.post(
+    "/epics/analyze-brd",
+    response_model=BRDAnalysisResult,
+    tags=["Phase 1: Analysis"],
+    summary="Analyze BRD for intelligent EPIC count determination",
+    description="""
+    **Phase 1: Pre-Analysis**
+
+    Analyzes a BRD document to intelligently determine the optimal number and structure of EPICs.
+    This endpoint should be called BEFORE generating EPICs to get AI-powered recommendations.
+
+    ## How it works:
+    1. **Structural Analysis**: Counts sections, requirements, personas, integrations
+    2. **Semantic Analysis**: Uses LLM to understand functional areas and user journeys
+    3. **Recommendations**: Provides optimal EPIC count with detailed breakdown
+
+    ## What you get:
+    - Recommended EPIC count (min/max/optimal)
+    - Identified functional areas and user journeys
+    - Complexity assessment with factors
+    - Suggested EPIC breakdown with scope for each
+
+    ## Workflow:
+    1. Call this endpoint first with BRD content
+    2. Review recommendations with user
+    3. Pass the analysis result to `/epics/generate` for guided generation
+    """,
+)
+async def analyze_brd_for_epics(
+    request: AnalyzeBRDRequest,
+    analyzer: BRDAnalyzer = Depends(get_brd_analyzer),
+) -> BRDAnalysisResult:
+    """Analyze BRD to determine optimal EPIC count and structure."""
+    try:
+        logger.info(f"[API] Analyzing BRD {request.brd_id} for EPIC decomposition")
+        result = await analyzer.analyze_brd(request)
+        logger.info(
+            f"[API] BRD analysis complete: recommended {result.recommended_epic_count} EPICs "
+            f"(range: {result.min_epic_count}-{result.max_epic_count})"
+        )
+        return result
+    except Exception as e:
+        logger.exception(f"Error analyzing BRD: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/backlogs/analyze-epics",
+    response_model=AnalyzeEpicsForBacklogsResponse,
+    tags=["Phase 1: Analysis"],
+    summary="Analyze EPICs for intelligent backlog count determination",
+    description="""
+    **Phase 1: Pre-Analysis for Backlogs**
+
+    Analyzes EPICs to intelligently determine the optimal number and structure of backlog items.
+    This endpoint should be called BEFORE generating backlogs to get AI-powered recommendations.
+
+    ## How it works:
+    1. **Per-EPIC Analysis**: Analyzes each EPIC's scope, acceptance criteria, and complexity
+    2. **Item Type Breakdown**: Recommends user stories, tasks, and spikes
+    3. **Point Estimation**: Estimates total story points
+
+    ## What you get (per EPIC):
+    - Recommended item count (min/max/optimal)
+    - Breakdown by type (stories, tasks, spikes)
+    - Suggested items with titles and estimates
+    - Complexity assessment
+
+    ## Workflow:
+    1. Call this endpoint first with EPICs
+    2. Review recommendations with user
+    3. Pass the analysis result to `/backlogs/generate` for guided generation
+    """,
+)
+async def analyze_epics_for_backlogs(
+    request: AnalyzeEpicsForBacklogsRequest,
+    analyzer: EpicAnalyzer = Depends(get_epic_analyzer),
+) -> AnalyzeEpicsForBacklogsResponse:
+    """Analyze EPICs to determine optimal backlog item count and structure."""
+    try:
+        logger.info(f"[API] Analyzing {len(request.epics)} EPICs for backlog decomposition")
+        result = await analyzer.analyze_epics(request)
+        logger.info(
+            f"[API] EPIC analysis complete: recommended {result.total_recommended_items} total items "
+            f"({result.total_user_stories} stories, {result.total_tasks} tasks, {result.total_spikes} spikes)"
+        )
+        return result
+    except Exception as e:
+        logger.exception(f"Error analyzing EPICs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Phase 2: EPIC and Backlog Generation with Analysis Support
+# =============================================================================
+
+async def _generate_epics_stream(
+    request: EpicsGenRequest,
+    agent: EpicGeneratorAgent,
+    verifier: Optional[EpicVerifierAgent] = None,
+) -> AsyncGenerator[str, None]:
+    """Stream EPIC generation progress with optional verification."""
+    try:
+        is_verified_mode = request.mode == "verified" and verifier is not None
+
+        # Send initial thinking event
+        mode_label = "verified" if is_verified_mode else "draft"
+        yield f"data: {json.dumps({'type': 'thinking', 'content': f'Analyzing BRD structure ({mode_label} mode)...'})}\n\n"
+
+        # Generate EPICs
+        yield f"data: {json.dumps({'type': 'thinking', 'content': 'Generating EPICs from requirements...'})}\n\n"
+
+        response = await agent.generate_epics(request)
+
+        # Send each EPIC as it's generated
+        for i, epic in enumerate(response.epics):
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'Generated EPIC {i+1}/{len(response.epics)}: {epic.title}'})}\n\n"
+            yield f"data: {json.dumps({'type': 'epic', 'epic': epic.model_dump(mode='json')})}\n\n"
+
+        # Verification phase (only in verified mode)
+        verification_bundle = None
+        if is_verified_mode:
+            yield f"data: {json.dumps({'type': 'thinking', 'content': 'Starting verification phase...'})}\n\n"
+
+            def verification_progress(msg: str):
+                pass  # Progress handled via streaming
+
+            verification_bundle = await verifier.verify_epics(
+                epics=response.epics,
+                brd_content=request.brd_markdown,
+                brd_id=request.brd_id,
+                progress_callback=verification_progress,
+            )
+
+            # Stream verification results
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'Verification complete: {verification_bundle.verified_epics}/{verification_bundle.total_epics} EPICs verified (confidence: {verification_bundle.overall_confidence:.1%})'})}\n\n"
+
+            # Add verification results to response
+            response_data = response.model_dump(mode='json')
+            response_data['verification_results'] = [
+                r.model_dump(mode='json') for r in verification_bundle.epic_results
+            ]
+            response_data['overall_confidence'] = verification_bundle.overall_confidence
+            response_data['is_verified'] = verification_bundle.is_approved
+            response_data['verification_status'] = verification_bundle.overall_status.value
+        else:
+            response_data = response.model_dump(mode='json')
+            response_data['is_verified'] = False
+            response_data['draft_warning'] = "Generated in draft mode without verification. Use verified mode for validated EPICs."
+
+        # Send complete response
+        complete_data = {
+            "type": "complete",
+            "data": response_data,
+        }
+        yield f"data: {json.dumps(complete_data)}\n\n"
+
+    except Exception as e:
+        logger.exception("Error generating EPICs")
+        yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+
+@router.post(
+    "/epics/generate",
+    tags=["Phase 2: EPICs"],
+    summary="Generate EPICs from BRD",
+    description="""
+    Generate EPICs (large work items) from a BRD document.
+
+    Features:
+    - Analyzes BRD to identify logical EPIC groupings
+    - Maintains traceability to BRD sections
+    - Identifies dependencies between EPICs
+    - Provides effort estimates
+    - Streams progress in real-time
+
+    Returns SSE stream with events:
+    - thinking: Progress updates
+    - epic: Individual generated EPIC
+    - complete: Final response with all EPICs
+    - error: Error message if generation fails
+    """,
+)
+async def generate_epics(
+    request: EpicsGenRequest,
+    agent: EpicGeneratorAgent = Depends(get_epic_agent),
+    verifier: EpicVerifierAgent = Depends(get_epic_verifier),
+) -> StreamingResponse:
+    """Generate EPICs from BRD with streaming progress."""
+    # Pass verifier only if in verified mode
+    epic_verifier = verifier if request.mode == "verified" else None
+    return StreamingResponse(
+        _generate_epics_stream(request, agent, epic_verifier),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post(
+    "/epics/{epic_id}/refine",
+    response_model=TrackedEpic,
+    tags=["Phase 2: EPICs"],
+    summary="Refine an EPIC based on user feedback",
+    description="""
+    Refine a single EPIC by incorporating user feedback.
+
+    The AI will:
+    - Analyze the current EPIC and user feedback
+    - Reference relevant BRD sections for context
+    - Update the EPIC while maintaining traceability
+    - Preserve the EPIC ID and increment refinement count
+    """,
+)
+async def refine_epic(
+    epic_id: str,
+    request: RefineEpicRequest,
+    agent: EpicGeneratorAgent = Depends(get_epic_agent),
+) -> TrackedEpic:
+    """Refine an EPIC based on user feedback."""
+    try:
+        refined = await agent.refine_epic(request)
+        return refined
+    except Exception as e:
+        logger.exception(f"Error refining EPIC {epic_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/epics/refine-all",
+    response_model=EpicsGenResponse,
+    tags=["Phase 2: EPICs"],
+    summary="Apply global feedback to all EPICs",
+    description="""
+    Apply global feedback to refine all EPICs at once.
+
+    Useful for:
+    - Consistent terminology changes across all EPICs
+    - Adding common acceptance criteria
+    - Adjusting priorities based on new information
+    """,
+)
+async def refine_all_epics(
+    request: RefineAllEpicsRequest,
+    agent: EpicGeneratorAgent = Depends(get_epic_agent),
+) -> EpicsGenResponse:
+    """Apply global feedback to all EPICs."""
+    try:
+        refined_epics = await agent.refine_all_epics(
+            epics=request.epics,
+            global_feedback=request.global_feedback,
+            brd_markdown=request.brd_markdown,
+            project_context=request.project_context,
+        )
+
+        return EpicsGenResponse(
+            success=True,
+            brd_id=request.epics[0].brd_id if request.epics else "",
+            epics=refined_epics,
+            total_epics=len(refined_epics),
+        )
+    except Exception as e:
+        logger.exception("Error refining all EPICs")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# EPIC and Backlog Template Parsing Endpoints
+# =============================================================================
+
+class ParseEpicTemplateRequest(BaseModel):
+    """Request to parse EPIC template."""
+    template_content: str = Field(..., min_length=10)
+
+
+class ParseEpicTemplateResponse(BaseModel):
+    """Response from EPIC template parsing."""
+    success: bool
+    fields: list[dict]
+    guidelines: list[str]
+    template_name: Optional[str] = None
+
+
+class ParseBacklogTemplateRequest(BaseModel):
+    """Request to parse Backlog template."""
+    template_content: str = Field(..., min_length=10)
+
+
+class ParseBacklogTemplateResponse(BaseModel):
+    """Response from Backlog template parsing."""
+    success: bool
+    fields: list[dict]
+    item_types: list[str]
+    guidelines: list[str]
+    template_name: Optional[str] = None
+
+
+class DefaultEpicTemplateResponse(BaseModel):
+    """Response containing default EPIC template."""
+    success: bool
+    template: str
+    fields: list[dict]
+    guidelines: list[str]
+
+
+class DefaultBacklogTemplateResponse(BaseModel):
+    """Response containing default Backlog template."""
+    success: bool
+    template: str
+    fields: list[dict]
+    item_types: list[str]
+    guidelines: list[str]
+
+
+# Default EPIC template markdown
+DEFAULT_EPIC_TEMPLATE = """# EPIC Template
+
+## Title
+[Short, descriptive title for the EPIC - max 10 words]
+
+## Description
+[Detailed description of what this EPIC aims to achieve. Include:
+- The business problem being solved
+- High-level scope and boundaries
+- Key stakeholders affected]
+**Target: 150-200 words**
+
+## Business Value
+[Why this EPIC matters to the business. Include:
+- Expected outcomes and benefits
+- Impact on users/customers
+- Strategic alignment]
+**Target: 100-150 words**
+
+## Objectives
+[3-5 specific, measurable objectives this EPIC will achieve]
+1. Objective 1
+2. Objective 2
+3. Objective 3
+
+## Acceptance Criteria
+[5-8 criteria that must be met for this EPIC to be complete]
+- [ ] Criterion 1
+- [ ] Criterion 2
+- [ ] Criterion 3
+- [ ] Criterion 4
+- [ ] Criterion 5
+
+## Technical Components
+[List of systems, services, or components affected]
+- Component 1
+- Component 2
+
+## Dependencies
+[Other EPICs or external factors this depends on]
+- Dependency 1
+
+## Priority & Effort
+- **Priority:** [Critical/High/Medium/Low]
+- **Estimated Effort:** [XS/S/M/L/XL]
+"""
+
+
+# Default Backlog template markdown (Option B - Moderate with Testing)
+DEFAULT_BACKLOG_TEMPLATE = """# User Story Template
+
+## User Story Format (REQUIRED)
+**As a** [user role - e.g., "registered user", "admin", "guest"]
+**I want** [desired action/capability - describe the complete feature]
+**So that** [expected business benefit/value - why this matters]
+
+## Description
+[Write a comprehensive description in 2-3 paragraphs explaining:
+- What this feature does and its purpose
+- Key functionality and how users will interact with it
+- Why this feature is needed and how it fits into the larger system]
+**Target: 150-200 words**
+
+## Acceptance Criteria
+[List 5-7 specific, testable criteria. Use Given/When/Then format where appropriate.]
+- [ ] Given [context], When [action], Then [expected result]
+- [ ] [Specific testable requirement]
+- [ ] [Specific testable requirement]
+- [ ] [Error handling requirement]
+- [ ] [Performance or quality requirement]
+
+## Pre-conditions
+[What must be true BEFORE this story can be executed]
+- [System state, dependencies, or prerequisites]
+- [User state or permissions required]
+
+## Post-conditions
+[What must be true AFTER successful completion]
+- [System state after completion]
+- [User-visible changes or outcomes]
+
+## Testing Approach
+[How to test this story - include unit tests, integration tests, and manual testing steps]
+**Target: 80-100 words**
+
+## Edge Cases
+[Error scenarios and boundary conditions to handle]
+- [Invalid input handling]
+- [Network/service failure scenarios]
+- [Empty state or no data scenarios]
+"""
+
+
+@router.get(
+    "/epics/template/default",
+    response_model=DefaultEpicTemplateResponse,
+    tags=["Phase 2: EPICs"],
+    summary="Get default EPIC template",
+    description="Returns the default EPIC template with field configuration.",
+)
+async def get_default_epic_template() -> DefaultEpicTemplateResponse:
+    """Get the default EPIC template."""
+    try:
+        from ..core.epic_template_parser import DEFAULT_EPIC_FIELDS
+
+        return DefaultEpicTemplateResponse(
+            success=True,
+            template=DEFAULT_EPIC_TEMPLATE,
+            fields=[f.model_dump() for f in DEFAULT_EPIC_FIELDS],
+            guidelines=[
+                "Focus on business outcomes rather than implementation details",
+                "Ensure each EPIC is independently valuable",
+                "Keep descriptions clear and actionable",
+                "Use measurable objectives where possible",
+            ],
+        )
+    except Exception as e:
+        logger.exception("Error getting default EPIC template")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/backlogs/template/default",
+    response_model=DefaultBacklogTemplateResponse,
+    tags=["Phase 3: Backlogs"],
+    summary="Get default Backlog template",
+    description="Returns the default Backlog template with field configuration.",
+)
+async def get_default_backlog_template() -> DefaultBacklogTemplateResponse:
+    """Get the default Backlog template."""
+    try:
+        from ..core.epic_template_parser import DEFAULT_BACKLOG_FIELDS
+
+        return DefaultBacklogTemplateResponse(
+            success=True,
+            template=DEFAULT_BACKLOG_TEMPLATE,
+            fields=[f.model_dump() for f in DEFAULT_BACKLOG_FIELDS],
+            item_types=["user_story", "task", "spike", "bug"],
+            guidelines=[
+                "Use 'As a... I want... So that...' format for user stories",
+                "Make acceptance criteria specific and testable",
+                "Keep stories small enough to complete in one sprint",
+                "Include technical notes for complex implementations",
+            ],
+        )
+    except Exception as e:
+        logger.exception("Error getting default Backlog template")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/epics/template/parse-fields",
+    response_model=ParseEpicTemplateResponse,
+    tags=["Phase 2: EPICs"],
+    summary="Parse EPIC template to extract field configuration",
+    description="""
+    Parse a custom EPIC template to extract:
+    - Field structure and order
+    - Suggested word counts per field
+    - Writing guidelines
+    """,
+)
+async def parse_epic_template_fields(
+    request: ParseEpicTemplateRequest,
+) -> ParseEpicTemplateResponse:
+    """Parse EPIC template to extract field configuration."""
+    try:
+        from ..core.epic_template_parser import EpicBacklogTemplateParser
+
+        parser = EpicBacklogTemplateParser()
+        parsed = await parser.parse_epic_template(request.template_content)
+
+        return ParseEpicTemplateResponse(
+            success=True,
+            fields=[f.model_dump() for f in parsed.fields],
+            guidelines=parsed.writing_guidelines,
+            template_name=parsed.template_name,
+        )
+    except Exception as e:
+        logger.exception("Error parsing EPIC template")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/backlogs/template/parse-fields",
+    response_model=ParseBacklogTemplateResponse,
+    tags=["Phase 3: Backlogs"],
+    summary="Parse Backlog template to extract field configuration",
+    description="""
+    Parse a custom Backlog template to extract:
+    - Field structure and order
+    - Item types supported (user_story, task, spike)
+    - Writing guidelines
+    """,
+)
+async def parse_backlog_template_fields(
+    request: ParseBacklogTemplateRequest,
+) -> ParseBacklogTemplateResponse:
+    """Parse Backlog template to extract field configuration."""
+    try:
+        from ..core.epic_template_parser import EpicBacklogTemplateParser
+
+        parser = EpicBacklogTemplateParser()
+        parsed = await parser.parse_backlog_template(request.template_content)
+
+        return ParseBacklogTemplateResponse(
+            success=True,
+            fields=[f.model_dump() for f in parsed.fields],
+            item_types=parsed.item_types,
+            guidelines=parsed.writing_guidelines,
+            template_name=parsed.template_name,
+        )
+    except Exception as e:
+        logger.exception("Error parsing Backlog template")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Phase 3: Backlog Generation Endpoints
+# =============================================================================
+
+async def _generate_backlogs_stream(
+    request: BacklogsGenRequest,
+    agent: BacklogGeneratorAgent,
+    verifier: Optional[BacklogVerifierAgent] = None,
+) -> AsyncGenerator[str, None]:
+    """Stream backlog generation progress with optional verification."""
+    try:
+        is_verified_mode = request.mode == "verified" and verifier is not None
+        mode_label = "verified" if is_verified_mode else "draft"
+        yield f"data: {json.dumps({'type': 'thinking', 'content': f'Starting backlog generation ({mode_label} mode)...'})}\n\n"
+
+        # Generate backlogs for each EPIC
+        epics_to_process = request.epics
+        if request.epic_ids:
+            epics_to_process = [e for e in request.epics if e.id in request.epic_ids]
+
+        all_items = []
+        items_by_epic = {}
+
+        for i, epic in enumerate(epics_to_process):
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'Generating backlogs for {epic.id}: {epic.title} ({i+1}/{len(epics_to_process)})'})}\n\n"
+
+            # Generate items for this EPIC
+            items = await agent._generate_items_for_epic(
+                epic=epic,
+                brd_markdown=request.brd_markdown,
+                items_per_epic=request.items_per_epic,
+                include_technical_tasks=request.include_technical_tasks,
+                include_spikes=request.include_spikes,
+                project_context=request.project_context,
+                item_offset=len(all_items),
+            )
+
+            all_items.extend(items)
+            items_by_epic[epic.id] = [item.id for item in items]
+
+            # Stream each item
+            for item in items:
+                yield f"data: {json.dumps({'type': 'item', 'item': item.model_dump(mode='json')})}\n\n"
+
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'Generated {len(items)} items for {epic.id}'})}\n\n"
+
+        # Build final response
+        total_points = sum(item.story_points or 0 for item in all_items)
+        by_type = {}
+        by_priority = {}
+        for item in all_items:
+            by_type[item.item_type.value] = by_type.get(item.item_type.value, 0) + 1
+            by_priority[item.priority.value] = by_priority.get(item.priority.value, 0) + 1
+
+        response = BacklogsGenResponse(
+            success=True,
+            brd_id=request.brd_id,
+            items=all_items,
+            items_by_epic=items_by_epic,
+            total_items=len(all_items),
+            total_story_points=total_points,
+            by_type=by_type,
+            by_priority=by_priority,
+            recommended_order=agent._calculate_implementation_order(all_items),
+        )
+
+        # Verification phase (only in verified mode)
+        if is_verified_mode and all_items:
+            yield f"data: {json.dumps({'type': 'thinking', 'content': 'Starting verification phase...'})}\n\n"
+
+            def verification_progress(msg: str):
+                pass  # Progress handled via streaming
+
+            verification_bundle = await verifier.verify_backlogs(
+                items=all_items,
+                epics=epics_to_process,
+                brd_content=request.brd_markdown,
+                brd_id=request.brd_id,
+                progress_callback=verification_progress,
+            )
+
+            # Stream verification results
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'Verification complete: {verification_bundle.verified_items}/{verification_bundle.total_items} items verified (confidence: {verification_bundle.overall_confidence:.1%})'})}\n\n"
+
+            # Add verification results to response
+            response_data = response.model_dump(mode='json')
+            response_data['verification_results'] = [
+                r.model_dump(mode='json') for r in verification_bundle.item_results
+            ]
+            response_data['overall_confidence'] = verification_bundle.overall_confidence
+            response_data['is_verified'] = verification_bundle.is_approved
+            response_data['verification_status'] = verification_bundle.overall_status.value
+        else:
+            response_data = response.model_dump(mode='json')
+            response_data['is_verified'] = False
+            if not is_verified_mode:
+                response_data['draft_warning'] = "Generated in draft mode without verification. Use verified mode for validated backlogs."
+
+        yield f"data: {json.dumps({'type': 'complete', 'data': response_data})}\n\n"
+
+    except Exception as e:
+        logger.exception("Error generating backlogs")
+        yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+
+@router.post(
+    "/backlogs/generate",
+    tags=["Phase 3: Backlogs"],
+    summary="Generate Backlogs from EPICs",
+    description="""
+    Generate backlog items (user stories, tasks, spikes) from EPICs.
+
+    Features:
+    - Breaks down EPICs into actionable items
+    - Generates user stories in proper format
+    - Maintains traceability to both EPIC and BRD
+    - Includes technical tasks and spikes (optional)
+    - Provides story point estimates
+    - Streams progress in real-time
+
+    Returns SSE stream with events:
+    - thinking: Progress updates
+    - item: Individual generated backlog item
+    - complete: Final response with all items
+    - error: Error message if generation fails
+    """,
+)
+async def generate_backlogs(
+    request: BacklogsGenRequest,
+    agent: BacklogGeneratorAgent = Depends(get_backlog_agent),
+    verifier: BacklogVerifierAgent = Depends(get_backlog_verifier),
+) -> StreamingResponse:
+    """Generate backlogs from EPICs with streaming progress."""
+    # Pass verifier only if in verified mode
+    backlog_verifier = verifier if request.mode == "verified" else None
+    return StreamingResponse(
+        _generate_backlogs_stream(request, agent, backlog_verifier),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post(
+    "/backlogs/{item_id}/refine",
+    response_model=BacklogItem,
+    tags=["Phase 3: Backlogs"],
+    summary="Refine a backlog item based on user feedback",
+    description="""
+    Refine a single backlog item by incorporating user feedback.
+
+    The AI will:
+    - Analyze the current item and user feedback
+    - Reference the parent EPIC and BRD sections
+    - Update the item while maintaining traceability
+    - Preserve the item ID and type
+    """,
+)
+async def refine_backlog_item(
+    item_id: str,
+    request: RefineBacklogItemRequest,
+    agent: BacklogGeneratorAgent = Depends(get_backlog_agent),
+) -> BacklogItem:
+    """Refine a backlog item based on user feedback."""
+    try:
+        refined = await agent.refine_item(request)
+        return refined
+    except Exception as e:
+        logger.exception(f"Error refining backlog item {item_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/backlogs/regenerate/{epic_id}",
+    response_model=list[BacklogItem],
+    tags=["Phase 3: Backlogs"],
+    summary="Regenerate all backlogs for an EPIC",
+    description="""
+    Regenerate all backlog items for a specific EPIC.
+
+    Useful when:
+    - The EPIC has been significantly modified
+    - You want to start fresh with backlog items
+    - Applying major feedback to all items for an EPIC
+    """,
+)
+async def regenerate_backlogs_for_epic(
+    epic_id: str,
+    epic: TrackedEpic,
+    brd_markdown: str,
+    feedback: Optional[str] = None,
+    items_per_epic: int = 5,
+    project_context: Optional[ProjectContext] = None,
+    agent: BacklogGeneratorAgent = Depends(get_backlog_agent),
+) -> list[BacklogItem]:
+    """Regenerate all backlogs for a specific EPIC."""
+    try:
+        items = await agent.regenerate_for_epic(
+            epic=epic,
+            brd_markdown=brd_markdown,
+            feedback=feedback,
+            items_per_epic=items_per_epic,
+            project_context=project_context,
+        )
+        return items
+    except Exception as e:
+        logger.exception(f"Error regenerating backlogs for EPIC {epic_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# BRD Refinement Endpoints
+# =============================================================================
+
+from ..models.brd import (
+    BRDSection,
+    RefinedBRD,
+    RefineBRDSectionRequest,
+    RefineEntireBRDRequest,
+    RefineBRDSectionResponse,
+    RefineEntireBRDResponse,
+    ArtifactHistoryResponse,
+    SessionHistoryResponse,
+    VersionDiffResponse,
+)
+from ..agents.brd_refinement_agent import BRDRefinementAgent
+from ..services.audit_service import AuditService
+
+# Global agent instance
+_brd_refinement_agent: BRDRefinementAgent | None = None
+_audit_service: AuditService | None = None
+
+
+async def get_brd_refinement_agent(
+    generator: BRDGenerator = Depends(get_generator)
+) -> BRDRefinementAgent:
+    """Get or create BRD refinement agent."""
+    global _brd_refinement_agent
+    if _brd_refinement_agent is None:
+        # Get copilot session from generator if available
+        copilot_session = None
+        if generator:
+            copilot_session = getattr(generator, '_copilot_session', None)
+        _brd_refinement_agent = BRDRefinementAgent(
+            copilot_session=copilot_session,
+            config={},
+        )
+    return _brd_refinement_agent
+
+
+def get_audit_service() -> AuditService:
+    """Get or create audit service."""
+    global _audit_service
+    if _audit_service is None:
+        _audit_service = AuditService()
+    return _audit_service
+
+
+@router.post(
+    "/brd/{brd_id}/sections/{section_name}/refine",
+    response_model=RefineBRDSectionResponse,
+    tags=["BRD Refinement"],
+    summary="Refine a specific BRD section based on user feedback",
+    description="""
+    Refine a single section of a BRD by incorporating user feedback.
+
+    The AI will:
+    - Analyze the current section and user feedback
+    - Reference the full BRD for context and consistency
+    - Update the section while preserving structure
+    - Generate a summary of changes for audit trail
+
+    The section is identified by its name (e.g., "Functional Requirements").
+    """,
+)
+async def refine_brd_section(
+    brd_id: str,
+    section_name: str,
+    request: RefineBRDSectionRequest,
+    agent: BRDRefinementAgent = Depends(get_brd_refinement_agent),
+    audit_service: AuditService = Depends(get_audit_service),
+) -> RefineBRDSectionResponse:
+    """Refine a specific BRD section based on user feedback."""
+    try:
+        # Ensure request has correct IDs
+        request.brd_id = brd_id
+        request.section_name = section_name
+
+        # Refine the section
+        result = await agent.refine_section(request)
+
+        # Record in audit history if session_id provided
+        if request.session_id:
+            await audit_service.record_refinement(
+                artifact_type="brd",
+                artifact_id=brd_id,
+                previous_content={"sections": [{"name": section_name, "content": request.current_content}]},
+                new_content={"sections": [{"name": section_name, "content": result.refined_section.content}]},
+                user_feedback=request.user_feedback,
+                feedback_scope="section",
+                feedback_target=section_name,
+                session_id=request.session_id,
+                repository_id=request.repository_id,
+            )
+
+        return result
+
+    except Exception as e:
+        logger.exception(f"Error refining BRD section {section_name}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/brd/{brd_id}/refine",
+    response_model=RefineEntireBRDResponse,
+    tags=["BRD Refinement"],
+    summary="Apply global feedback to refine entire BRD",
+    description="""
+    Apply global feedback to refine all sections of a BRD.
+
+    The AI will:
+    - Analyze the global feedback and apply to relevant sections
+    - Maintain consistency across the document
+    - Track which sections were modified
+    - Generate section-level diffs for review
+
+    Optionally specify target_sections to limit refinement scope.
+    """,
+)
+async def refine_entire_brd(
+    brd_id: str,
+    request: RefineEntireBRDRequest,
+    agent: BRDRefinementAgent = Depends(get_brd_refinement_agent),
+    audit_service: AuditService = Depends(get_audit_service),
+) -> RefineEntireBRDResponse:
+    """Apply global feedback to refine entire BRD."""
+    try:
+        # Ensure request has correct BRD ID
+        request.brd_id = brd_id
+
+        # Refine the BRD
+        result = await agent.refine_entire_brd(request)
+
+        # Record in audit history if session_id provided
+        if request.session_id:
+            await audit_service.record_refinement(
+                artifact_type="brd",
+                artifact_id=brd_id,
+                previous_content=request.current_brd.model_dump(),
+                new_content=result.refined_brd.model_dump(),
+                user_feedback=request.global_feedback,
+                feedback_scope="global",
+                session_id=request.session_id,
+                repository_id=request.repository_id,
+            )
+
+        return result
+
+    except Exception as e:
+        logger.exception(f"Error refining entire BRD {brd_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Audit History Endpoints
+# =============================================================================
+
+@router.get(
+    "/audit/{artifact_type}/{artifact_id}/history",
+    response_model=ArtifactHistoryResponse,
+    tags=["Audit History"],
+    summary="Get complete refinement history for an artifact",
+    description="""
+    Get the complete history of an artifact (BRD, EPIC, or Backlog).
+
+    Returns:
+    - All versions of the artifact
+    - User feedback that triggered each refinement
+    - Summary of changes at each version
+    - Metadata (model used, confidence, etc.)
+
+    artifact_type must be one of: 'brd', 'epic', 'backlog'
+    """,
+)
+async def get_artifact_history(
+    artifact_type: str,
+    artifact_id: str,
+    audit_service: AuditService = Depends(get_audit_service),
+) -> ArtifactHistoryResponse:
+    """Get complete refinement history for an artifact."""
+    if artifact_type not in ["brd", "epic", "backlog"]:
+        raise HTTPException(
+            status_code=400,
+            detail="artifact_type must be 'brd', 'epic', or 'backlog'"
+        )
+
+    try:
+        result = await audit_service.get_artifact_history(artifact_type, artifact_id)
+        return result
+    except Exception as e:
+        logger.exception(f"Error getting history for {artifact_type}:{artifact_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/audit/session/{session_id}",
+    response_model=SessionHistoryResponse,
+    tags=["Audit History"],
+    summary="Get full audit trail for a generation session",
+    description="""
+    Get the complete history for a generation session.
+
+    A session groups together:
+    - The original BRD
+    - All EPICs generated from the BRD
+    - All Backlogs generated from the EPICs
+
+    Returns the combined history across all linked artifacts.
+    """,
+)
+async def get_session_history(
+    session_id: str,
+    audit_service: AuditService = Depends(get_audit_service),
+) -> SessionHistoryResponse:
+    """Get full audit trail for a generation session."""
+    try:
+        result = await audit_service.get_session_history(session_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error getting session history: {session_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/audit/{artifact_type}/{artifact_id}/diff/{version1}/{version2}",
+    response_model=VersionDiffResponse,
+    tags=["Audit History"],
+    summary="Get diff between two versions of an artifact",
+    description="""
+    Compare two versions of an artifact to see what changed.
+
+    Returns:
+    - Section-level diffs (before/after for each section)
+    - List of sections added, removed, and modified
+    - Feedback that was applied between versions
+    """,
+)
+async def get_version_diff(
+    artifact_type: str,
+    artifact_id: str,
+    version1: int,
+    version2: int,
+    audit_service: AuditService = Depends(get_audit_service),
+) -> VersionDiffResponse:
+    """Get diff between two versions of an artifact."""
+    if artifact_type not in ["brd", "epic", "backlog"]:
+        raise HTTPException(
+            status_code=400,
+            detail="artifact_type must be 'brd', 'epic', or 'backlog'"
+        )
+
+    if version1 >= version2:
+        raise HTTPException(
+            status_code=400,
+            detail="version1 must be less than version2"
+        )
+
+    try:
+        result = await audit_service.get_version_diff(
+            artifact_type, artifact_id, version1, version2
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"One or both versions not found for {artifact_type}:{artifact_id}"
+            )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(
+            f"Error getting diff for {artifact_type}:{artifact_id} v{version1}..v{version2}"
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Session management endpoints
+
+class CreateSessionRequest(BaseModel):
+    """Request to create a new generation session."""
+    repository_id: str
+    brd_id: str
+    feature_description: str
+
+
+class CreateSessionResponse(BaseModel):
+    """Response with created session ID."""
+    success: bool = True
+    session_id: str
+
+
+@router.post(
+    "/audit/sessions",
+    response_model=CreateSessionResponse,
+    tags=["Audit History"],
+    summary="Create a new generation session",
+    description="""
+    Create a new generation session to track linked artifacts.
+
+    Use this when starting a new BRD generation to enable:
+    - Grouping of BRD, EPICs, and Backlogs
+    - Cross-artifact audit trail
+    - Session-level statistics
+    """,
+)
+async def create_session(
+    request: CreateSessionRequest,
+    audit_service: AuditService = Depends(get_audit_service),
+) -> CreateSessionResponse:
+    """Create a new generation session."""
+    try:
+        session_id = await audit_service.create_session(
+            repository_id=request.repository_id,
+            brd_id=request.brd_id,
+            feature_description=request.feature_description,
+        )
+        return CreateSessionResponse(success=True, session_id=session_id)
+    except Exception as e:
+        logger.exception("Error creating session")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class RetentionConfigResponse(BaseModel):
+    """Response with retention configuration."""
+    retention_days: int
+
+
+@router.get(
+    "/audit/config/retention",
+    response_model=RetentionConfigResponse,
+    tags=["Audit History"],
+    summary="Get current retention period",
+)
+async def get_retention_config(
+    audit_service: AuditService = Depends(get_audit_service),
+) -> RetentionConfigResponse:
+    """Get the current audit history retention period."""
+    days = await audit_service.get_retention_days()
+    return RetentionConfigResponse(retention_days=days)
+
+
+class SetRetentionRequest(BaseModel):
+    """Request to set retention period."""
+    days: int
+
+
+@router.put(
+    "/audit/config/retention",
+    response_model=RetentionConfigResponse,
+    tags=["Audit History"],
+    summary="Set retention period",
+)
+async def set_retention_config(
+    request: SetRetentionRequest,
+    audit_service: AuditService = Depends(get_audit_service),
+) -> RetentionConfigResponse:
+    """Set the audit history retention period."""
+    if request.days < 1:
+        raise HTTPException(status_code=400, detail="Retention days must be at least 1")
+
+    await audit_service.set_retention_days(request.days)
+    return RetentionConfigResponse(retention_days=request.days)
+
+
+# =============================================================================
+# BRD Library Endpoints
+# =============================================================================
+
+from .models import (
+    SaveBRDRequest,
+    UpdateBRDRequest,
+    UpdateBRDStatusRequest,
+    SaveEpicsRequest,
+    SaveBacklogsRequest,
+    BRDListResponse,
+    BRDDetailResponse,
+    EpicDetailResponse,
+    EpicsListResponse,
+    BacklogsListResponse,
+    StoredBRD,
+    StoredEpic,
+    StoredBacklog,
+)
+from ..services.document_service import DocumentService
+
+# Document service dependency
+_document_service: DocumentService | None = None
+
+
+def get_document_service() -> DocumentService:
+    """Dependency to get the document service instance."""
+    global _document_service
+    if _document_service is None:
+        _document_service = DocumentService()
+    return _document_service
+
+
+def _brd_db_to_response(brd) -> StoredBRD:
+    """Convert BRDDB to StoredBRD response model."""
+    repository = brd.repository if hasattr(brd, 'repository') else None
+    return StoredBRD(
+        id=str(brd.id),
+        brd_number=brd.brd_number,
+        title=brd.title,
+        feature_description=brd.feature_description,
+        markdown_content=brd.markdown_content,
+        sections=brd.sections,
+        repository_id=str(brd.repository_id),
+        repository_name=repository.name if repository else None,
+        mode=brd.mode,
+        confidence_score=brd.confidence_score,
+        verification_report=brd.verification_report,
+        status=brd.status.value,
+        version=brd.version,
+        refinement_count=brd.refinement_count,
+        epic_count=brd.epic_count,
+        backlog_count=brd.backlog_count,
+        epics=[_epic_db_to_response(e, parent_brd=brd, parent_repository=repository) for e in (brd.epics or [])],
+        created_at=brd.created_at,
+        updated_at=brd.updated_at,
+    )
+
+
+def _epic_db_to_response(
+    epic,
+    parent_brd=None,
+    parent_repository=None
+) -> StoredEpic:
+    """Convert EpicDB to StoredEpic response model.
+
+    Args:
+        epic: The EpicDB object
+        parent_brd: Optional parent BRD object (to avoid lazy loading)
+        parent_repository: Optional parent Repository object (to avoid lazy loading)
+    """
+    from sqlalchemy.orm import InstanceState
+
+    # Get BRD and repository info
+    brd_title = None
+    repository_id = None
+    repository_name = None
+
+    # Use parent info if provided (avoids lazy loading)
+    if parent_brd:
+        brd_title = parent_brd.title
+        if parent_repository:
+            repository_id = str(parent_brd.repository_id)
+            repository_name = parent_repository.name
+        else:
+            # Safely check if repository was eagerly loaded on parent_brd
+            brd_state: InstanceState = parent_brd._sa_instance_state
+            if 'repository' in brd_state.dict:
+                repo = brd_state.dict.get('repository')
+                if repo:
+                    repository_id = str(parent_brd.repository_id)
+                    repository_name = repo.name
+    else:
+        # Safely access eagerly loaded relationships without triggering lazy loads
+        try:
+            epic_state: InstanceState = epic._sa_instance_state
+            if 'brd' in epic_state.dict:
+                brd = epic_state.dict.get('brd')
+                if brd:
+                    brd_title = brd.title
+                    # Check if repository is already in brd's __dict__
+                    brd_state: InstanceState = brd._sa_instance_state
+                    if 'repository' in brd_state.dict:
+                        repo = brd_state.dict.get('repository')
+                        if repo:
+                            repository_id = str(brd.repository_id)
+                            repository_name = repo.name
+        except Exception:
+            pass  # Relationship not loaded, leave as None
+
+    return StoredEpic(
+        id=str(epic.id),
+        epic_number=epic.epic_number,
+        brd_id=str(epic.brd_id),
+        brd_title=brd_title,
+        repository_id=repository_id,
+        repository_name=repository_name,
+        title=epic.title,
+        description=epic.description,
+        business_value=epic.business_value,
+        objectives=epic.objectives or [],
+        acceptance_criteria=epic.acceptance_criteria or [],
+        affected_components=epic.affected_components or [],
+        depends_on=epic.depends_on or [],
+        status=epic.status.value,
+        refinement_count=epic.refinement_count,
+        display_order=epic.display_order,
+        backlog_count=epic.backlog_count,
+        backlogs=[_backlog_db_to_response(b) for b in (epic.backlogs or [])],
+        created_at=epic.created_at,
+        updated_at=epic.updated_at,
+    )
+
+
+def _backlog_db_to_response(backlog) -> StoredBacklog:
+    """Convert BacklogDB to StoredBacklog response model."""
+    # Get epic title if the relationship is loaded
+    epic_title = None
+    if hasattr(backlog, 'epic') and backlog.epic:
+        epic_title = backlog.epic.title
+
+    return StoredBacklog(
+        id=str(backlog.id),
+        backlog_number=backlog.backlog_number,
+        epic_id=str(backlog.epic_id),
+        epic_title=epic_title,
+        title=backlog.title,
+        description=backlog.description,
+        item_type=backlog.item_type.value,
+        as_a=backlog.as_a,
+        i_want=backlog.i_want,
+        so_that=backlog.so_that,
+        acceptance_criteria=backlog.acceptance_criteria or [],
+        technical_notes=backlog.technical_notes,
+        files_to_modify=backlog.files_to_modify or [],
+        files_to_create=backlog.files_to_create or [],
+        priority=backlog.priority.value,
+        story_points=backlog.story_points,
+        status=backlog.status.value,
+        refinement_count=backlog.refinement_count,
+        created_at=backlog.created_at,
+        updated_at=backlog.updated_at,
+    )
+
+
+@router.get(
+    "/brds",
+    response_model=BRDListResponse,
+    tags=["BRD Library"],
+    summary="List all BRDs",
+    description="Get a paginated list of all stored BRDs with optional filtering.",
+)
+async def list_brds(
+    repository_id: Optional[str] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> BRDListResponse:
+    """List all BRDs with optional filters."""
+    try:
+        brds, total = await doc_service.list_brds(
+            repository_id=repository_id,
+            status=status,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+        return BRDListResponse(
+            success=True,
+            data=[_brd_db_to_response(b) for b in brds],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as e:
+        logger.exception("Error listing BRDs")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/brds/{brd_id}",
+    response_model=BRDDetailResponse,
+    tags=["BRD Library"],
+    summary="Get BRD detail",
+    description="Get a single BRD with all its EPICs and Backlogs.",
+)
+async def get_brd_detail(
+    brd_id: str,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> BRDDetailResponse:
+    """Get BRD detail with EPICs and Backlogs."""
+    try:
+        brd = await doc_service.get_brd(brd_id)
+        if not brd:
+            raise HTTPException(status_code=404, detail="BRD not found")
+        return BRDDetailResponse(
+            success=True,
+            data=_brd_db_to_response(brd),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting BRD")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/brds",
+    response_model=BRDDetailResponse,
+    tags=["BRD Library"],
+    summary="Save a generated BRD",
+    description="Save a newly generated BRD to the library.",
+)
+async def save_brd(
+    request: SaveBRDRequest,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> BRDDetailResponse:
+    """Save a generated BRD to the database."""
+    try:
+        brd = await doc_service.create_brd(
+            repository_id=request.repository_id,
+            title=request.title,
+            feature_description=request.feature_description,
+            markdown_content=request.markdown_content,
+            sections=request.sections,
+            mode=request.mode,
+            confidence_score=request.confidence_score,
+            verification_report=request.verification_report,
+        )
+        # Reload with relationships
+        brd = await doc_service.get_brd(str(brd.id))
+        return BRDDetailResponse(
+            success=True,
+            data=_brd_db_to_response(brd),
+        )
+    except Exception as e:
+        logger.exception("Error saving BRD")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/brds/{brd_id}",
+    response_model=BRDDetailResponse,
+    tags=["BRD Library"],
+    summary="Update a BRD",
+    description="Update an existing BRD after refinement.",
+)
+async def update_brd(
+    brd_id: str,
+    request: UpdateBRDRequest,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> BRDDetailResponse:
+    """Update a BRD after refinement."""
+    try:
+        brd = await doc_service.update_brd(
+            brd_id=brd_id,
+            title=request.title,
+            markdown_content=request.markdown_content,
+            sections=request.sections,
+            status=request.status,
+            confidence_score=request.confidence_score,
+            verification_report=request.verification_report,
+        )
+        if not brd:
+            raise HTTPException(status_code=404, detail="BRD not found")
+        # Reload with relationships
+        brd = await doc_service.get_brd(str(brd.id))
+        return BRDDetailResponse(
+            success=True,
+            data=_brd_db_to_response(brd),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error updating BRD")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch(
+    "/brds/{brd_id}/status",
+    response_model=BRDDetailResponse,
+    tags=["BRD Library"],
+    summary="Update BRD status",
+    description="Update BRD status (approve, archive, etc.).",
+)
+async def update_brd_status(
+    brd_id: str,
+    request: UpdateBRDStatusRequest,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> BRDDetailResponse:
+    """Update BRD status."""
+    try:
+        brd = await doc_service.update_brd_status(brd_id, request.status)
+        if not brd:
+            raise HTTPException(status_code=404, detail="BRD not found")
+        brd = await doc_service.get_brd(str(brd.id))
+        return BRDDetailResponse(
+            success=True,
+            data=_brd_db_to_response(brd),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error updating BRD status")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/brds/{brd_id}",
+    tags=["BRD Library"],
+    summary="Delete a BRD",
+    description="Delete a BRD and all its EPICs/Backlogs (cascade).",
+)
+async def delete_brd(
+    brd_id: str,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> dict:
+    """Delete a BRD and all its children."""
+    try:
+        deleted = await doc_service.delete_brd(brd_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="BRD not found")
+        return {"success": True, "message": "BRD deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting BRD")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/brds/{brd_id}/download/{format}",
+    tags=["BRD Library"],
+    summary="Download BRD",
+    description="Download BRD content as Markdown or HTML.",
+)
+async def download_brd(
+    brd_id: str,
+    format: str = "md",
+    include_children: bool = False,
+    doc_service: DocumentService = Depends(get_document_service),
+):
+    """Download BRD in specified format."""
+    from fastapi.responses import PlainTextResponse
+
+    try:
+        if include_children:
+            content = await doc_service.export_brd_with_children(brd_id, format)
+        else:
+            content = await doc_service.export_brd(brd_id, format)
+
+        if not content:
+            raise HTTPException(status_code=404, detail="BRD not found")
+
+        media_type = "text/html" if format == "html" else "text/markdown"
+        return PlainTextResponse(content=content, media_type=media_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error downloading BRD")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/brds/{brd_id}/epics",
+    response_model=EpicsListResponse,
+    tags=["BRD Library"],
+    summary="List EPICs for BRD",
+    description="Get all EPICs for a specific BRD.",
+)
+async def list_epics_for_brd(
+    brd_id: str,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> EpicsListResponse:
+    """Get all EPICs for a BRD."""
+    try:
+        epics = await doc_service.get_epics_for_brd(brd_id)
+        return EpicsListResponse(
+            success=True,
+            data=[_epic_db_to_response(e) for e in epics],
+            total=len(epics),
+        )
+    except Exception as e:
+        logger.exception("Error listing EPICs")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/brds/{brd_id}/epics",
+    response_model=EpicsListResponse,
+    tags=["BRD Library"],
+    summary="Save EPICs for BRD",
+    description="Save generated EPICs for a BRD.",
+)
+async def save_epics_for_brd(
+    brd_id: str,
+    request: SaveEpicsRequest,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> EpicsListResponse:
+    """Save generated EPICs for a BRD."""
+    try:
+        epics = await doc_service.save_epics_for_brd(brd_id, request.epics)
+        return EpicsListResponse(
+            success=True,
+            data=[_epic_db_to_response(e) for e in epics],
+            total=len(epics),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Error saving EPICs")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/epics",
+    response_model=EpicsListResponse,
+    tags=["BRD Library"],
+    summary="List all EPICs",
+    description="Get all EPICs across all BRDs with optional filters.",
+)
+async def list_all_epics(
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> EpicsListResponse:
+    """List all EPICs with optional filters."""
+    try:
+        epics, total = await doc_service.list_all_epics(
+            status=status,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+        return EpicsListResponse(
+            success=True,
+            data=[_epic_db_to_response(e) for e in epics],
+            total=total,
+        )
+    except Exception as e:
+        logger.exception("Error listing EPICs")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/epics/{epic_id}",
+    response_model=EpicDetailResponse,
+    tags=["BRD Library"],
+    summary="Get EPIC detail",
+    description="Get a single EPIC with its backlogs.",
+)
+async def get_epic_detail(
+    epic_id: str,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> EpicDetailResponse:
+    """Get EPIC detail with Backlogs."""
+    try:
+        epic = await doc_service.get_epic(epic_id)
+        if not epic:
+            raise HTTPException(status_code=404, detail="EPIC not found")
+        return EpicDetailResponse(
+            success=True,
+            data=_epic_db_to_response(epic),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting EPIC")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class UpdateEpicRequest(BaseModel):
+    """Request to update an EPIC."""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    business_value: Optional[str] = None
+    objectives: Optional[list[str]] = None
+    acceptance_criteria: Optional[list[str]] = None
+    affected_components: Optional[list[str]] = None
+    depends_on: Optional[list[str]] = None
+    status: Optional[str] = None
+
+
+@router.put(
+    "/epics/{epic_id}",
+    response_model=EpicDetailResponse,
+    tags=["BRD Library"],
+    summary="Update EPIC",
+    description="Update an existing EPIC.",
+)
+async def update_epic(
+    epic_id: str,
+    request: UpdateEpicRequest,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> EpicDetailResponse:
+    """Update an EPIC."""
+    try:
+        epic = await doc_service.update_epic(
+            epic_id=epic_id,
+            title=request.title,
+            description=request.description,
+            business_value=request.business_value,
+            objectives=request.objectives,
+            acceptance_criteria=request.acceptance_criteria,
+            status=request.status,
+        )
+        if not epic:
+            raise HTTPException(status_code=404, detail="EPIC not found")
+        return EpicDetailResponse(
+            success=True,
+            data=_epic_db_to_response(epic),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error updating EPIC")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class DeleteResponse(BaseModel):
+    """Response for delete operations."""
+    success: bool = True
+    message: str
+
+
+@router.delete(
+    "/epics/{epic_id}",
+    response_model=DeleteResponse,
+    tags=["BRD Library"],
+    summary="Delete EPIC",
+    description="Delete an EPIC and all its backlogs.",
+)
+async def delete_epic(
+    epic_id: str,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> DeleteResponse:
+    """Delete an EPIC."""
+    try:
+        deleted = await doc_service.delete_epic(epic_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="EPIC not found")
+        return DeleteResponse(
+            success=True,
+            message=f"EPIC {epic_id} deleted successfully",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting EPIC")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/epics/{epic_id}/backlogs",
+    response_model=BacklogsListResponse,
+    tags=["BRD Library"],
+    summary="List backlogs for EPIC",
+    description="Get all backlog items for a specific EPIC.",
+)
+async def list_backlogs_for_epic(
+    epic_id: str,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> BacklogsListResponse:
+    """Get all backlogs for an EPIC."""
+    try:
+        backlogs = await doc_service.get_backlogs_for_epic(epic_id)
+        return BacklogsListResponse(
+            success=True,
+            data=[_backlog_db_to_response(b) for b in backlogs],
+            total=len(backlogs),
+        )
+    except Exception as e:
+        logger.exception("Error listing backlogs")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/epics/{epic_id}/backlogs",
+    response_model=BacklogsListResponse,
+    tags=["BRD Library"],
+    summary="Save backlogs for EPIC",
+    description="Save generated backlog items for an EPIC.",
+)
+async def save_backlogs_for_epic(
+    epic_id: str,
+    request: SaveBacklogsRequest,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> BacklogsListResponse:
+    """Save generated backlogs for an EPIC."""
+    try:
+        backlogs = await doc_service.save_backlogs_for_epic(epic_id, request.items)
+        return BacklogsListResponse(
+            success=True,
+            data=[_backlog_db_to_response(b) for b in backlogs],
+            total=len(backlogs),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Error saving backlogs")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/backlogs",
+    response_model=BacklogsListResponse,
+    tags=["BRD Library"],
+    summary="List all backlogs",
+    description="Get all backlog items across all EPICs with optional filters.",
+)
+async def list_all_backlogs(
+    status: Optional[str] = None,
+    item_type: Optional[str] = None,
+    priority: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    doc_service: DocumentService = Depends(get_document_service),
+) -> BacklogsListResponse:
+    """List all backlogs with optional filters."""
+    try:
+        backlogs, total = await doc_service.list_all_backlogs(
+            status=status,
+            item_type=item_type,
+            priority=priority,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+        return BacklogsListResponse(
+            success=True,
+            data=[_backlog_db_to_response(b) for b in backlogs],
+            total=total,
+        )
+    except Exception as e:
+        logger.exception("Error listing backlogs")
         raise HTTPException(status_code=500, detail=str(e))

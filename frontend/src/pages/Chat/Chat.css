@@ -269,8 +269,286 @@
   margin-top: var(--spacing-sm);
 }
 
+/* Chat Header with Repository Selector */
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--color-white);
+  border-bottom: 1px solid var(--color-gray-100);
+  box-shadow: var(--shadow-sm);
+}
+
+.repo-selector {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  color: var(--color-primary);
+}
+
+.repo-select {
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 2px solid var(--color-gray-200);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-family);
+  background: var(--color-white);
+  color: var(--color-dark);
+  cursor: pointer;
+  min-width: 200px;
+  transition: border-color var(--transition-fast);
+}
+
+.repo-select:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.repo-select:hover {
+  border-color: var(--color-primary);
+}
+
+.loading-text,
+.no-repos {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--font-size-sm);
+  color: var(--color-gray-400);
+}
+
+.no-repos {
+  color: #dc2626;
+}
+
+.selected-repo-info {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.repo-name {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-primary);
+}
+
+.repo-link {
+  color: var(--color-gray-400);
+  transition: color var(--transition-fast);
+}
+
+.repo-link:hover {
+  color: var(--color-primary);
+}
+
+.no-repos-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-lg);
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-lg);
+  color: #b91c1c;
+  text-align: center;
+}
+
+.no-repos-message p {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+/* Citation Badges */
+.citation-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  margin: 0 2px;
+  background: var(--color-accent);
+  color: var(--color-primary);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  vertical-align: baseline;
+}
+
+.citation-badge:hover {
+  background: var(--color-gold);
+  transform: scale(1.1);
+}
+
+/* Citations Container */
+.citations-container {
+  margin-top: var(--spacing-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+/* Expanded Citation */
+.citation-expanded {
+  background: var(--color-gray-50);
+  border: 1px solid var(--color-gray-200);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  animation: slideDown 0.2s ease;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    max-height: 500px;
+  }
+}
+
+.citation-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--color-gray-100);
+  border-bottom: 1px solid var(--color-gray-200);
+  font-size: var(--font-size-xs);
+}
+
+.citation-file {
+  font-family: var(--font-family-mono);
+  color: var(--color-primary);
+  font-weight: var(--font-weight-medium);
+  flex: 1;
+}
+
+.citation-lines {
+  color: var(--color-gray-500);
+}
+
+.citation-entity {
+  padding: var(--spacing-xs) var(--spacing-md);
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-600);
+  background: var(--color-gray-100);
+  border-bottom: 1px solid var(--color-gray-200);
+}
+
+.citation-code {
+  margin: 0;
+  padding: var(--spacing-md);
+  background: var(--color-gray-900);
+  overflow-x: auto;
+  max-height: 200px;
+}
+
+.citation-code code {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-100);
+  line-height: 1.5;
+  white-space: pre;
+}
+
+/* Related Entities */
+.related-entities {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--color-gray-100);
+}
+
+.related-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-500);
+  font-weight: var(--font-weight-medium);
+}
+
+.entity-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: var(--color-pale-cyan);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+  color: var(--color-primary);
+  cursor: default;
+}
+
+.entity-chip:hover {
+  background: var(--color-accent);
+}
+
+/* Follow-up Suggestions */
+.follow-up-suggestions {
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--color-gray-100);
+}
+
+.follow-up-label {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-500);
+  margin-bottom: var(--spacing-sm);
+}
+
+.follow-up-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+.follow-up-btn {
+  padding: var(--spacing-xs) var(--spacing-md);
+  background: var(--color-white);
+  border: 1px solid var(--color-gray-200);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+  color: var(--color-gray-600);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.follow-up-btn:hover {
+  border-color: var(--color-accent);
+  background: var(--color-pale-cyan);
+  color: var(--color-primary);
+}
+
 @media (max-width: 768px) {
   .question-grid {
     grid-template-columns: 1fr;
+  }
+
+  .chat-header {
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    align-items: flex-start;
+  }
+
+  .repo-select {
+    width: 100%;
+    min-width: auto;
+  }
+
+  .follow-up-btn {
+    max-width: 100%;
   }
 }

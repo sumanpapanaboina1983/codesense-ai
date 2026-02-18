@@ -34,6 +34,7 @@
   "dependencies": {
     "@alanse/mcp-neo4j-server": "^0.1.1",
     "@modelcontextprotocol/sdk": "^1.8.0",
+    "axios": "^1.6.0",
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "@xenova/transformers": "^2.17.2",

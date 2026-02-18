@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useEffect, useState, useCallback } from 'react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
   RefreshCw,
@@ -12,7 +12,6 @@ import {
   Sparkles,
   ChevronDown,
   ChevronRight,
-  ExternalLink,
   Zap,
   BookOpen,
   Code2,
@@ -27,12 +26,15 @@ import {
   Layers,
   PieChart,
   BarChart3,
+  X,
+  Book,
 } from 'lucide-react';
 import {
   getRepository,
   getReadinessReport,
   getCodebaseStatistics,
   getDiscoveredFeatures,
+  getModuleDependencies,
   enrichDocumentation,
   enrichTests,
   type RepositoryDetail as RepoDetail,
@@ -42,9 +44,14 @@ import {
   type BusinessFeature,
   type EnrichmentResponse,
 } from '../../services/api';
+import type { ModuleDependenciesResponse } from '../../types/api';
 import { analyzeRepository } from '../../api/client';
+import type { WikiGenerationOptions } from '../../api/client';
 import { LoadingSpinner } from '../../components/LoadingSpinner';
 import { StatusBadge } from '../../components/StatusBadge';
+import { ModuleDependencyDiagram } from '../../components/ModuleDependencyDiagram';
+import { WikiConfigurationPanel } from '../../components/WikiConfigurationPanel';
+import type { WikiConfiguration } from '../../components/WikiConfigurationPanel';
 import './RepositoryDetail.css';
 
 // Grade color mapping
@@ -66,7 +73,9 @@ const gradeBackgrounds: Record<string, string> = {
 
 export function RepositoryDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [repository, setRepository] = useState<RepoDetail | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
   const [readinessReport, setReadinessReport] = useState<AgenticReadinessResponse | null>(null);
   const [statistics, setStatistics] = useState<CodebaseStatisticsResponse | null>(null);
   const [discoveredFeatures, setDiscoveredFeatures] = useState<DiscoveredFeaturesResponse | null>(null);
@@ -77,8 +86,13 @@ export function RepositoryDetail() {
   const [featuresLoading, setFeaturesLoading] = useState(false);
   const [enrichmentLoading, setEnrichmentLoading] = useState<string | null>(null);
   const [enrichmentResult, setEnrichmentResult] = useState<EnrichmentResponse | null>(null);
+  const [moduleDependencies, setModuleDependencies] = useState<ModuleDependenciesResponse | null>(null);
+  const [modulesLoading, setModulesLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['overview', 'statistics', 'readiness']));
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [showWikiConfig, setShowWikiConfig] = useState(false);
+  const [wikiConfig, setWikiConfig] = useState<WikiConfiguration | null>(null);
 
   const toggleSection = (section: string) => {
     setExpandedSections((prev) => {
@@ -87,6 +101,18 @@ export function RepositoryDetail() {
         next.delete(section);
       } else {
         next.add(section);
+      }
+      return next;
+    });
+  };
+
+  const toggleFeatureGroup = (groupName: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupName)) {
+        next.delete(groupName);
+      } else {
+        next.add(groupName);
       }
       return next;
     });
@@ -144,6 +170,19 @@ export function RepositoryDetail() {
     }
   };
 
+  const fetchModuleDependencies = async () => {
+    if (!id) return;
+    setModulesLoading(true);
+    try {
+      const modules = await getModuleDependencies(id);
+      setModuleDependencies(modules);
+    } catch (err) {
+      console.error('Failed to fetch module dependencies:', err);
+    } finally {
+      setModulesLoading(false);
+    }
+  };
+
   const handleEnrichDocumentation = async () => {
     if (!id) return;
     setEnrichmentLoading('documentation');
@@ -189,13 +228,84 @@ export function RepositoryDetail() {
     }
   };
 
+  // Open wiki configuration modal before analysis
+  const openWikiConfig = () => {
+    setShowWikiConfig(true);
+  };
+
+  // Handle wiki configuration changes
+  const handleWikiConfigChange = useCallback((config: WikiConfiguration) => {
+    setWikiConfig(config);
+  }, []);
+
+  // Convert WikiConfiguration to API format
+  const convertWikiConfigToApiFormat = (config: WikiConfiguration | null): WikiGenerationOptions => {
+    if (!config) {
+      // Default configuration
+      return {
+        enabled: true,
+        depth: 'basic' as const,
+        include_core_systems: true,
+        include_features: true,
+        include_api_reference: false,
+        include_data_models: false,
+        include_code_structure: false,
+      };
+    }
+
+    if (config.mode === 'standard') {
+      // Standard mode - use section toggles
+      const enabledSections = config.sections.filter(s => s.enabled).map(s => s.id);
+      const depth = enabledSections.includes('class-docs') ? 'comprehensive' as const :
+                    enabledSections.includes('api-reference') ? 'standard' as const : 'basic' as const;
+      return {
+        enabled: true,
+        depth,
+        include_core_systems: enabledSections.includes('core-systems'),
+        include_features: enabledSections.includes('features'),
+        include_api_reference: enabledSections.includes('api-reference'),
+        include_data_models: enabledSections.includes('data-models'),
+        include_code_structure: enabledSections.includes('code-structure'),
+        include_integrations: enabledSections.includes('integrations'),
+        include_deployment: enabledSections.includes('deployment'),
+        include_getting_started: enabledSections.includes('getting-started'),
+        include_configuration: enabledSections.includes('configuration'),
+      };
+    } else {
+      // Advanced mode - custom pages
+      return {
+        enabled: true,
+        depth: 'custom' as const,
+        mode: 'advanced' as const,
+        context_notes: config.contextNotes.filter(n => n.trim()),
+        custom_pages: config.customPages.map(page => ({
+          title: page.title,
+          purpose: page.purpose,
+          notes: page.notes,
+          parent_id: page.parentId,
+          is_section: page.isSection,
+        })),
+      };
+    }
+  };
+
   const handleAnalyze = async () => {
     if (!id) return;
+    setAnalyzing(true);
+    setShowWikiConfig(false);
     try {
-      await analyzeRepository(id);
-      await fetchRepository();
+      // Trigger analysis with wiki configuration from modal
+      const wikiOptions = convertWikiConfigToApiFormat(wikiConfig);
+      await analyzeRepository(id, {
+        reset_graph: false,
+        wiki_options: wikiOptions,
+      });
+      // Navigate to Jobs page to show analysis progress
+      navigate('/jobs');
     } catch (err) {
       console.error('Failed to analyze repository:', err);
+      setAnalyzing(false);
+      alert('Failed to start analysis. Please try again.');
     }
   };
 
@@ -203,11 +313,27 @@ export function RepositoryDetail() {
     fetchRepository();
   }, [id]);
 
+  // Poll for status updates when analysis is running
+  useEffect(() => {
+    const isInProgress = repository?.analysis_status === 'running' ||
+                         repository?.analysis_status === 'pending' ||
+                         repository?.analysis_status === 'in_progress';
+
+    if (isInProgress) {
+      const interval = setInterval(() => {
+        fetchRepository();
+      }, 3000); // Poll every 3 seconds
+
+      return () => clearInterval(interval);
+    }
+  }, [repository?.analysis_status, id]);
+
   useEffect(() => {
     if (repository?.analysis_status === 'completed') {
       fetchReadinessReport();
       fetchStatistics();
       fetchDiscoveredFeatures();
+      fetchModuleDependencies();
     }
   }, [repository?.analysis_status]);
 
@@ -230,6 +356,9 @@ export function RepositoryDetail() {
   }
 
   const isAnalyzed = repository.analysis_status === 'completed';
+  const isAnalyzing = repository.analysis_status === 'running' ||
+                      repository.analysis_status === 'pending' ||
+                      repository.analysis_status === 'in_progress';
 
   return (
     <div className="repository-detail">
@@ -249,19 +378,18 @@ export function RepositoryDetail() {
           </div>
         </div>
         <div className="repo-header-actions">
-          <a
-            href={repository.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn btn-outline"
-          >
-            <ExternalLink size={16} />
-            View on {repository.platform}
-          </a>
           {isAnalyzed && (
-            <Link to={`/generate-brd?repository=${id}`} className="btn btn-primary">
-              <FileText size={16} />
-              Generate BRD
+            <Link
+              to={`/repositories/${id}/wiki`}
+              className={`btn ${repository.wiki_generated ? 'btn-success' : 'btn-outline'}`}
+            >
+              <BookOpen size={16} />
+              Documentation
+              {repository.wiki_generated ? (
+                <span className="doc-status generated">Generated</span>
+              ) : (
+                <span className="doc-status pending">Not Generated</span>
+              )}
             </Link>
           )}
         </div>
@@ -324,7 +452,20 @@ export function RepositoryDetail() {
               )}
             </div>
 
-            {!isAnalyzed && (
+            {isAnalyzing && (
+              <div className="action-banner analyzing">
+                <RefreshCw size={24} className="spin" />
+                <div className="banner-content">
+                  <h4>Analysis In Progress</h4>
+                  <p>Code analysis is running. This may take a few minutes for large repositories.</p>
+                </div>
+                <Link to="/jobs" className="btn btn-outline">
+                  View Progress
+                </Link>
+              </div>
+            )}
+
+            {!isAnalyzed && !isAnalyzing && (
               <div className="action-banner">
                 <AlertTriangle size={24} />
                 <div className="banner-content">
@@ -333,11 +474,20 @@ export function RepositoryDetail() {
                 </div>
                 <button
                   className="btn btn-primary"
-                  onClick={handleAnalyze}
-                  disabled={repository.status !== 'cloned'}
+                  onClick={openWikiConfig}
+                  disabled={repository.status !== 'cloned' || analyzing}
                 >
-                  <Play size={16} />
-                  Analyze Now
+                  {analyzing ? (
+                    <>
+                      <RefreshCw size={16} className="spin" />
+                      Starting Analysis...
+                    </>
+                  ) : (
+                    <>
+                      <Play size={16} />
+                      Analyze Now
+                    </>
+                  )}
                 </button>
               </div>
             )}
@@ -559,6 +709,75 @@ export function RepositoryDetail() {
         </section>
       )}
 
+      {/* Modules & Dependencies Section */}
+      {isAnalyzed && (
+        <section className="detail-section">
+          <div
+            className="section-header"
+            onClick={() => toggleSection('modules')}
+          >
+            <div className="section-title">
+              <Network size={20} />
+              <h2>Modules & Dependencies</h2>
+              {moduleDependencies && moduleDependencies.totalModules > 0 && (
+                <span className="module-count-badge">
+                  {moduleDependencies.totalModules} modules
+                </span>
+              )}
+            </div>
+            {expandedSections.has('modules') ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
+          </div>
+          {expandedSections.has('modules') && (
+            <div className="section-content">
+              {modulesLoading ? (
+                <div className="loading-inline">
+                  <RefreshCw size={20} className="spin" />
+                  <span>Loading module dependencies...</span>
+                </div>
+              ) : moduleDependencies && moduleDependencies.modules.length > 0 ? (
+                <div className="modules-content">
+                  {/* Module Statistics Summary */}
+                  <div className="module-stats-summary">
+                    <div className="module-stat-item">
+                      <span className="module-stat-value">{moduleDependencies.totalModules}</span>
+                      <span className="module-stat-label">Total Modules</span>
+                    </div>
+                    <div className="module-stat-item">
+                      <span className="module-stat-value">{moduleDependencies.avgDependencies}</span>
+                      <span className="module-stat-label">Avg Dependencies</span>
+                    </div>
+                    <div className="module-stat-item">
+                      <span className="module-stat-value">{moduleDependencies.dependencyGraph.length}</span>
+                      <span className="module-stat-label">Total Relationships</span>
+                    </div>
+                  </div>
+
+                  {/* Module Dependency Diagram */}
+                  <div className="module-diagram-container">
+                    <ModuleDependencyDiagram
+                      modules={moduleDependencies.modules}
+                      dependencyGraph={moduleDependencies.dependencyGraph}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state-inline">
+                  <Network size={32} />
+                  <p>No modules found in this repository</p>
+                  <p className="empty-hint">
+                    Module information is available for Java/Maven repositories with multi-module structure.
+                  </p>
+                  <button className="btn btn-primary" onClick={fetchModuleDependencies}>
+                    <RefreshCw size={16} />
+                    Load Modules
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
       {/* Business Features Section */}
       {isAnalyzed && (
         <section className="detail-section">
@@ -586,66 +805,76 @@ export function RepositoryDetail() {
                 </div>
               ) : discoveredFeatures && discoveredFeatures.features.length > 0 ? (
                 <div className="features-content">
-                  {/* Features Table */}
-                  <div className="features-table-container">
-                    <table className="features-table">
-                      <thead>
-                        <tr>
-                          <th>Feature</th>
-                          <th>Source</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {discoveredFeatures.features.map((feature) => {
-                          // Extract filename from file_path
-                          const fileName = feature.file_path
-                            ? feature.file_path.split('/').pop() || feature.file_path
-                            : null;
-                          const entryPoint = feature.entry_points[0] || '';
+                  {/* Grouped Features Accordion */}
+                  <div className="feature-groups-container">
+                    {discoveredFeatures.feature_groups.map((group) => (
+                      <div key={group.name} className="feature-group">
+                        <div
+                          className="feature-group-header"
+                          onClick={() => toggleFeatureGroup(group.name)}
+                        >
+                          {expandedGroups.has(group.name) ? (
+                            <ChevronDown size={18} />
+                          ) : (
+                            <ChevronRight size={18} />
+                          )}
+                          <span className="group-name">{group.name}</span>
+                          <span className="feature-count">{group.feature_count} feature{group.feature_count !== 1 ? 's' : ''}</span>
+                        </div>
+                        {expandedGroups.has(group.name) && (
+                          <div className="feature-group-content">
+                            {group.features.map((feature) => {
+                              const fileName = feature.file_path
+                                ? feature.file_path.split('/').pop() || feature.file_path
+                                : null;
+                              const entryPoint = feature.entry_points[0] || '';
 
-                          return (
-                            <tr
-                              key={feature.id}
-                              className={selectedFeature?.id === feature.id ? 'selected' : ''}
-                              onClick={() => setSelectedFeature(selectedFeature?.id === feature.id ? null : feature)}
-                            >
-                              <td className="feature-name-cell">
-                                <div className="feature-name">{feature.name}</div>
-                                <div className="feature-id">{feature.id}</div>
-                              </td>
-                              <td className="source-cell">
-                                <div className="source-info">
-                                  <span className={`source-badge source-${feature.discovery_source}`}>
-                                    {feature.discovery_source === 'service_cluster' ? 'service' : feature.discovery_source}
-                                  </span>
-                                  {fileName && (
-                                    <div className="source-file" title={feature.file_path || ''}>
-                                      {fileName}
-                                    </div>
-                                  )}
-                                  {entryPoint && (
-                                    <div className="source-entry-point">
-                                      {entryPoint}
-                                    </div>
-                                  )}
-                                </div>
-                              </td>
-                              <td>
-                                <Link
-                                  to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(feature.name)}&mode=verified`}
-                                  className="btn btn-small btn-primary"
-                                  onClick={(e) => e.stopPropagation()}
+                              return (
+                                <div
+                                  key={feature.id}
+                                  className={`feature-row ${selectedFeature?.id === feature.id ? 'selected' : ''}`}
+                                  onClick={() => setSelectedFeature(selectedFeature?.id === feature.id ? null : feature)}
                                 >
-                                  <FileText size={14} />
-                                  Generate BRD
-                                </Link>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                                  <div className="feature-row-main">
+                                    <div className="feature-name-cell">
+                                      <div className="feature-name">{feature.name}</div>
+                                      <div className="feature-id">{feature.id}</div>
+                                    </div>
+                                    <div className="source-cell">
+                                      <div className="source-info">
+                                        <span className={`source-badge source-${feature.discovery_source}`}>
+                                          {feature.discovery_source === 'service_cluster' ? 'service' : feature.discovery_source}
+                                        </span>
+                                        {fileName && (
+                                          <div className="source-file" title={feature.file_path || ''}>
+                                            {fileName}
+                                          </div>
+                                        )}
+                                        {entryPoint && (
+                                          <div className="source-entry-point">
+                                            {entryPoint}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <div className="feature-actions-cell">
+                                      <Link
+                                        to={`/generate-brd?repository=${id}&feature=${encodeURIComponent(feature.name)}&mode=verified`}
+                                        className="btn btn-small btn-primary"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <FileText size={14} />
+                                        Generate BRD
+                                      </Link>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
 
                   {/* Feature Detail Panel */}
@@ -881,6 +1110,35 @@ export function RepositoryDetail() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Critical Gaps Details - Show what the gaps are */}
+                  {readinessReport.summary.critical_gaps > 0 && readinessReport.recommendations.length > 0 && (
+                    <div className="critical-gaps-details">
+                      <h3><AlertTriangle size={18} /> Critical Gaps Breakdown</h3>
+                      <div className="gaps-grid">
+                        {readinessReport.recommendations
+                          .filter(rec => rec.priority === 'high' || rec.priority === 'medium')
+                          .map((rec, index) => (
+                            <div key={index} className={`gap-card priority-${rec.priority}`}>
+                              <div className="gap-header">
+                                <span className={`gap-priority priority-${rec.priority}`}>
+                                  {rec.priority.toUpperCase()}
+                                </span>
+                                <span className="gap-category">{rec.category}</span>
+                              </div>
+                              <h4 className="gap-title">{rec.title}</h4>
+                              <p className="gap-description">{rec.description}</p>
+                              <div className="gap-footer">
+                                <span className="gap-affected">
+                                  <AlertTriangle size={14} />
+                                  {rec.affected_count} entities affected
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Testing & Documentation Cards */}
                   <div className="assessment-cards">
@@ -1162,6 +1420,54 @@ export function RepositoryDetail() {
           to { transform: rotate(360deg); }
         }
       `}</style>
+
+      {/* Wiki Configuration Modal */}
+      {showWikiConfig && (
+        <div className="wiki-config-modal-overlay" onClick={() => setShowWikiConfig(false)}>
+          <div className="wiki-config-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="wiki-config-modal-header">
+              <div className="modal-title">
+                <Book size={24} />
+                <div>
+                  <h2>Configure Analysis</h2>
+                  <p>Set up wiki documentation options before analyzing {repository.name}</p>
+                </div>
+              </div>
+              <button className="close-btn" onClick={() => setShowWikiConfig(false)}>
+                <X size={20} />
+              </button>
+            </div>
+            <div className="wiki-config-modal-body">
+              <WikiConfigurationPanel
+                onConfigurationChange={handleWikiConfigChange}
+                repositoryName={repository.name}
+              />
+            </div>
+            <div className="wiki-config-modal-footer">
+              <button className="btn btn-outline" onClick={() => setShowWikiConfig(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={handleAnalyze}
+                disabled={analyzing}
+              >
+                {analyzing ? (
+                  <>
+                    <RefreshCw size={16} className="spin" />
+                    Starting Analysis...
+                  </>
+                ) : (
+                  <>
+                    <Play size={16} />
+                    Start Analysis
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

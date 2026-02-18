@@ -8,6 +8,32 @@ import { Neo4jError } from '../utils/errors.js';
 const logger = createContextLogger('StorageManager');
 
 /**
+ * Result of a file data deletion operation.
+ */
+export interface FileCleanupResult {
+    /** Number of nodes deleted */
+    nodesDeleted: number;
+    /** Number of relationships deleted */
+    relationshipsDeleted: number;
+    /** File path that was cleaned up */
+    filePath: string;
+}
+
+/**
+ * Result of a batch file deletion operation.
+ */
+export interface BatchCleanupResult {
+    /** Total nodes deleted across all files */
+    totalNodesDeleted: number;
+    /** Total relationships deleted across all files */
+    totalRelationshipsDeleted: number;
+    /** File paths that were cleaned up */
+    cleanedPaths: string[];
+    /** File paths that failed to clean up */
+    failedPaths: string[];
+}
+
+/**
  * Manages batch writing of nodes and relationships to the Neo4j database.
  */
 export class StorageManager {
@@ -34,6 +60,13 @@ export class StorageManager {
 
         // Assume input `nodes` are already deduplicated by the caller (Parser.collectResults)
         logger.info(`Saving ${nodes.length} unique nodes to database...`);
+
+        // Log node kind distribution for debugging
+        const kindCounts: Record<string, number> = {};
+        for (const node of nodes) {
+            kindCounts[node.kind] = (kindCounts[node.kind] || 0) + 1;
+        }
+        logger.info(`Node kinds: ${JSON.stringify(kindCounts)}`);
 
         const { removeClause, setLabelClauses } = generateNodeLabelCypher();
 
@@ -247,5 +280,203 @@ export class StorageManager {
             createdAt: rel.createdAt,
             properties: preparedProps,
         };
+    }
+
+    /**
+     * Deletes all nodes and relationships belonging to a specific file.
+     * Used for incremental indexing cleanup.
+     * @param repositoryId - The repository ID.
+     * @param filePath - The file path to delete data for.
+     * @returns FileCleanupResult with deletion counts.
+     */
+    async deleteFileData(repositoryId: string, filePath: string): Promise<FileCleanupResult> {
+        // First, count relationships that will be deleted
+        const countCypher = `
+            MATCH (n)
+            WHERE n.filePath = $filePath AND n.repositoryId = $repositoryId
+            OPTIONAL MATCH (n)-[r]-()
+            RETURN count(DISTINCT n) as nodeCount, count(r) as relCount
+        `;
+
+        // Then delete nodes and their relationships
+        const deleteCypher = `
+            MATCH (n)
+            WHERE n.filePath = $filePath AND n.repositoryId = $repositoryId
+            DETACH DELETE n
+            RETURN count(n) as nodesDeleted
+        `;
+
+        try {
+            // Get counts first
+            const countResult = await this.neo4jClient.runTransaction<any>(
+                countCypher,
+                { filePath, repositoryId },
+                'READ',
+                'StorageManager-CountFileData'
+            );
+
+            const countRecord = countResult.records?.[0];
+            const expectedNodes = countRecord?.get('nodeCount')?.toNumber?.() ?? countRecord?.get('nodeCount') ?? 0;
+            const expectedRels = countRecord?.get('relCount')?.toNumber?.() ?? countRecord?.get('relCount') ?? 0;
+
+            if (expectedNodes === 0) {
+                logger.debug(`No nodes found for file: ${filePath}`);
+                return { nodesDeleted: 0, relationshipsDeleted: 0, filePath };
+            }
+
+            // Delete nodes and relationships
+            const deleteResult = await this.neo4jClient.runTransaction<any>(
+                deleteCypher,
+                { filePath, repositoryId },
+                'WRITE',
+                'StorageManager-DeleteFileData'
+            );
+
+            const deleteRecord = deleteResult.records?.[0];
+            const nodesDeleted = deleteRecord?.get('nodesDeleted')?.toNumber?.() ?? deleteRecord?.get('nodesDeleted') ?? 0;
+
+            logger.debug(`Deleted ${nodesDeleted} nodes and ~${expectedRels} relationships for file: ${filePath}`);
+
+            return {
+                nodesDeleted,
+                relationshipsDeleted: expectedRels,
+                filePath,
+            };
+        } catch (error: any) {
+            logger.error(`Failed to delete file data for ${filePath}: ${error.message}`);
+            throw new Neo4jError(`Failed to delete file data: ${error.message}`, { originalError: error });
+        }
+    }
+
+    /**
+     * Batch deletes nodes and relationships for multiple files.
+     * More efficient than calling deleteFileData repeatedly.
+     * @param repositoryId - The repository ID.
+     * @param filePaths - Array of file paths to delete data for.
+     * @returns BatchCleanupResult with total counts and status.
+     */
+    async deleteFilesDataBatch(repositoryId: string, filePaths: string[]): Promise<BatchCleanupResult> {
+        if (filePaths.length === 0) {
+            return {
+                totalNodesDeleted: 0,
+                totalRelationshipsDeleted: 0,
+                cleanedPaths: [],
+                failedPaths: [],
+            };
+        }
+
+        logger.info(`Batch deleting data for ${filePaths.length} files in repository ${repositoryId}`);
+
+        let totalNodesDeleted = 0;
+        let totalRelationshipsDeleted = 0;
+        const cleanedPaths: string[] = [];
+        const failedPaths: string[] = [];
+
+        // Process in batches to avoid overwhelming the database
+        const batchSize = 50;
+        for (let i = 0; i < filePaths.length; i += batchSize) {
+            const batch = filePaths.slice(i, i + batchSize);
+
+            // Count relationships first
+            const countCypher = `
+                UNWIND $filePaths AS filePath
+                MATCH (n)
+                WHERE n.filePath = filePath AND n.repositoryId = $repositoryId
+                OPTIONAL MATCH (n)-[r]-()
+                RETURN sum(count(DISTINCT n)) as totalNodes, sum(count(r)) as totalRels
+            `;
+
+            // Delete nodes
+            const deleteCypher = `
+                UNWIND $filePaths AS filePath
+                MATCH (n)
+                WHERE n.filePath = filePath AND n.repositoryId = $repositoryId
+                DETACH DELETE n
+            `;
+
+            try {
+                // Get rough counts
+                const countResult = await this.neo4jClient.runTransaction<any>(
+                    `
+                    MATCH (n)
+                    WHERE n.filePath IN $filePaths AND n.repositoryId = $repositoryId
+                    OPTIONAL MATCH (n)-[r]-()
+                    RETURN count(DISTINCT n) as totalNodes, count(r) as totalRels
+                    `,
+                    { filePaths: batch, repositoryId },
+                    'READ',
+                    'StorageManager-CountBatch'
+                );
+
+                const countRecord = countResult.records?.[0];
+                const batchNodes = countRecord?.get('totalNodes')?.toNumber?.() ?? countRecord?.get('totalNodes') ?? 0;
+                const batchRels = countRecord?.get('totalRels')?.toNumber?.() ?? countRecord?.get('totalRels') ?? 0;
+
+                // Delete
+                await this.neo4jClient.runTransaction<any>(
+                    `
+                    MATCH (n)
+                    WHERE n.filePath IN $filePaths AND n.repositoryId = $repositoryId
+                    DETACH DELETE n
+                    `,
+                    { filePaths: batch, repositoryId },
+                    'WRITE',
+                    'StorageManager-DeleteBatch'
+                );
+
+                totalNodesDeleted += batchNodes;
+                totalRelationshipsDeleted += batchRels;
+                cleanedPaths.push(...batch);
+
+                logger.debug(`Deleted batch ${Math.floor(i / batchSize) + 1}: ${batchNodes} nodes`);
+
+            } catch (error: any) {
+                logger.error(`Failed to delete batch starting at index ${i}: ${error.message}`);
+                failedPaths.push(...batch);
+            }
+        }
+
+        logger.info(`Batch cleanup complete: ${totalNodesDeleted} nodes, ${totalRelationshipsDeleted} relationships deleted`);
+
+        return {
+            totalNodesDeleted,
+            totalRelationshipsDeleted,
+            cleanedPaths,
+            failedPaths,
+        };
+    }
+
+    /**
+     * Deletes all data for a repository (for full reset/reindex).
+     * @param repositoryId - The repository ID.
+     * @returns Total count of deleted nodes.
+     */
+    async deleteRepositoryData(repositoryId: string): Promise<number> {
+        logger.info(`Deleting all data for repository ${repositoryId}`);
+
+        const cypher = `
+            MATCH (n)
+            WHERE n.repositoryId = $repositoryId
+            DETACH DELETE n
+            RETURN count(n) as nodesDeleted
+        `;
+
+        try {
+            const result = await this.neo4jClient.runTransaction<any>(
+                cypher,
+                { repositoryId },
+                'WRITE',
+                'StorageManager-DeleteRepository'
+            );
+
+            const record = result.records?.[0];
+            const nodesDeleted = record?.get('nodesDeleted')?.toNumber?.() ?? record?.get('nodesDeleted') ?? 0;
+
+            logger.info(`Deleted ${nodesDeleted} nodes for repository ${repositoryId}`);
+            return nodesDeleted;
+        } catch (error: any) {
+            logger.error(`Failed to delete repository data: ${error.message}`);
+            throw new Neo4jError(`Failed to delete repository data: ${error.message}`, { originalError: error });
+        }
     }
 }

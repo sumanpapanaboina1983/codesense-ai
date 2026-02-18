@@ -76,6 +76,9 @@ RUN poetry config virtualenvs.create false
 # Install dependencies (without dev dependencies for production)
 RUN poetry install --no-dev --no-interaction --no-ansi
 
+# Fix permissions on Copilot SDK binary (it needs to be executable)
+RUN chmod +x /usr/local/lib/python3.11/site-packages/copilot/bin/copilot* || true
+
 # -----------------------------------------------------------------------------
 # Stage 3: Development image
 # -----------------------------------------------------------------------------
@@ -83,6 +86,9 @@ FROM dependencies AS development
 
 # Install dev dependencies
 RUN poetry install --no-interaction --no-ansi
+
+# Fix permissions on Copilot SDK binary (it needs to be executable)
+RUN chmod +x /usr/local/lib/python3.11/site-packages/copilot/bin/copilot* || true
 
 # Copy source code
 COPY . .
@@ -122,6 +128,9 @@ FROM base AS production
 COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=dependencies /usr/local/bin /usr/local/bin
 
+# Fix permissions on Copilot SDK binary (it needs to be executable)
+RUN chmod +x /usr/local/lib/python3.11/site-packages/copilot/bin/copilot* || true
+
 # Copy source code
 COPY src/ /app/src/
 COPY scripts/ /app/scripts/
@@ -136,6 +145,10 @@ RUN useradd --create-home --shell /bin/bash appuser \
 RUN mkdir -p /home/appuser/.copilot \
     && mkdir -p /home/appuser/.github/skills \
     && chown -R appuser:appuser /home/appuser
+
+# Create data directories for repository storage (must exist with correct permissions)
+RUN mkdir -p /data/repositories \
+    && chown -R appuser:appuser /data
 
 # Copy default MCP config template (will be overwritten by mount if provided)
 COPY --chown=appuser:appuser docker/mcp-config.docker.json /home/appuser/.copilot/mcp-config.json

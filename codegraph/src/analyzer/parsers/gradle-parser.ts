@@ -243,7 +243,21 @@ export class GradleParser {
                 }
             }
 
-            logger.debug(`Parsed settings.gradle: rootProject=${result.rootProjectName}, modules=${result.includedModules.join(', ')}`);
+            // Also try to match modules without leading colon (non-standard but sometimes used)
+            const simpleIncludePattern = /include\s*\(?\s*['"]([\w\-\.]+)['"]/g;
+            let simpleMatch;
+            while ((simpleMatch = simpleIncludePattern.exec(content)) !== null) {
+                const moduleName = simpleMatch[1];
+                if (moduleName && !moduleName.startsWith(':') && !result.includedModules.includes(moduleName)) {
+                    result.includedModules.push(moduleName);
+                }
+            }
+
+            logger.info(`Parsed settings.gradle: rootProject=${result.rootProjectName}, modules=[${result.includedModules.join(', ')}]`);
+            if (result.includedModules.length === 0) {
+                logger.warn('No modules found in settings.gradle. Content preview (first 500 chars):');
+                logger.warn(content.substring(0, 500));
+            }
 
             return result;
         } catch (error) {

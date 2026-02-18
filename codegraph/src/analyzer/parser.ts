@@ -1,7 +1,7 @@
 // src/analyzer/parser.ts
 import path from 'path';
 import fs from 'fs/promises';
-import { Project, ScriptKind } from 'ts-morph';
+import { Project, ScriptKind, ScriptTarget, ModuleKind, ModuleResolutionKind } from 'ts-morph';
 import { FileInfo } from '../scanner/file-scanner.js';
 import { AstNode, RelationshipInfo, SingleFileParseResult, FileNode, AnalysisContext } from './types.js';
  // Import FileNode
@@ -52,11 +52,22 @@ export class Parser {
     private analysisContext?: AnalysisContext; // Store analysis context for multi-repository support
 
     constructor() {
-        // Initialize Project using the main tsconfig.json
+        // Initialize Project with default compiler options (no tsconfig required)
+        // This allows parsing TS/JS files from any repository without requiring a tsconfig.json
         this.tsProject = new Project({
-            tsConfigFilePath: 'tsconfig.json',
-            // Optionally skip adding source files automatically if we add them manually later
-            // skipAddingFilesFromTsConfig: true,
+            compilerOptions: {
+                target: ScriptTarget.ES2020,
+                module: ModuleKind.ESNext,
+                moduleResolution: ModuleResolutionKind.NodeNext,
+                jsx: ts.JsxEmit.React as unknown as number,
+                esModuleInterop: true,
+                allowJs: true,
+                checkJs: false,
+                strict: false,
+                skipLibCheck: true,
+                resolveJsonModule: true,
+            },
+            skipAddingFilesFromTsConfig: true,
         });
         this.pythonParser = new PythonAstParser();
         this.cppParser = new CCppParser();
@@ -70,7 +81,7 @@ export class Parser {
 
         // this.sqlParser = new SqlParser(); // Temporarily disabled
         // Removed tsParser instantiation
-        logger.info('Parser initialized (SQL parser temporarily disabled).');
+        logger.info('Parser initialized with default compiler options (SQL parser temporarily disabled).');
     }
 
     /**

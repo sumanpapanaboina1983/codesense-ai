@@ -8,26 +8,36 @@ import {
   CheckCircle,
   XCircle,
   Clock,
-  Activity,
 } from 'lucide-react';
-import { getRepositories, getHealth } from '../api/client';
-import type { Repository, HealthStatus } from '../types';
+import { getRepositories } from '../api/client';
+import type { Repository } from '../types';
 import { LoadingSpinner } from '../components/LoadingSpinner';
+
+// Format date safely - handles null/undefined/invalid dates
+const formatDate = (dateStr: string | null | undefined): string => {
+  if (!dateStr) return 'N/A';
+  try {
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return 'N/A';
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  } catch {
+    return 'N/A';
+  }
+};
 
 export function Dashboard() {
   const [repositories, setRepositories] = useState<Repository[]>([]);
-  const [health, setHealth] = useState<HealthStatus | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [repos, healthStatus] = await Promise.all([
-          getRepositories(),
-          getHealth(),
-        ]);
+        const repos = await getRepositories();
         setRepositories(repos);
-        setHealth(healthStatus);
       } catch (error) {
         console.error('Failed to fetch data:', error);
       } finally {
@@ -53,7 +63,7 @@ export function Dashboard() {
   ).length;
 
   return (
-    <div className="dashboard">
+    <div className="dashboard" style={{ paddingTop: '1rem' }}>
       {/* Stats Grid */}
       <div className="grid grid-cols-4">
         <div className="stats-card">
@@ -97,52 +107,6 @@ export function Dashboard() {
         </div>
       </div>
 
-      {/* System Status */}
-      <div className="card">
-        <div className="card-header">
-          <h3>System Status</h3>
-        </div>
-        <div className="card-body">
-          <div className="grid grid-cols-3">
-            <div className="stats-card">
-              <div className={`stats-icon ${health?.mcp_servers.neo4j ? 'success' : 'error'}`}>
-                <Activity size={24} />
-              </div>
-              <div className="stats-content">
-                <span className="stats-title">Neo4j MCP</span>
-                <span className={`badge ${health?.mcp_servers.neo4j ? 'badge-success' : 'badge-error'}`}>
-                  {health?.mcp_servers.neo4j ? 'Connected' : 'Disconnected'}
-                </span>
-              </div>
-            </div>
-
-            <div className="stats-card">
-              <div className={`stats-icon ${health?.mcp_servers.filesystem ? 'success' : 'error'}`}>
-                <Activity size={24} />
-              </div>
-              <div className="stats-content">
-                <span className="stats-title">Filesystem MCP</span>
-                <span className={`badge ${health?.mcp_servers.filesystem ? 'badge-success' : 'badge-error'}`}>
-                  {health?.mcp_servers.filesystem ? 'Connected' : 'Disconnected'}
-                </span>
-              </div>
-            </div>
-
-            <div className="stats-card">
-              <div className={`stats-icon ${health?.copilot_available ? 'success' : 'error'}`}>
-                <Activity size={24} />
-              </div>
-              <div className="stats-content">
-                <span className="stats-title">Copilot SDK</span>
-                <span className={`badge ${health?.copilot_available ? 'badge-success' : 'badge-error'}`}>
-                  {health?.copilot_available ? 'Available' : 'Unavailable'}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* Quick Actions */}
       <div className="card">
         <div className="card-header">
@@ -150,7 +114,7 @@ export function Dashboard() {
         </div>
         <div className="card-body">
           <div className="grid grid-cols-4">
-            <Link to="/repositories" className="action-card">
+            <Link to="/analyze" className="action-card">
               <div className="action-icon" style={{ background: 'var(--color-accent)', color: 'var(--color-primary)' }}>
                 <GitBranch size={28} />
               </div>
@@ -160,7 +124,7 @@ export function Dashboard() {
               </div>
             </Link>
 
-            <Link to="/workflow/brd" className="action-card">
+            <Link to="/generate-brd" className="action-card">
               <div className="action-icon">
                 <FileText size={28} />
               </div>
@@ -170,7 +134,7 @@ export function Dashboard() {
               </div>
             </Link>
 
-            <Link to="/workflow/epics" className="action-card">
+            <Link to="/generate-epic" className="action-card">
               <div className="action-icon">
                 <ListTree size={28} />
               </div>
@@ -180,7 +144,7 @@ export function Dashboard() {
               </div>
             </Link>
 
-            <Link to="/workflow/stories" className="action-card">
+            <Link to="/generate-backlogs" className="action-card">
               <div className="action-icon">
                 <ClipboardList size={28} />
               </div>
@@ -252,7 +216,7 @@ export function Dashboard() {
                         {repo.analysis_status.replace('_', ' ')}
                       </span>
                     </td>
-                    <td>{new Date(repo.updated_at).toLocaleDateString()}</td>
+                    <td>{formatDate(repo.updated_at)}</td>
                   </tr>
                 ))}
               </tbody>

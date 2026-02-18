@@ -324,3 +324,46 @@ export interface EnrichmentResult {
   errors: { entity_id: string; error: string }[];
   enrichment_type: 'documentation' | 'testing';
 }
+
+// =============================================================================
+// Chat / Code Assistant Types
+// =============================================================================
+
+export interface Citation {
+  id: string;
+  file_path: string;
+  line_start: number;
+  line_end: number;
+  snippet: string;
+  entity_name?: string;
+  relevance_score: number;
+}
+
+export interface RelatedEntity {
+  name: string;
+  type: string;
+  file_path: string;
+}
+
+export interface ChatRequest {
+  question: string;
+  conversation_id?: string;
+}
+
+export interface ChatResponse {
+  answer: string;
+  citations: Citation[];
+  related_entities: RelatedEntity[];
+  follow_up_suggestions: string[];
+  conversation_id: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  citations?: Citation[];
+  related_entities?: RelatedEntity[];
+  follow_up_suggestions?: string[];
+  timestamp: Date;
+}

@@ -164,6 +164,77 @@ class RepositorySummary(BaseModel):
 # Analysis Run Models
 # =============================================================================
 
+class WikiCustomPage(BaseModel):
+    """Custom page definition for advanced wiki mode."""
+    title: str = Field(..., description="Page title")
+    purpose: str = Field(..., description="What this page should document")
+    notes: Optional[str] = Field(None, description="Additional instructions for AI")
+    parent_id: Optional[str] = Field(None, description="Parent section ID")
+    is_section: bool = Field(False, description="Whether this is a section (folder) or page")
+
+
+class WikiGenerationOptions(BaseModel):
+    """Options for wiki documentation generation during analysis."""
+    enabled: bool = Field(
+        True,
+        description="Generate wiki documentation after analysis"
+    )
+    depth: str = Field(
+        "basic",
+        description="Generation depth: quick, basic, standard, comprehensive, custom"
+    )
+    mode: str = Field(
+        "standard",
+        description="Generation mode: standard (section toggles) or advanced (custom pages)"
+    )
+    # Standard mode options
+    include_core_systems: bool = Field(
+        True,
+        description="Generate Core Systems documentation (dynamically discovered)"
+    )
+    include_features: bool = Field(
+        True,
+        description="Generate Features documentation (dynamically discovered)"
+    )
+    include_api_reference: bool = Field(
+        False,
+        description="Generate API Reference documentation"
+    )
+    include_data_models: bool = Field(
+        False,
+        description="Generate Data Models documentation"
+    )
+    include_code_structure: bool = Field(
+        False,
+        description="Generate detailed Code Structure (module-level) documentation"
+    )
+    include_integrations: bool = Field(
+        False,
+        description="Generate Integrations documentation"
+    )
+    include_deployment: bool = Field(
+        False,
+        description="Generate Deployment documentation"
+    )
+    include_getting_started: bool = Field(
+        True,
+        description="Generate Getting Started guide"
+    )
+    include_configuration: bool = Field(
+        True,
+        description="Generate Configuration documentation"
+    )
+    # Advanced mode options
+    context_notes: list[str] = Field(
+        default_factory=list,
+        description="Context notes to guide AI generation (max 10, each max 10000 chars)"
+    )
+    custom_pages: list[WikiCustomPage] = Field(
+        default_factory=list,
+        description="Custom page definitions (max 30 for standard, 80 for enterprise)"
+    )
+
+
 class AnalysisRunCreate(BaseModel):
     """Request model for creating an analysis run."""
     reset_graph: bool = Field(
@@ -173,6 +244,11 @@ class AnalysisRunCreate(BaseModel):
     triggered_by: str = Field(
         "api",
         description="What triggered this analysis"
+    )
+    # Wiki generation options
+    wiki_options: WikiGenerationOptions = Field(
+        default_factory=WikiGenerationOptions,
+        description="Wiki documentation generation options"
     )
 
 

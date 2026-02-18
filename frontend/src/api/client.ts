@@ -9,6 +9,8 @@ import type {
   JiraCreateResult,
   HealthStatus,
   AnalysisRun,
+  ChatRequest,
+  ChatResponse,
 } from '../types';
 
 // Use the backend proxy URL that works both in development and Docker
@@ -65,10 +67,11 @@ export const updateRepository = async (
 
 export const deleteRepository = async (
   id: string,
-  deleteFiles?: boolean
+  deleteFiles?: boolean,
+  force?: boolean
 ): Promise<void> => {
   await api.delete(`/repositories/${id}`, {
-    params: { delete_files: deleteFiles },
+    params: { delete_files: deleteFiles, force },
   });
 };
 
@@ -82,13 +85,52 @@ export const syncRepository = async (
   return response.data;
 };
 
+// Custom page definition for advanced wiki mode
+export interface WikiCustomPage {
+  title: string;
+  purpose: string;
+  notes?: string;
+  parent_id?: string;
+  is_section?: boolean;
+}
+
+// Wiki generation options for analysis
+export interface WikiGenerationOptions {
+  enabled?: boolean;
+  depth?: 'quick' | 'basic' | 'standard' | 'comprehensive' | 'custom';
+  mode?: 'standard' | 'advanced';
+  // Standard mode options
+  include_core_systems?: boolean;
+  include_features?: boolean;
+  include_api_reference?: boolean;
+  include_data_models?: boolean;
+  include_code_structure?: boolean;
+  include_integrations?: boolean;
+  include_deployment?: boolean;
+  include_getting_started?: boolean;
+  include_configuration?: boolean;
+  // Advanced mode options
+  context_notes?: string[];
+  custom_pages?: WikiCustomPage[];
+}
+
+// Analysis request options
+export interface AnalyzeOptions {
+  reset_graph?: boolean;
+  wiki_options?: WikiGenerationOptions;
+}
+
 export const analyzeRepository = async (
   id: string,
-  resetGraph?: boolean
+  options?: AnalyzeOptions
 ): Promise<AnalysisRun> => {
-  const response = await api.post(`/repositories/${id}/analyze`, null, {
-    params: { reset_graph: resetGraph },
-  });
+  // Build request body
+  const requestBody = options ? {
+    reset_graph: options.reset_graph ?? false,
+    wiki_options: options.wiki_options,
+  } : undefined;
+
+  const response = await api.post(`/repositories/${id}/analyze`, requestBody);
   return response.data;
 };
 
@@ -105,6 +147,47 @@ export const getAnalysisRun = async (
 ): Promise<AnalysisRun> => {
   const response = await api.get(
     `/repositories/${repositoryId}/analyses/${analysisId}`
+  );
+  return response.data;
+};
+
+// Upload Repository ZIP
+export interface UploadRepositoryResponse {
+  success: boolean;
+  data: Repository;
+  files_extracted: number;
+  message: string;
+}
+
+export const uploadRepositoryZip = async (
+  file: File,
+  name?: string,
+  autoAnalyze: boolean = true,
+  onProgress?: (progress: number) => void
+): Promise<UploadRepositoryResponse> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (name) {
+    formData.append('name', name);
+  }
+  formData.append('auto_analyze', String(autoAnalyze));
+
+  const response = await axios.post(
+    `${API_BASE_URL}/api/v1/repositories/upload`,
+    formData,
+    {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+      onUploadProgress: (progressEvent) => {
+        if (onProgress && progressEvent.total) {
+          const percentCompleted = Math.round(
+            (progressEvent.loaded * 100) / progressEvent.total
+          );
+          onProgress(percentCompleted);
+        }
+      },
+    }
   );
   return response.data;
 };
@@ -136,6 +219,24 @@ export const createJiraIssues = async (
 ): Promise<JiraCreateResult> => {
   const response = await api.post('/jira/create', data);
   return response.data;
+};
+
+// Code Assistant Chat
+export const sendChatMessage = async (
+  repositoryId: string,
+  question: string,
+  conversationId?: string
+): Promise<ChatResponse> => {
+  const requestData: ChatRequest = {
+    question,
+    conversation_id: conversationId,
+  };
+  const response = await api.post(
+    `/repositories/${repositoryId}/chat`,
+    requestData
+  );
+  // API returns { success: true, data: {...} }
+  return response.data.data || response.data;
 };
 
 export default api;

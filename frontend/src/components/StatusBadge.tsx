@@ -9,10 +9,13 @@ export function StatusBadge({ status, type = 'default' }: StatusBadgeProps) {
       switch (status) {
         case 'completed':
           return 'badge-success';
+        case 'running':
+        case 'pending':
         case 'in_progress':
           return 'badge-running';
         case 'failed':
           return 'badge-error';
+        case 'not_analyzed':
         case 'not_started':
         default:
           return 'badge-pending';
@@ -24,6 +27,7 @@ export function StatusBadge({ status, type = 'default' }: StatusBadgeProps) {
       case 'completed':
         return 'badge-success';
       case 'cloning':
+      case 'running':
       case 'in_progress':
         return 'badge-running';
       case 'failed':

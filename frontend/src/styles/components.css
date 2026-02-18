@@ -467,13 +467,24 @@
 /* Modal */
 .modal-overlay {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   background: rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
   padding: var(--spacing-lg);
+  /* Account for sidebar - center in the content area, not the full viewport */
+  padding-left: calc(260px + var(--spacing-lg));
+}
+
+@media (max-width: 768px) {
+  .modal-overlay {
+    padding-left: var(--spacing-lg);
+  }
 }
 
 .modal {
@@ -484,6 +495,18 @@
   max-height: 90vh;
   overflow: hidden;
   box-shadow: var(--shadow-xl);
+  animation: modalSlideIn 0.2s ease-out;
+}
+
+@keyframes modalSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .modal-header {

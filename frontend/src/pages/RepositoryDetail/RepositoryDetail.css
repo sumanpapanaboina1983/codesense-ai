@@ -1,6 +1,7 @@
 .repository-detail {
   max-width: 1200px;
   margin: 0 auto;
+  padding-top: 1rem;
 }
 
 /* Header */
@@ -49,6 +50,39 @@
 .repo-header-actions {
   display: flex;
   gap: var(--spacing-sm);
+}
+
+.repo-header-actions .btn {
+  position: relative;
+}
+
+.doc-status {
+  font-size: var(--font-size-xs);
+  padding: 0.125rem 0.5rem;
+  border-radius: var(--border-radius);
+  margin-left: 0.5rem;
+  font-weight: var(--font-weight-medium);
+}
+
+.doc-status.generated {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.doc-status.pending {
+  background: var(--color-warning-light);
+  color: var(--color-warning);
+}
+
+.btn-success {
+  background: var(--color-success);
+  color: var(--color-white);
+  border-color: var(--color-success);
+}
+
+.btn-success:hover {
+  background: var(--color-success-light);
+  color: var(--color-success);
 }
 
 /* Sections */
@@ -146,7 +180,11 @@
   background: rgba(245, 158, 11, 0.1);
   border: 1px solid rgba(245, 158, 11, 0.3);
   border-radius: var(--border-radius);
+}
+
+.action-banner > svg {
   color: var(--color-warning);
+  flex-shrink: 0;
 }
 
 .action-banner .banner-content {
@@ -155,12 +193,23 @@
 
 .action-banner h4 {
   margin: 0 0 var(--spacing-xs) 0;
+  color: var(--color-primary);
 }
 
 .action-banner p {
   margin: 0;
   font-size: var(--font-size-sm);
-  opacity: 0.9;
+  color: var(--color-text-secondary);
+}
+
+/* Analyzing state */
+.action-banner.analyzing {
+  background: rgba(37, 226, 204, 0.1);
+  border-color: rgba(37, 226, 204, 0.3);
+}
+
+.action-banner.analyzing > svg {
+  color: var(--color-teal);
 }
 
 /* Grade Badge */
@@ -279,6 +328,111 @@
 .summary-label {
   font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
+}
+
+/* Critical Gaps Details */
+.critical-gaps-details {
+  background: var(--color-bg-secondary);
+  border-radius: var(--border-radius-lg);
+  padding: var(--spacing-lg);
+  border-left: 4px solid var(--color-danger);
+}
+
+.critical-gaps-details h3 {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin: 0 0 var(--spacing-lg) 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-md);
+}
+
+.gaps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--spacing-md);
+}
+
+.gap-card {
+  background: var(--color-bg-primary);
+  border-radius: var(--border-radius);
+  padding: var(--spacing-md);
+  border-left: 3px solid var(--color-warning);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.gap-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.gap-card.priority-high {
+  border-left-color: var(--color-danger);
+}
+
+.gap-card.priority-medium {
+  border-left-color: var(--color-warning);
+}
+
+.gap-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-xs);
+}
+
+.gap-priority {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.gap-priority.priority-high {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--color-danger);
+}
+
+.gap-priority.priority-medium {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--color-warning-dark);
+}
+
+.gap-category {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  text-transform: capitalize;
+}
+
+.gap-title {
+  margin: var(--spacing-xs) 0;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.gap-description {
+  margin: 0 0 var(--spacing-sm) 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.gap-footer {
+  padding-top: var(--spacing-xs);
+  border-top: 1px solid var(--color-border-light);
+}
+
+.gap-affected {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.gap-affected svg {
+  color: var(--color-warning);
 }
 
 /* Assessment Cards */
@@ -793,6 +947,99 @@
   gap: var(--spacing-lg);
 }
 
+/* =============================================================================
+   Feature Groups Accordion
+   ============================================================================= */
+
+.feature-groups-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.feature-group {
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+}
+
+.feature-group-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  background: var(--color-bg-secondary);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.feature-group-header:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.feature-group-header svg {
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.group-name {
+  font-weight: 600;
+  flex: 1;
+  color: var(--color-text-primary);
+}
+
+.feature-count {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  background: var(--color-bg-tertiary);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.feature-group-content {
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-primary);
+}
+
+.feature-row {
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.feature-row:last-child {
+  border-bottom: none;
+}
+
+.feature-row:hover {
+  background: var(--color-bg-secondary);
+}
+
+.feature-row.selected {
+  background: var(--color-primary-light);
+}
+
+.feature-row-main {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.feature-row-main .feature-name-cell {
+  flex: 1;
+  min-width: 0;
+}
+
+.feature-row-main .source-cell {
+  flex: 1;
+  min-width: 0;
+}
+
+.feature-actions-cell {
+  flex-shrink: 0;
+}
+
 /* Features Summary */
 .features-summary {
   display: flex;
@@ -1168,4 +1415,180 @@
   font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
   margin-top: var(--spacing-xs);
+}
+
+/* =============================================================================
+   Modules & Dependencies Section
+   ============================================================================= */
+
+.module-count-badge {
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--color-primary);
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  margin-left: var(--spacing-sm);
+}
+
+.modules-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.module-stats-summary {
+  display: flex;
+  gap: var(--spacing-xl);
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--color-bg-secondary);
+  border-radius: var(--border-radius);
+  justify-content: center;
+}
+
+.module-stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.module-stat-value {
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.module-stat-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.module-diagram-container {
+  background: var(--color-bg-secondary);
+  border-radius: var(--border-radius);
+  padding: var(--spacing-md);
+  min-height: 500px;
+}
+
+/* Responsive adjustments for module stats */
+@media (max-width: 600px) {
+  .module-stats-summary {
+    flex-direction: column;
+    gap: var(--spacing-md);
+  }
+
+  .module-diagram-container {
+    min-height: 400px;
+  }
+}
+
+/* =============================================================================
+   Wiki Configuration Modal
+   ============================================================================= */
+
+.wiki-config-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+  backdrop-filter: blur(4px);
+}
+
+.wiki-config-modal {
+  width: 100%;
+  max-width: 700px;
+  max-height: 90vh;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 25px 80px rgba(0, 0, 0, 0.4);
+}
+
+.wiki-config-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 20px 24px;
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.wiki-config-modal-header .modal-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.wiki-config-modal-header .modal-title svg {
+  color: var(--color-primary);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.wiki-config-modal-header .modal-title h2 {
+  margin: 0 0 4px 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.wiki-config-modal-header .modal-title p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.wiki-config-modal-header .close-btn {
+  padding: 8px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.wiki-config-modal-header .close-btn:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+}
+
+.wiki-config-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.wiki-config-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 24px;
+  background: var(--color-bg-secondary);
+  border-top: 1px solid var(--color-border);
+}
+
+.wiki-config-modal-footer .btn {
+  min-width: 120px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .wiki-config-modal {
+    max-width: 100%;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+
+  .wiki-config-modal-overlay {
+    padding: 0;
+  }
 }

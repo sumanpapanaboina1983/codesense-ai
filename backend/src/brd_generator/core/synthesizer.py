@@ -202,6 +202,7 @@ class LLMSynthesizer:
         feature_request: str,
         detail_level: str = "standard",
         custom_sections: Optional[list[dict]] = None,
+        default_section_words: int = 300,
     ) -> BRDDocument:
         """
         Generate BRD using pre-gathered context (CONTEXT-FIRST approach).
@@ -221,6 +222,7 @@ class LLMSynthesizer:
             feature_request: The feature to generate BRD for
             detail_level: 'concise', 'standard', or 'detailed'
             custom_sections: Optional list of custom section definitions
+            default_section_words: Default target word count per section (100-2000)
 
         Returns:
             BRDDocument generated with explicit context
@@ -255,8 +257,8 @@ class LLMSynthesizer:
         # Detail level instructions
         detail_instructions = self._get_detail_level_instructions(detail_level)
 
-        # Build sections template
-        sections_template = self._build_sections_template(custom_sections, context)
+        # Build sections template with target word counts
+        sections_template = self._build_sections_template(custom_sections, context, default_section_words)
 
         # Build prompt with explicit context - REVERSE ENGINEERING existing code
         prompt = f"""You are an expert Business Analyst reverse engineering an EXISTING feature to create a BRD.
@@ -425,12 +427,14 @@ CRITICAL: Document what EXISTS, not what should be built. Reference actual compo
         self,
         custom_sections: Optional[list[dict]],
         context: "AggregatedContext",
+        default_section_words: int = 300,
     ) -> str:
         """Build sections template for BRD output.
 
         Args:
-            custom_sections: User-defined sections with name and description
+            custom_sections: User-defined sections with name, description, and target_words
             context: Aggregated context for component references
+            default_section_words: Default target word count per section (used if not specified per-section)
 
         Returns:
             Formatted sections template for the prompt
@@ -444,8 +448,14 @@ CRITICAL: Document what EXISTS, not what should be built. Reference actual compo
             name = section.get("name", f"Section {i}")
             description = section.get("description", "")
             required = section.get("required", True)
+            # Get target words: use section-specific if provided, otherwise use default
+            target_words = section.get("target_words", default_section_words)
 
             sections_text += f"## {i}. {name}\n"
+
+            # Add target length instruction
+            sections_text += f"**Target Length:** Approximately {target_words} words for this section.\n\n"
+
             if description:
                 # Use the description as guidance
                 sections_text += f"**Guidelines:** {description}\n\n"

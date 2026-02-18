@@ -19,7 +19,7 @@ const mainNavItems = [
   { path: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { path: '/chat', icon: MessageSquare, label: 'Code Assistant' },
   { path: '/repositories', icon: Library, label: 'Repositories' },
-  { path: '/analyze', icon: Plus, label: 'Add Repository' },
+  { path: '/repositories', icon: Plus, label: 'Add Repository' },
   { path: '/jobs', icon: Activity, label: 'Analysis Jobs' },
 ];
 
