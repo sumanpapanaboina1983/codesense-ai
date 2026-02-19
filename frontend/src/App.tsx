@@ -10,6 +10,7 @@ import {
   GenerateEPIC,
   GenerateBacklogs,
   RepositoryDetail,
+  ContextExplorer,
 } from './pages';
 import { Repositories } from './pages/Repositories';
 import { Wiki } from './pages/Wiki';
@@ -30,6 +31,7 @@ function App() {
           <Route path="/generate-brd" element={<GenerateBRD />} />
           <Route path="/generate-epic" element={<GenerateEPIC />} />
           <Route path="/generate-backlogs" element={<GenerateBacklogs />} />
+          <Route path="/context-explorer" element={<ContextExplorer />} />
           <Route path="/repositories/:id" element={<RepositoryDetail />} />
           <Route path="/repositories/:id/wiki/*" element={<Wiki />} />
           <Route path="/repositories/:id/chat" element={<Chat />} />

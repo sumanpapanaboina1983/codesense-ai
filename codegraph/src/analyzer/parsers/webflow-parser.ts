@@ -18,6 +18,7 @@ import {
     ActionReference
 } from '../types.js';
 import { ensureTempDir, getTempFilePath, generateInstanceId, generateEntityId } from '../parser-utils.js';
+import { BusinessRuleDetector } from './BusinessRuleDetector.js';
 
 const logger = createContextLogger('WebFlowParser');
 
@@ -146,16 +147,33 @@ export class WebFlowParser {
                }
            });
 
+           // Business Rule Detection (Phase 3)
+           // Extract decision states, transition guards, validators from WebFlow
+           const businessRuleDetector = new BusinessRuleDetector(normalizedPath, 'SpringWebFlow');
+           const businessRuleResult = businessRuleDetector.detectWebFlowRules(
+               content,
+               flowNode.properties.flowId
+           );
+
+           // Merge business rule nodes
+           const businessRuleNodes = businessRuleDetector.getAllNodes();
+           const businessRuleRelationships = businessRuleDetector.getRelationships();
+
+           logger.debug(
+               `[WebFlowParser] Business rules detected for ${fileName}: ` +
+               `${businessRuleResult.totalRulesDetected} rules`
+           );
+
+           return {
+               filePath: normalizedPath,
+               nodes: [...nodes, ...businessRuleNodes],
+               relationships: [...relationships, ...businessRuleRelationships]
+           };
+
        } catch (error: any) {
            logger.error(`Error parsing Web Flow XML: ${error.message}`);
            throw error;
        }
-
-       return {
-           filePath: normalizedPath,
-           nodes,
-           relationships
-       };
    }
 
    /**

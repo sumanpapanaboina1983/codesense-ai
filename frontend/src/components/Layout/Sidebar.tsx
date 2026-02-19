@@ -11,6 +11,7 @@ import {
   Code2,
   Plus,
   Library,
+  Search,
 } from 'lucide-react';
 import { useAppStore } from '../../store/appStore';
 import './Sidebar.css';
@@ -24,6 +25,7 @@ const mainNavItems = [
 ];
 
 const workflowNavItems = [
+  { path: '/context-explorer', icon: Search, label: 'Context Explorer' },
   { path: '/generate-brd', icon: FileText, label: 'Generate BRD' },
   { path: '/generate-epic', icon: Layers, label: 'Generate EPIC' },
   { path: '/generate-backlogs', icon: ListTodo, label: 'Generate Backlogs' },

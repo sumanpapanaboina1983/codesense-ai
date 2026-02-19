@@ -15,7 +15,10 @@ from .jobs_routes import router as jobs_router
 from .chat_routes import router as chat_router
 from .analysis_callback_routes import router as callback_router
 from .wiki_routes import router as wiki_router
+from .context_routes import router as context_router
+from .flow_routes import router as flow_router, set_flow_service
 from ..core.generator import BRDGenerator
+from ..core.feature_flow import FeatureFlowService
 from ..database.config import init_db, close_db
 from ..services.repository_service import RepositoryService
 from ..utils.logger import get_logger, setup_logging
@@ -114,6 +117,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Wiki service initialized without Copilot SDK - using template fallback")
     logger.info("Wiki service using Filesystem MCP for source code (same as BRD generator)")
 
+    # Initialize Feature Flow Service for end-to-end traceability
+    # Provides feature flow extraction from UI to database
+    flow_service = FeatureFlowService(generator.neo4j_client)
+    set_flow_service(flow_service)
+    logger.info("Feature Flow service initialized for end-to-end traceability")
+
     logger.info("BRD Generator API started successfully")
 
     yield
@@ -161,6 +170,8 @@ def create_app() -> FastAPI:
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(callback_router, prefix="/api/v1")
     app.include_router(wiki_router, prefix="/api/v1")
+    app.include_router(context_router, prefix="/api/v1")
+    app.include_router(flow_router, prefix="/api/v1")
 
     # Root endpoint
     @app.get("/", tags=["Root"])

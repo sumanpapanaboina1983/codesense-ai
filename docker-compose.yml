@@ -55,8 +55,8 @@ services:
       # Backend URL for callback reporting (internal Docker network)
       - BACKEND_CALLBACK_URL=http://backend:8000
     volumes:
-      # Mount for analyzing local repositories
-      - ./repos:/app/repos:ro
+      # Mount for analyzing local repositories (same path as backend's /codebase)
+      - ./repos:/codebase:ro
       # Temp directory for git clones
       - codegraph_temp:/tmp/codegraph
       # Shared repository storage (same as backend) for analyzing uploaded/cloned repos

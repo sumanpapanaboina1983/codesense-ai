@@ -6,3 +6,4 @@ export { GenerateBRD } from './GenerateBRD';
 export { GenerateEPIC } from './GenerateEPIC';
 export { GenerateBacklogs } from './GenerateBacklogs';
 export { RepositoryDetail } from './RepositoryDetail';
+export { ContextExplorer } from './ContextExplorer';

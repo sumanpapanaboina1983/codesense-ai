@@ -20,6 +20,12 @@ class EvidenceType(str, Enum):
     TEST_COVERAGE = "test_coverage"  # Test coverage data
     AST_ANALYSIS = "ast_analysis"  # AST-based structural analysis
 
+    # Business Rule Evidence (Phase 3 - Structurally Extracted)
+    BUSINESS_RULE = "business_rule"  # Structurally extracted business rule (weight: 1.0)
+    VALIDATION_CONSTRAINT = "validation_constraint"  # @NotNull, @Min, etc. (weight: 0.95)
+    GUARD_CLAUSE = "guard_clause"  # Precondition guards (weight: 0.90)
+    TEST_ASSERTION = "test_assertion"  # Test-derived rules (weight: 0.85)
+
     # Secondary Evidence (Configuration/Architecture)
     CONFIGURATION = "configuration"  # Config files (yml, json, properties)
     DEPENDENCY = "dependency"  # Dependency relationships
@@ -244,9 +250,14 @@ class Claim(BaseModel):
 
         if supporting:
             # Weight by evidence type importance
+            # Business rule evidence has highest weights as it's structurally extracted
             weights = {
+                EvidenceType.BUSINESS_RULE: 1.0,  # Structurally extracted from code
                 EvidenceType.CODE_REFERENCE: 1.0,
+                EvidenceType.VALIDATION_CONSTRAINT: 0.95,  # Explicit annotations
+                EvidenceType.GUARD_CLAUSE: 0.90,  # Clear preconditions
                 EvidenceType.CALL_GRAPH: 0.9,
+                EvidenceType.TEST_ASSERTION: 0.85,  # Tested behavior
                 EvidenceType.DATA_FLOW: 0.85,
                 EvidenceType.DEPENDENCY: 0.8,
                 EvidenceType.ARCHITECTURE: 0.75,

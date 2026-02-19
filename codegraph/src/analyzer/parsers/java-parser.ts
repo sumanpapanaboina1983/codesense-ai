@@ -10,8 +10,24 @@ import { ParserError } from '../../utils/errors.js';
 import { FileInfo } from '../../scanner/file-scanner.js';
 import { AstNode, RelationshipInfo, SingleFileParseResult, InstanceCounter, PackageDeclarationNode, ImportDeclarationNode, JavaClassNode, JavaInterfaceNode, JavaMethodNode, JavaFieldNode, JavaEnumNode, MethodSignature, ParameterInfo, AnnotationInfo, generateSignatureString, generateShortSignature, DocTag, DocumentationInfo } from '../types.js'; // Added JavaEnumNode, signature types, doc types
 import { ensureTempDir, getTempFilePath, generateInstanceId, generateEntityId } from '../parser-utils.js';
+import { BusinessRuleDetector } from './BusinessRuleDetector.js';
+import { SQLExtractor, SQLStatementNode } from './sql-extractor.js';
 
 const logger = createContextLogger('JavaParser');
+
+/**
+ * Represents a method invocation with full context.
+ */
+export interface MethodInvocationInfo {
+    methodName: string;
+    targetObject?: string;
+    arguments: string[];
+    lineNumber: number;
+    endLine: number;
+    columnStart: number;
+    columnEnd: number;
+    fullText: string;
+}
 
 // Helper to get node text safely
 function getNodeText(node: Parser.SyntaxNode | null | undefined): string {
@@ -434,6 +450,21 @@ function buildJavaMethodSignature(
     return signature;
 }
 
+/**
+ * Represents a method invocation node for Neo4j.
+ */
+export interface MethodInvocationNode extends AstNode {
+    kind: 'MethodInvocation';
+    language: 'Java';
+    properties: {
+        methodName: string;
+        targetObject?: string;
+        arguments: string[];
+        argumentCount: number;
+        fullInvocationText: string;
+    };
+}
+
 // --- Tree-sitter Visitor ---
 class JavaAstVisitor {
     public nodes: AstNode[] = [];
@@ -443,6 +474,8 @@ class JavaAstVisitor {
     private now: string = new Date().toISOString();
     private currentPackage: string | null = null;
     private currentClassOrInterfaceId: string | null = null; // Store entityId
+    private currentMethodId: string | null = null; // Track current method for invocation context
+    private methodInvocations: Map<string, MethodInvocationInfo[]> = new Map(); // Method invocations by parent method
 
     constructor(private filepath: string, private sourceText: string) {
         const filename = path.basename(filepath);
@@ -498,11 +531,110 @@ class JavaAstVisitor {
                 case 'field_declaration':
                      this.visitFieldDeclaration(node);
                      break;
+                case 'method_invocation':
+                     this.visitMethodInvocation(node);
+                     break;
                 // No need to explicitly handle body nodes here, main visit loop handles recursion
             }
         } catch (error: any) {
              logger.warn(`[JavaAstVisitor] Error visiting node type ${node.type} in ${this.filepath}: ${error.message}`);
         }
+    }
+
+    /**
+     * Extract method invocations with line numbers and arguments.
+     */
+    private visitMethodInvocation(node: Parser.SyntaxNode) {
+        if (!this.currentMethodId) return; // Only process invocations within a method context
+
+        const location = getNodeLocation(node);
+
+        // Extract method name
+        const methodNameNode = node.childForFieldName('name');
+        const methodName = getNodeText(methodNameNode);
+        if (!methodName) return;
+
+        // Extract target object (if method call is on an object)
+        const objectNode = node.childForFieldName('object');
+        const targetObject = getNodeText(objectNode) || undefined;
+
+        // Extract arguments
+        const argumentsNode = node.childForFieldName('arguments');
+        const args: string[] = [];
+        if (argumentsNode) {
+            for (const arg of argumentsNode.namedChildren) {
+                args.push(getNodeText(arg) || '');
+            }
+        }
+
+        const invocationInfo: MethodInvocationInfo = {
+            methodName,
+            targetObject,
+            arguments: args,
+            lineNumber: location.startLine,
+            endLine: location.endLine,
+            columnStart: location.startColumn,
+            columnEnd: location.endColumn,
+            fullText: getNodeText(node),
+        };
+
+        // Store invocation for later processing
+        if (!this.methodInvocations.has(this.currentMethodId)) {
+            this.methodInvocations.set(this.currentMethodId, []);
+        }
+        this.methodInvocations.get(this.currentMethodId)!.push(invocationInfo);
+
+        // Create INVOKES relationship if we can resolve the target
+        // Note: Full resolution happens in Pass 2, but we record the invocation here
+        const invocationEntityId = generateEntityId('methodinvocation',
+            `${this.filepath}:${location.startLine}:${methodName}`);
+
+        const invocationNode: MethodInvocationNode = {
+            id: generateInstanceId(this.instanceCounter, 'methodinvocation', methodName,
+                { line: location.startLine, column: location.startColumn }),
+            entityId: invocationEntityId,
+            kind: 'MethodInvocation',
+            name: methodName,
+            filePath: this.filepath,
+            language: 'Java',
+            ...location,
+            createdAt: this.now,
+            parentId: this.currentMethodId,
+            properties: {
+                methodName,
+                targetObject,
+                arguments: args,
+                argumentCount: args.length,
+                fullInvocationText: getNodeText(node).substring(0, 200), // Limit size
+            },
+        };
+
+        this.nodes.push(invocationNode);
+
+        // Create INVOKES relationship from current method to this invocation
+        const relEntityId = generateEntityId('invokes',
+            `${this.currentMethodId}:${invocationEntityId}`);
+        this.relationships.push({
+            id: generateInstanceId(this.instanceCounter, 'invokes',
+                `${this.currentMethodId}:${invocationNode.id}`),
+            entityId: relEntityId,
+            type: 'INVOKES',
+            sourceId: this.currentMethodId,
+            targetId: invocationEntityId,
+            properties: {
+                lineNumber: location.startLine,
+                arguments: args,
+            },
+            weight: 7,
+            createdAt: this.now,
+        });
+    }
+
+    /**
+     * Get all method invocations recorded by this visitor.
+     */
+    public getMethodInvocations(): Map<string, MethodInvocationInfo[]> {
+        return this.methodInvocations;
     }
 
     private visitPackageDeclaration(node: Parser.SyntaxNode) {
@@ -631,6 +763,12 @@ class JavaAstVisitor {
             parentId: this.currentClassOrInterfaceId,
             // Signature information
             signatureInfo,
+            // Full signature string for display
+            properties: {
+                signature: signatureInfo.signature,
+                shortSignature: signatureInfo.shortSignature,
+                parameterTypes: signatureInfo.parameters.map(p => p.type),
+            },
             // Documentation
             documentation: documentationInfo?.summary,
             docComment: documentationInfo?.rawComment,
@@ -653,6 +791,21 @@ class JavaAstVisitor {
             sourceId: this.currentClassOrInterfaceId, targetId: methodEntityId,
             createdAt: this.now, weight: 8,
         });
+
+        // Set current method context for invocation tracking
+        const previousMethodId = this.currentMethodId;
+        this.currentMethodId = methodEntityId;
+
+        // Visit method body to capture invocations
+        const bodyNode = node.childForFieldName('body');
+        if (bodyNode) {
+            for (const child of bodyNode.namedChildren) {
+                this.visit(child);
+            }
+        }
+
+        // Restore previous method context
+        this.currentMethodId = previousMethodId;
     }
 
     // Separate visitor for constructors
@@ -688,7 +841,12 @@ class JavaAstVisitor {
             entityId: methodEntityId, kind: 'JavaMethod', name: name, // Treat as a method
             filePath: this.filepath, language: 'Java', ...location, createdAt: this.now,
             parentId: this.currentClassOrInterfaceId,
-            properties: { isConstructor: true }, // Add property to distinguish
+            properties: {
+                isConstructor: true,
+                signature: signatureInfo.signature,
+                shortSignature: signatureInfo.shortSignature,
+                parameterTypes: signatureInfo.parameters.map(p => p.type),
+            },
             // Signature information
             signatureInfo,
             // Documentation
@@ -710,6 +868,21 @@ class JavaAstVisitor {
             sourceId: this.currentClassOrInterfaceId, targetId: methodEntityId,
             createdAt: this.now, weight: 8,
         });
+
+        // Set current method context for invocation tracking
+        const previousMethodId = this.currentMethodId;
+        this.currentMethodId = methodEntityId;
+
+        // Visit constructor body to capture invocations
+        const bodyNode = node.childForFieldName('body');
+        if (bodyNode) {
+            for (const child of bodyNode.namedChildren) {
+                this.visit(child);
+            }
+        }
+
+        // Restore previous method context
+        this.currentMethodId = previousMethodId;
     }
 
 
@@ -829,6 +1002,29 @@ export class JavaParser {
     }
 
     /**
+     * Find a tree-sitter node by line number.
+     */
+    private findNodeByLine(rootNode: Parser.SyntaxNode, line: number): Parser.SyntaxNode | null {
+        const zeroBasedLine = line - 1;
+
+        const search = (node: Parser.SyntaxNode): Parser.SyntaxNode | null => {
+            if (node.startPosition.row === zeroBasedLine &&
+                (node.type === 'method_declaration' || node.type === 'constructor_declaration')) {
+                return node;
+            }
+
+            for (const child of node.namedChildren) {
+                const result = search(child);
+                if (result) return result;
+            }
+
+            return null;
+        };
+
+        return search(rootNode);
+    }
+
+    /**
      * Parses a single Java file.
      */
     async parseFile(file: FileInfo): Promise<string> {
@@ -844,10 +1040,55 @@ export class JavaParser {
             const visitor = new JavaAstVisitor(normalizedFilePath, fileContent);
             visitor.visit(tree.rootNode);
 
+            // Business Rule Detection (Phase 3)
+            // Extract validation constraints, guard clauses, conditional logic, etc.
+            const businessRuleDetector = new BusinessRuleDetector(normalizedFilePath, 'Java');
+            const businessRuleResult = businessRuleDetector.detectAll(tree.rootNode, fileContent);
+
+            // Merge business rule nodes and relationships
+            const businessRuleNodes = businessRuleDetector.getAllNodes();
+            const businessRuleRelationships = businessRuleDetector.getRelationships();
+
+            logger.debug(
+                `[JavaParser] Business rules detected for ${file.name}: ` +
+                `${businessRuleResult.totalRulesDetected} rules ` +
+                `(constraints: ${businessRuleResult.validationConstraints.length}, ` +
+                `guards: ${businessRuleResult.guardClauses.length}, ` +
+                `conditionals: ${businessRuleResult.conditionalLogic.length})`
+            );
+
+            // SQL Statement Extraction (Feature Traceability)
+            // Extract SQL statements from @Query, createQuery, string literals
+            const instanceCounter: InstanceCounter = { count: 0 };
+            const sqlExtractor = new SQLExtractor(normalizedFilePath, instanceCounter);
+
+            // Extract SQL for each method
+            const methodNodes = visitor.nodes.filter(n => n.kind === 'JavaMethod');
+            const sqlNodes: SQLStatementNode[] = [];
+            const sqlRelationships: RelationshipInfo[] = [];
+
+            for (const methodNode of methodNodes) {
+                // Find the method in the tree by line number
+                const methodTreeNode = this.findNodeByLine(tree.rootNode, methodNode.startLine);
+                if (methodTreeNode) {
+                    const { nodes: methodSqlNodes, relationships: methodSqlRels } =
+                        sqlExtractor.extractFromNode(methodTreeNode, fileContent, methodNode.entityId);
+                    sqlNodes.push(...methodSqlNodes);
+                    sqlRelationships.push(...methodSqlRels);
+                }
+            }
+
+            if (sqlNodes.length > 0) {
+                logger.debug(
+                    `[JavaParser] SQL statements detected for ${file.name}: ` +
+                    `${sqlNodes.length} statements`
+                );
+            }
+
             const result: SingleFileParseResult = {
                 filePath: normalizedFilePath,
-                nodes: visitor.nodes,
-                relationships: visitor.relationships,
+                nodes: [...visitor.nodes, ...businessRuleNodes, ...sqlNodes],
+                relationships: [...visitor.relationships, ...businessRuleRelationships, ...sqlRelationships],
             };
 
             await fs.writeFile(tempFilePath, JSON.stringify(result, null, 2));

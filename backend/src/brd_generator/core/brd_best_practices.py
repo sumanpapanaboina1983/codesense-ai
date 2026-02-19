@@ -110,6 +110,132 @@ sequenceDiagram
         "required": False,
     },
     {
+        "name": "Technical Architecture",
+        "description": """Document the complete end-to-end technical flow from UI to database.
+This section provides FULL TRACEABILITY for architects, developers, and QA teams.
+
+**Required content:**
+
+1. **Data Flow Visualization**: Show the path UI → Flow → Controller → Service → DAO → Database
+
+2. **UI Layer (Entry Point)**:
+   - JSP/HTML files handling user input
+   - Form fields and their input types
+   - Client-side validations
+   - File path and line numbers
+
+3. **Flow/Navigation Layer** (if applicable):
+   - WebFlow definitions or navigation rules
+   - State transitions and conditions
+   - View-to-action mappings
+
+4. **Controller Layer (Request Processing)**:
+   - Action/Controller class name
+   - Method handling the request
+   - Method signature with parameters
+   - File path and line numbers (e.g., lines 234-267)
+   - Request validations performed
+
+5. **Service Layer (Business Logic)**:
+   - Service/Builder/Validator classes
+   - Business logic methods with signatures
+   - Business rules applied (list each rule)
+   - Data transformations performed
+   - File path and line numbers
+
+6. **Data Access Layer (Persistence)**:
+   - DAO/Repository class name
+   - Persistence methods (persist, update, delete, find)
+   - File path and line numbers
+
+7. **Database Layer**:
+   - SQL operations (INSERT, UPDATE, SELECT, DELETE)
+   - Table names and affected columns
+   - Database constraints (PK, FK, UNIQUE, NOT NULL)
+
+8. **Field-Level Data Mapping** (table showing):
+   | UI Field | Entity Property | DB Column | Data Type | Required | Validations |
+
+This section is AUTO-GENERATED from code graph traversal when available.
+LLM should preserve auto-generated content and enhance with additional context.""",
+        "required": False,
+    },
+    {
+        "name": "Implementation Mapping",
+        "description": """Provide comprehensive tabular mapping of operations to implementation components.
+This section enables IMPACT ANALYSIS and ESTIMATION for development teams.
+
+**Required tables:**
+
+1. **Operation-to-Implementation Mapping**:
+   Maps each business operation to implementing code at each architectural layer.
+
+   | Operation | UI | Controller | Service | DAO | Database |
+   |-----------|-----|------------|---------|-----|----------|
+   | Save Entity | Form.jsp:45 | saveAction():234 | build():45 | persist():123 | INSERT table |
+   | Validate Entity | - | validate():189 | validator():78 | - | SELECT table |
+
+   Format: `ClassName.methodName():lineNumber` or `filename:lineNumber`
+
+2. **Field-Level Data Mapping**:
+   Traces each data field from UI through all layers to database.
+
+   | Field | UI Location | Entity Property | DB Column | Validations | Required |
+   |-------|-------------|-----------------|-----------|-------------|----------|
+   | entityName | Form.jsp:45 | LegalEntity.name | entity_name | @NotNull, @Size | Yes |
+   | taxId | Form.jsp:52 | LegalEntity.taxId | tax_id | @Pattern | Yes |
+
+3. **Validation Checkpoints** (where each business rule is enforced):
+
+   | Layer | Component | Validation Rule | Line |
+   |-------|-----------|-----------------|------|
+   | Controller | EntityAction.validate() | Required fields check | 189 |
+   | Service | EntityValidator.validateTaxId() | Tax ID format validation | 78 |
+
+**Legend:**
+- Format for code references: `ClassName.methodName():lineNumber`
+- UI references: `filename:lineNumber`
+- Database operations: `OPERATION tableName`
+
+This section is AUTO-GENERATED from code graph traversal when available.
+LLM should preserve auto-generated mappings and add any missing operations discovered from code analysis.""",
+        "required": False,
+    },
+    {
+        "name": "Data Model",
+        "description": """Document the data entities and their relationships involved in this feature.
+
+**Required content:**
+
+1. **Entity Classes**:
+   For each entity involved:
+   - Entity class name and file path
+   - Key fields with data types
+   - Validation annotations (@NotNull, @Size, @Pattern, etc.)
+   - Relationships to other entities (OneToMany, ManyToOne, etc.)
+
+2. **Database Tables**:
+   | Table | Column | Type | Constraints | Description |
+   |-------|--------|------|-------------|-------------|
+   | les_legal_entity | entity_id | NUMBER | PK | Primary key |
+   | les_legal_entity | entity_name | VARCHAR(100) | NOT NULL | Entity display name |
+   | les_legal_entity | tax_id | VARCHAR(20) | UNIQUE | Tax identification |
+
+3. **Entity Relationships** (if applicable):
+   ```
+   LegalEntity (1) --- (N) Address
+   LegalEntity (N) --- (N) Contact
+   ```
+
+4. **Audit Fields** (if applicable):
+   - created_date, created_by
+   - updated_date, updated_by
+   - version (optimistic locking)
+
+This section helps developers understand the data structures and QA teams design test data.""",
+        "required": False,
+    },
+    {
         "name": "Assumptions and Constraints",
         "description": """State conditions assumed by the system and any limitations.
 Helps developers and testers align with edge-case behavior.
@@ -202,8 +328,17 @@ Your BRD must include these sections in order:
 4. **Actors and System Interactions** - User roles and systems involved
 5. **Business Process Flow** - Step-by-step flow with numbered lists
 6. **Sequence Diagram** - Mermaid diagram of interactions (if complex)
-7. **Assumptions and Constraints** - Conditions assumed and limitations
-8. **Acceptance Criteria** - Measurable pass/fail conditions
+7. **Technical Architecture** - End-to-end flow from UI to database with file paths/line numbers (AUTO-GENERATED when available)
+8. **Data Model** - Entity classes, database tables, and relationships
+9. **Implementation Mapping** - Tabular mapping of operations to code (AUTO-GENERATED when available)
+10. **Assumptions and Constraints** - Conditions assumed and limitations
+11. **Acceptance Criteria** - Measurable pass/fail conditions
+
+## Special Instructions for Technical Sections (7, 8, 9)
+When auto-generated content is provided for Technical Architecture and Implementation Mapping:
+- PRESERVE the auto-generated file paths, line numbers, and component mappings
+- ENHANCE with additional context discovered from code analysis
+- These sections provide TRACEABILITY for developers and QA teams
 
 Remember: Write for BUSINESS readers, not developers. Focus on WHAT, not HOW.
 """

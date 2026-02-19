@@ -20,6 +20,71 @@ export interface PageRankResult {
 }
 
 /**
+ * Represents a step in a call chain.
+ */
+export interface CallChainStep {
+    nodeId: string;
+    name: string;
+    type: string;
+    filePath: string;
+    startLine: number;
+    endLine: number;
+    signature?: string;
+    layer: 'UI' | 'Flow' | 'Controller' | 'Service' | 'DAO' | 'Entity' | 'Unknown';
+    depth: number;
+    relationship?: string;
+    arguments?: string[];
+}
+
+/**
+ * Result of call chain extraction.
+ */
+export interface CallChainResult {
+    entryPoint: CallChainStep;
+    chain: CallChainStep[];
+    sqlStatements: Array<{
+        statementType: string;
+        tableName: string;
+        rawSql: string;
+        lineNumber: number;
+        sourceMethod: string;
+    }>;
+    dataBindings: Array<{
+        uiField: string;
+        entityField: string;
+        lineNumber: number;
+    }>;
+}
+
+/**
+ * Result of feature flow extraction.
+ */
+export interface FeatureFlowResult {
+    flowName: string;
+    layers: {
+        ui: CallChainStep[];
+        flow: CallChainStep[];
+        controller: CallChainStep[];
+        service: CallChainStep[];
+        dao: CallChainStep[];
+        entity: CallChainStep[];
+    };
+    callChain: CallChainStep[];
+    sqlOperations: Array<{
+        statementType: string;
+        tableName: string;
+        columns: string[];
+        sourceMethod: string;
+        lineNumber: number;
+    }>;
+    dataFlow: Array<{
+        uiField: string;
+        entityField: string;
+        dbColumn?: string;
+    }>;
+}
+
+/**
  * Computes and stores graph-based relevance scores for code components.
  */
 export class GraphAlgorithms {
@@ -255,7 +320,7 @@ export class GraphAlgorithms {
 
         const executionTimeMs = Date.now() - startTime;
         logger.info(`Native PageRank computed: ${nodesUpdated} nodes updated in ${executionTimeMs}ms`);
-        logger.info(`Top components by PageRank: ${topNodes.slice(0, 5).map(n => `${n.name}(${n.pageRank.toFixed(3)})`).join(', ')}`);
+        logger.info(`Top components by PageRank: ${topNodes.slice(0, 5).map((n: { name: string; pageRank: number }) => `${n.name}(${n.pageRank.toFixed(3)})`).join(', ')}`);
 
         return { nodesUpdated, executionTimeMs, topNodes };
     }
@@ -285,5 +350,361 @@ export class GraphAlgorithms {
         );
 
         logger.info('Dependency depth computed');
+    }
+
+    /**
+     * Extract call chain starting from an entry point.
+     * Traverses downstream through CALLS, INVOKES, HAS_METHOD relationships.
+     *
+     * @param entryPointId - Entity ID of the starting point (JSP, Controller, etc.)
+     * @param maxDepth - Maximum traversal depth (default: 10)
+     * @returns CallChainResult with ordered steps
+     */
+    async extractCallChain(entryPointId: string, maxDepth: number = 10): Promise<CallChainResult> {
+        logger.info(`Extracting call chain from: ${entryPointId}`);
+
+        const callChainQuery = `
+            MATCH (entry {entityId: $entryPointId})
+            OPTIONAL MATCH path = (entry)-[:CALLS|INVOKES|HAS_METHOD|FLOW_EXECUTES_ACTION|ACTION_CALLS_SERVICE*1..${maxDepth}]->(target)
+            WITH entry, path, target,
+                 [node IN nodes(path) | {
+                     nodeId: node.entityId,
+                     name: node.name,
+                     type: labels(node)[0],
+                     filePath: node.filePath,
+                     startLine: node.startLine,
+                     endLine: node.endLine,
+                     signature: COALESCE(node.signature, node.signatureInfo.signature, ''),
+                     layer: CASE
+                         WHEN 'JSPPage' IN labels(node) THEN 'UI'
+                         WHEN 'WebFlowDefinition' IN labels(node) OR 'FlowState' IN labels(node) THEN 'Flow'
+                         WHEN toLower(node.name) ENDS WITH 'action' OR toLower(node.name) ENDS WITH 'controller' THEN 'Controller'
+                         WHEN toLower(node.name) CONTAINS 'dao' OR toLower(node.name) CONTAINS 'repository' THEN 'DAO'
+                         WHEN toLower(node.name) CONTAINS 'service' OR toLower(node.name) CONTAINS 'builder' THEN 'Service'
+                         ELSE 'Unknown'
+                     END
+                 }] AS pathNodes,
+                 [rel IN relationships(path) | {
+                     type: type(rel),
+                     lineNumber: rel.lineNumber,
+                     arguments: rel.arguments
+                 }] AS pathRels
+            RETURN entry, pathNodes, pathRels
+            ORDER BY length(path)
+        `;
+
+        try {
+            const result = await this.neo4jClient.runTransaction<any>(
+                callChainQuery,
+                { entryPointId },
+                'READ',
+                'GraphAlgorithms-ExtractCallChain'
+            );
+
+            const entryRecord = result.records?.[0];
+            if (!entryRecord) {
+                logger.warn(`No entry point found for: ${entryPointId}`);
+                return { entryPoint: {} as CallChainStep, chain: [], sqlStatements: [], dataBindings: [] };
+            }
+
+            const entry = entryRecord.get('entry');
+            const entryStep: CallChainStep = {
+                nodeId: entry.properties.entityId,
+                name: entry.properties.name,
+                type: entry.labels[0],
+                filePath: entry.properties.filePath,
+                startLine: entry.properties.startLine?.toNumber?.() ?? entry.properties.startLine ?? 0,
+                endLine: entry.properties.endLine?.toNumber?.() ?? entry.properties.endLine ?? 0,
+                signature: entry.properties.signature || '',
+                layer: this.determineLayer(entry.labels[0], entry.properties.name),
+                depth: 0,
+            };
+
+            // Collect unique chain steps
+            const chainMap = new Map<string, CallChainStep>();
+            for (const record of result.records || []) {
+                const pathNodes = record.get('pathNodes') || [];
+                const pathRels = record.get('pathRels') || [];
+
+                for (let i = 0; i < pathNodes.length; i++) {
+                    const node = pathNodes[i];
+                    if (node && node.nodeId && !chainMap.has(node.nodeId)) {
+                        chainMap.set(node.nodeId, {
+                            nodeId: node.nodeId,
+                            name: node.name,
+                            type: node.type,
+                            filePath: node.filePath,
+                            startLine: node.startLine?.toNumber?.() ?? node.startLine ?? 0,
+                            endLine: node.endLine?.toNumber?.() ?? node.endLine ?? 0,
+                            signature: node.signature,
+                            layer: node.layer || this.determineLayer(node.type, node.name),
+                            depth: i + 1,
+                            relationship: pathRels[i]?.type,
+                            arguments: pathRels[i]?.arguments,
+                        });
+                    }
+                }
+            }
+
+            const chain = Array.from(chainMap.values()).sort((a, b) => a.depth - b.depth);
+
+            // Get SQL statements for DAO methods
+            const sqlStatements = await this.getSQLStatementsForChain(chain);
+
+            // Get data bindings for UI fields
+            const dataBindings = await this.getDataBindingsForEntry(entryPointId);
+
+            return { entryPoint: entryStep, chain, sqlStatements, dataBindings };
+        } catch (error: any) {
+            logger.error(`Call chain extraction failed: ${error.message}`);
+            return { entryPoint: {} as CallChainStep, chain: [], sqlStatements: [], dataBindings: [] };
+        }
+    }
+
+    /**
+     * Get SQL statements executed by methods in the call chain.
+     */
+    private async getSQLStatementsForChain(chain: CallChainStep[]): Promise<Array<{
+        statementType: string;
+        tableName: string;
+        rawSql: string;
+        lineNumber: number;
+        sourceMethod: string;
+    }>> {
+        const daoMethods = chain.filter(step => step.layer === 'DAO' || step.layer === 'Service');
+        if (daoMethods.length === 0) return [];
+
+        const methodIds = daoMethods.map(m => m.nodeId);
+
+        const sqlQuery = `
+            MATCH (method)-[:EXECUTES_SQL]->(sql:SQLStatement)
+            WHERE method.entityId IN $methodIds
+            RETURN sql.statementType AS statementType,
+                   sql.tableName AS tableName,
+                   sql.rawSql AS rawSql,
+                   sql.lineNumber AS lineNumber,
+                   method.name AS sourceMethod
+        `;
+
+        try {
+            const result = await this.neo4jClient.runTransaction<any>(
+                sqlQuery,
+                { methodIds },
+                'READ',
+                'GraphAlgorithms-GetSQLStatements'
+            );
+
+            return (result.records || []).map((r: any) => ({
+                statementType: r.get('statementType'),
+                tableName: r.get('tableName'),
+                rawSql: r.get('rawSql'),
+                lineNumber: r.get('lineNumber')?.toNumber?.() ?? r.get('lineNumber') ?? 0,
+                sourceMethod: r.get('sourceMethod'),
+            }));
+        } catch (error: any) {
+            logger.warn(`SQL statement extraction failed: ${error.message}`);
+            return [];
+        }
+    }
+
+    /**
+     * Get data bindings (UI field -> Entity field) for an entry point.
+     */
+    private async getDataBindingsForEntry(entryPointId: string): Promise<Array<{
+        uiField: string;
+        entityField: string;
+        lineNumber: number;
+    }>> {
+        const bindingQuery = `
+            MATCH (entry {entityId: $entryPointId})-[:HAS_FIELD_BINDING|CONTAINS_FORM*1..3]->(binding:FormFieldBinding)
+            OPTIONAL MATCH (binding)-[:BINDS_TO]->(field:JavaField)
+            RETURN binding.fieldPath AS uiField,
+                   COALESCE(field.name, binding.fieldName) AS entityField,
+                   binding.lineNumber AS lineNumber
+        `;
+
+        try {
+            const result = await this.neo4jClient.runTransaction<any>(
+                bindingQuery,
+                { entryPointId },
+                'READ',
+                'GraphAlgorithms-GetDataBindings'
+            );
+
+            return (result.records || []).map((r: any) => ({
+                uiField: r.get('uiField'),
+                entityField: r.get('entityField'),
+                lineNumber: r.get('lineNumber')?.toNumber?.() ?? r.get('lineNumber') ?? 0,
+            }));
+        } catch (error: any) {
+            logger.warn(`Data binding extraction failed: ${error.message}`);
+            return [];
+        }
+    }
+
+    /**
+     * Extract complete feature flow from JSP through to database.
+     *
+     * @param jspPageId - Entity ID of the JSP page
+     * @returns FeatureFlowResult with layers and data flow
+     */
+    async extractFeatureFlow(jspPageId: string): Promise<FeatureFlowResult> {
+        logger.info(`Extracting feature flow from: ${jspPageId}`);
+
+        const flowQuery = `
+            // Start from JSP page
+            MATCH (jsp:JSPPage {entityId: $jspPageId})
+
+            // Find forms and their actions
+            OPTIONAL MATCH (jsp)-[:CONTAINS_FORM]->(form:JSPForm)
+
+            // Find WebFlows connected to the JSP
+            OPTIONAL MATCH (flow:WebFlowDefinition)-[:FLOW_RENDERS_VIEW]->(jsp)
+
+            // Find Controllers/Actions
+            OPTIONAL MATCH (flow)-[:FLOW_EXECUTES_ACTION]->(action)
+            WHERE action:FlowAction OR action:JavaMethod
+
+            // Find parent class for action methods
+            OPTIONAL MATCH (controller)-[:HAS_METHOD]->(action)
+            WHERE controller:JavaClass OR controller:SpringController
+
+            // Find Services called by Controller
+            OPTIONAL MATCH (controller)-[:HAS_METHOD]->(ctrlMethod:JavaMethod)-[:INVOKES]->(serviceCall:MethodInvocation)
+            OPTIONAL MATCH (serviceClass)-[:HAS_METHOD]->(serviceMethod:JavaMethod)
+            WHERE toLower(serviceClass.name) CONTAINS 'service' OR toLower(serviceClass.name) CONTAINS 'builder'
+
+            // Find DAOs called by Services
+            OPTIONAL MATCH (daoClass)-[:HAS_METHOD]->(daoMethod:JavaMethod)
+            WHERE toLower(daoClass.name) CONTAINS 'dao' OR toLower(daoClass.name) CONTAINS 'repository'
+
+            // Collect all layers
+            RETURN jsp,
+                   collect(DISTINCT form) AS forms,
+                   collect(DISTINCT flow) AS flows,
+                   collect(DISTINCT controller) AS controllers,
+                   collect(DISTINCT serviceClass) AS services,
+                   collect(DISTINCT daoClass) AS daos
+        `;
+
+        try {
+            const result = await this.neo4jClient.runTransaction<any>(
+                flowQuery,
+                { jspPageId },
+                'READ',
+                'GraphAlgorithms-ExtractFeatureFlow'
+            );
+
+            // Process results into FeatureFlowResult structure
+            const record = result.records?.[0];
+            if (!record) {
+                return this.emptyFeatureFlowResult();
+            }
+
+            // Get call chain
+            const callChainResult = await this.extractCallChain(jspPageId);
+
+            const layers = {
+                ui: callChainResult.chain.filter(s => s.layer === 'UI'),
+                flow: callChainResult.chain.filter(s => s.layer === 'Flow'),
+                controller: callChainResult.chain.filter(s => s.layer === 'Controller'),
+                service: callChainResult.chain.filter(s => s.layer === 'Service'),
+                dao: callChainResult.chain.filter(s => s.layer === 'DAO'),
+                entity: callChainResult.chain.filter(s => s.layer === 'Entity'),
+            };
+
+            // Add entry point to UI layer
+            if (callChainResult.entryPoint.nodeId) {
+                layers.ui.unshift(callChainResult.entryPoint);
+            }
+
+            return {
+                flowName: record.get('jsp')?.properties?.name || 'Unknown',
+                layers,
+                callChain: [callChainResult.entryPoint, ...callChainResult.chain],
+                sqlOperations: callChainResult.sqlStatements.map(sql => ({
+                    statementType: sql.statementType,
+                    tableName: sql.tableName,
+                    columns: [],
+                    sourceMethod: sql.sourceMethod,
+                    lineNumber: sql.lineNumber,
+                })),
+                dataFlow: callChainResult.dataBindings.map(b => ({
+                    uiField: b.uiField,
+                    entityField: b.entityField,
+                })),
+            };
+        } catch (error: any) {
+            logger.error(`Feature flow extraction failed: ${error.message}`);
+            return this.emptyFeatureFlowResult();
+        }
+    }
+
+    /**
+     * Determine the architectural layer for a node.
+     */
+    private determineLayer(nodeType: string, nodeName: string): 'UI' | 'Flow' | 'Controller' | 'Service' | 'DAO' | 'Entity' | 'Unknown' {
+        const typeLower = nodeType.toLowerCase();
+        const nameLower = nodeName.toLowerCase();
+
+        if (typeLower.includes('jsp') || typeLower === 'jsppage') return 'UI';
+        if (typeLower.includes('webflow') || typeLower.includes('flowstate')) return 'Flow';
+        if (nameLower.endsWith('action') || nameLower.endsWith('controller')) return 'Controller';
+        if (nameLower.includes('dao') || nameLower.includes('repository')) return 'DAO';
+        if (nameLower.includes('service') || nameLower.includes('builder') || nameLower.includes('validator')) return 'Service';
+        if (typeLower === 'javaclass' && !nameLower.includes('action') && !nameLower.includes('service')) return 'Entity';
+
+        return 'Unknown';
+    }
+
+    /**
+     * Return empty feature flow result.
+     */
+    private emptyFeatureFlowResult(): FeatureFlowResult {
+        return {
+            flowName: '',
+            layers: {
+                ui: [],
+                flow: [],
+                controller: [],
+                service: [],
+                dao: [],
+                entity: [],
+            },
+            callChain: [],
+            sqlOperations: [],
+            dataFlow: [],
+        };
+    }
+
+    /**
+     * Create indexes for feature flow queries.
+     */
+    async createFeatureFlowIndexes(): Promise<void> {
+        logger.info('Creating indexes for feature flow queries...');
+
+        const indexes = [
+            'CREATE INDEX IF NOT EXISTS FOR (n:SQLStatement) ON (n.entityId)',
+            'CREATE INDEX IF NOT EXISTS FOR (n:SQLStatement) ON (n.tableName)',
+            'CREATE INDEX IF NOT EXISTS FOR (n:MethodInvocation) ON (n.entityId)',
+            'CREATE INDEX IF NOT EXISTS FOR (n:FormFieldBinding) ON (n.entityId)',
+            'CREATE INDEX IF NOT EXISTS FOR (n:FormFieldBinding) ON (n.fieldPath)',
+        ];
+
+        for (const indexQuery of indexes) {
+            try {
+                await this.neo4jClient.runTransaction<any>(
+                    indexQuery,
+                    {},
+                    'WRITE',
+                    'GraphAlgorithms-CreateIndex'
+                );
+            } catch (error: any) {
+                // Index might already exist
+                logger.debug(`Index creation note: ${error.message}`);
+            }
+        }
+
+        logger.info('Feature flow indexes created');
     }
 }

@@ -467,9 +467,214 @@ CRITICAL: Document what EXISTS, not what should be built. Reference actual compo
             if not required:
                 sections_text += "_Optional section - include only if relevant to the feature_\n\n"
 
-            sections_text += "[Document this section based on code analysis]\n\n"
+            # Inject auto-generated content for Section 7 (Technical Architecture), Section 8 (Data Model),
+            # and Section 9 (Implementation Mapping)
+            # These are generated from actual code graph traversal via FeatureFlowService
+            auto_generated_content = None
+            section_instructions = ""
+
+            name_lower = name.lower()
+            if "technical architecture" in name_lower and context.technical_architecture:
+                auto_generated_content = context.technical_architecture
+                section_instructions = """
+**LLM Instructions for Technical Architecture:**
+1. PRESERVE all auto-generated file paths, line numbers, and component references
+2. The layered structure (UI → Controller → Service → DAO → Database) is accurate from code traversal
+3. You may ADD additional context such as:
+   - Business purpose of each component
+   - Dependencies between layers
+   - Error handling paths
+4. DO NOT modify the auto-generated file paths or line numbers - they are from actual code
+"""
+                logger.info(f"[SYNTHESIZER] Injecting auto-generated Technical Architecture for Section {i}")
+
+            elif "implementation mapping" in name_lower and context.implementation_mapping:
+                auto_generated_content = context.implementation_mapping
+                section_instructions = """
+**LLM Instructions for Implementation Mapping:**
+1. PRESERVE all auto-generated table rows with file paths and line numbers
+2. The Operation-to-Implementation table shows actual code locations
+3. You may ADD additional operations discovered from code analysis
+4. You may ADD explanatory text about how to read the mapping
+5. DO NOT modify existing file:line references - they are from actual code traversal
+"""
+                logger.info(f"[SYNTHESIZER] Injecting auto-generated Implementation Mapping for Section {i}")
+
+            elif "data model" in name_lower:
+                # Try to extract data model from feature flows if available
+                if context.feature_flows:
+                    data_model_content = self._extract_data_model_from_flows(context)
+                    if data_model_content:
+                        auto_generated_content = data_model_content
+                        section_instructions = """
+**LLM Instructions for Data Model:**
+1. The table and column information was extracted from actual SQL operations in the code
+2. You may ADD entity class information if visible in the context
+3. You may ADD relationship descriptions based on code analysis
+4. You may ADD validation annotations observed in entity classes
+"""
+                        logger.info(f"[SYNTHESIZER] Injecting extracted Data Model for Section {i}")
+
+            if auto_generated_content:
+                sections_text += f"""
+---
+**AUTO-GENERATED CONTENT** *(from code graph traversal - DO NOT MODIFY file paths/line numbers)*
+
+{auto_generated_content}
+
+{section_instructions}
+---
+
+"""
+            else:
+                sections_text += "[Document this section based on code analysis]\n\n"
 
         return sections_text
+
+    def _extract_data_model_from_flows(self, context: "AggregatedContext") -> str:
+        """Extract data model information from feature flows.
+
+        Args:
+            context: Aggregated context containing feature flows
+
+        Returns:
+            Markdown string describing the data model
+        """
+        if not context.feature_flows:
+            return ""
+
+        sections = []
+        sections.append("### Database Tables\n")
+        sections.append("*Tables and columns extracted from SQL operations in the code*\n")
+
+        # Collect all tables and operations from feature flows
+        tables: dict[str, dict] = {}  # table_name -> {columns, operations, source}
+
+        for flow_dict in context.feature_flows:
+            # Handle both dict and object representations
+            sql_ops = flow_dict.get("sql_operations", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "sql_operations", [])
+
+            for op in sql_ops:
+                if isinstance(op, dict):
+                    table_name = op.get("table_name", "unknown")
+                    columns = op.get("columns", [])
+                    statement_type = op.get("statement_type", "UNKNOWN")
+                    source_class = op.get("source_class", "")
+                    source_method = op.get("source_method", "")
+                else:
+                    table_name = getattr(op, "table_name", "unknown")
+                    columns = getattr(op, "columns", [])
+                    statement_type = getattr(op, "statement_type", "UNKNOWN")
+                    source_class = getattr(op, "source_class", "")
+                    source_method = getattr(op, "source_method", "")
+
+                if table_name not in tables:
+                    tables[table_name] = {
+                        "columns": set(),
+                        "operations": set(),
+                        "sources": [],
+                    }
+
+                tables[table_name]["columns"].update(columns if columns else [])
+                tables[table_name]["operations"].add(statement_type)
+                if source_class and source_method:
+                    tables[table_name]["sources"].append(f"{source_class}.{source_method}()")
+
+        if tables:
+            # Generate table for each database table
+            for table_name, info in tables.items():
+                sections.append(f"#### Table: `{table_name}`\n")
+                sections.append(f"**Operations:** {', '.join(sorted(info['operations']))}\n")
+
+                if info["columns"]:
+                    sections.append("| Column | Inferred Type | Constraints |")
+                    sections.append("|--------|---------------|-------------|")
+                    for col in sorted(info["columns"]):
+                        # Basic type inference from column naming conventions
+                        inferred_type = self._infer_column_type(col)
+                        constraints = self._infer_constraints(col)
+                        sections.append(f"| `{col}` | {inferred_type} | {constraints} |")
+                    sections.append("")
+
+                if info["sources"]:
+                    sources = list(set(info["sources"]))[:3]  # Limit to 3 sources
+                    sections.append(f"**Accessed by:** {', '.join(f'`{s}`' for s in sources)}\n")
+        else:
+            sections.append("*No database tables extracted from code analysis*\n")
+
+        # Add data mappings section if available
+        data_mappings_found = False
+        for flow_dict in context.feature_flows:
+            mappings = flow_dict.get("data_mappings", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "data_mappings", [])
+            if mappings:
+                data_mappings_found = True
+                break
+
+        if data_mappings_found:
+            sections.append("### Entity Field Mappings\n")
+            sections.append("*Maps entity fields to database columns*\n")
+            sections.append("| Entity Field | DB Column | Required | Validations |")
+            sections.append("|--------------|-----------|----------|-------------|")
+
+            for flow_dict in context.feature_flows:
+                mappings = flow_dict.get("data_mappings", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "data_mappings", [])
+                for dm in mappings[:10]:  # Limit to 10 mappings
+                    if isinstance(dm, dict):
+                        entity_field = dm.get("entity_field", "-")
+                        db_column = dm.get("db_column", "-")
+                        is_required = "Yes" if dm.get("is_required") else "No"
+                        validations = ", ".join(dm.get("validation_rules", [])[:2]) or "-"
+                    else:
+                        entity_field = getattr(dm, "entity_field", "-")
+                        db_column = getattr(dm, "db_column", "-")
+                        is_required = "Yes" if getattr(dm, "is_required", False) else "No"
+                        validation_rules = getattr(dm, "validation_rules", [])
+                        validations = ", ".join(validation_rules[:2]) if validation_rules else "-"
+
+                    sections.append(f"| `{entity_field}` | `{db_column}` | {is_required} | {validations} |")
+            sections.append("")
+
+        return "\n".join(sections)
+
+    def _infer_column_type(self, column_name: str) -> str:
+        """Infer column type from naming conventions."""
+        col_lower = column_name.lower()
+
+        if col_lower.endswith("_id") or col_lower == "id":
+            return "NUMBER/BIGINT"
+        elif col_lower.endswith("_date") or col_lower.endswith("_time") or col_lower.endswith("_at"):
+            return "TIMESTAMP"
+        elif col_lower.startswith("is_") or col_lower.startswith("has_") or col_lower.endswith("_flag"):
+            return "BOOLEAN/CHAR(1)"
+        elif col_lower.endswith("_amount") or col_lower.endswith("_price") or col_lower.endswith("_total"):
+            return "DECIMAL"
+        elif col_lower.endswith("_count") or col_lower.endswith("_number") or col_lower.endswith("_qty"):
+            return "INTEGER"
+        elif col_lower.endswith("_code") or col_lower.endswith("_status"):
+            return "VARCHAR(50)"
+        elif col_lower.endswith("_name") or col_lower.endswith("_title"):
+            return "VARCHAR(255)"
+        elif col_lower.endswith("_description") or col_lower.endswith("_text") or col_lower.endswith("_notes"):
+            return "TEXT/CLOB"
+        else:
+            return "VARCHAR"
+
+    def _infer_constraints(self, column_name: str) -> str:
+        """Infer constraints from column naming conventions."""
+        col_lower = column_name.lower()
+        constraints = []
+
+        if col_lower == "id" or col_lower.endswith("_id") and not col_lower.startswith("fk_"):
+            if col_lower == "id" or col_lower == column_name.split("_")[0] + "_id":
+                constraints.append("PK")
+
+        if col_lower.startswith("fk_") or (col_lower.endswith("_id") and col_lower != "id"):
+            constraints.append("FK")
+
+        if col_lower in ("created_date", "created_at", "created_by", "updated_date", "updated_at", "updated_by"):
+            constraints.append("AUDIT")
+
+        return ", ".join(constraints) if constraints else "-"
 
     def _build_template_instructions(self) -> str:
         """Build template instructions for LLM output format control."""

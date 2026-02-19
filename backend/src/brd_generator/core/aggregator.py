@@ -21,9 +21,16 @@ from ..models.context import (
     APIContract,
     DataModel,
 )
+from ..models.flow_context import (
+    FeatureFlow,
+    ImplementationMapping,
+    TechnicalArchitectureView,
+)
 from ..mcp_clients.neo4j_client import Neo4jMCPClient
 from ..mcp_clients.filesystem_client import FilesystemMCPClient
 from ..utils.logger import get_logger, get_progress_logger
+from .enhanced_context import EnhancedContextRetriever
+from .feature_flow import FeatureFlowService
 
 logger = get_logger(__name__)
 progress = get_progress_logger(__name__, "ContextAggregator")
@@ -172,6 +179,7 @@ class ContextAggregator:
         max_tokens: int = 100000,
         fulltext_score_threshold: float = DEFAULT_FULLTEXT_SCORE_THRESHOLD,
         pagerank_weight: float = DEFAULT_PAGERANK_WEIGHT,
+        use_enhanced_retrieval: bool = True,  # NEW: Enable enhanced context retrieval
     ):
         """
         Initialize the context aggregator.
@@ -183,6 +191,9 @@ class ContextAggregator:
             max_tokens: Maximum tokens for context (used for dynamic limiting)
             fulltext_score_threshold: Minimum relevance score to include component
             pagerank_weight: Weight for PageRank in combined relevance score
+            use_enhanced_retrieval: If True, use ENHANCED context retrieval with
+                                   compound term detection and graph-based traversal.
+                                   This eliminates false positives from keyword matching.
         """
         self.neo4j = neo4j_client
         self.filesystem = filesystem_client
@@ -191,11 +202,26 @@ class ContextAggregator:
         self.fulltext_score_threshold = fulltext_score_threshold
         self.pagerank_weight = pagerank_weight
         self.fulltext_weight = 1.0 - pagerank_weight
+        self.use_enhanced_retrieval = use_enhanced_retrieval
 
         # Cache for discovered schema
         self._schema_cache: Optional[dict[str, Any]] = None
         # Cache for fulltext index availability
         self._fulltext_available: Optional[bool] = None
+
+        # Initialize enhanced context retriever
+        self._enhanced_retriever: Optional[EnhancedContextRetriever] = None
+        if use_enhanced_retrieval:
+            self._enhanced_retriever = EnhancedContextRetriever(neo4j_client)
+            logger.info("[AGGREGATOR] ENHANCED context retrieval ENABLED - using compound term detection + graph traversal")
+
+        # Initialize feature flow service for end-to-end traceability
+        self._flow_service: Optional[FeatureFlowService] = None
+        try:
+            self._flow_service = FeatureFlowService(neo4j_client)
+            logger.info("[AGGREGATOR] Feature Flow service ENABLED - auto-generation of BRD Sections 7 & 9")
+        except Exception as e:
+            logger.warning(f"[AGGREGATOR] Feature Flow service initialization failed: {e}")
 
     def _calculate_dynamic_limit(self, estimated_tokens_per_item: int = 100) -> int:
         """Calculate dynamic limit based on token budget.
@@ -279,6 +305,11 @@ class ContextAggregator:
         2. Reads files directly via the filesystem MCP client
         3. Does NOT rely on Copilot SDK tool invocation (which may not work)
 
+        ENHANCED MODE (when use_enhanced_retrieval=True):
+        - Uses compound term detection to eliminate false positives
+        - Finds entry points (Controllers) first, then traverses dependencies
+        - Only returns components that are actually connected to the feature
+
         The gathered context is then passed to the LLM for BRD generation.
         """
 
@@ -287,25 +318,90 @@ class ContextAggregator:
                 await progress_callback(step, detail)
 
         # Phase 1: Discover Neo4j schema directly
-        progress.step("build_context", "Querying Neo4j schema", current=1, total=4)
+        progress.step("build_context", "Querying Neo4j schema", current=1, total=5)
         await report("neo4j", "Querying code graph schema...")
         schema = await self._discover_schema_direct()
         progress.info(f"Schema discovered: {len(schema.component_labels)} component types, {len(schema.dependency_relationships)} relationships")
 
-        # Phase 2: Find components using direct queries
-        progress.step("build_context", "Finding relevant components", current=2, total=4)
-        await report("neo4j", "Searching for relevant components...")
-        architecture = await self._get_architecture_direct(
-            request, affected_components, schema
-        )
-        progress.info(
-            f"Architecture context retrieved",
-            components=len(architecture.components),
-            apis=len(architecture.api_contracts)
-        )
+        # Phase 2: Find components
+        # Use ENHANCED retrieval if enabled (compound term detection + graph traversal)
+        progress.step("build_context", "Finding relevant components", current=2, total=5)
+
+        if self.use_enhanced_retrieval and self._enhanced_retriever and not affected_components:
+            # ================================================================
+            # ENHANCED CONTEXT RETRIEVAL
+            # Uses compound term detection + graph-based traversal
+            # ================================================================
+            logger.info("=" * 60)
+            logger.info("[AGGREGATOR] Using ENHANCED context retrieval")
+            logger.info("[AGGREGATOR] - Compound term detection: ENABLED")
+            logger.info("[AGGREGATOR] - Graph-based traversal: ENABLED")
+            logger.info("[AGGREGATOR] - False positive elimination: ENABLED")
+            logger.info("=" * 60)
+
+            await report("neo4j", "Using ENHANCED retrieval (compound terms + graph traversal)...")
+
+            # Get components using enhanced retrieval
+            enhanced_components, entry_points, warnings = await self._enhanced_retriever.get_relevant_context(
+                request
+            )
+
+            # Convert to ComponentInfo objects
+            components = []
+            for comp in enhanced_components:
+                # Ensure description is never None (Pydantic validation)
+                desc = comp.get("description")
+                if desc is None:
+                    desc = ""
+                components.append(ComponentInfo(
+                    name=comp.get("name", ""),
+                    type=comp.get("type", "unknown"),
+                    path=comp.get("path", ""),
+                    description=desc,
+                    dependencies=[],
+                    dependents=[],
+                ))
+
+            # Log summary
+            logger.info(f"[AGGREGATOR] ENHANCED retrieval found {len(components)} components")
+            logger.info(f"[AGGREGATOR] Entry points identified: {len(entry_points)}")
+            for w in warnings:
+                logger.info(f"[AGGREGATOR] {w}")
+
+            # Build architecture context
+            architecture = ArchitectureContext(
+                components=components,
+                dependencies={},
+                api_contracts=[],
+                data_models=[],
+            )
+
+            progress.info(
+                f"Architecture context retrieved (ENHANCED MODE)",
+                components=len(architecture.components),
+                entry_points=len(entry_points)
+            )
+        else:
+            # ================================================================
+            # STANDARD RETRIEVAL (keyword-based with fulltext search)
+            # ================================================================
+            if affected_components:
+                logger.info("[AGGREGATOR] Using STANDARD retrieval (user specified components)")
+            else:
+                logger.info("[AGGREGATOR] Using STANDARD retrieval (enhanced disabled)")
+
+            await report("neo4j", "Searching for relevant components...")
+            architecture = await self._get_architecture_direct(
+                request, affected_components, schema
+            )
+            progress.info(
+                f"Architecture context retrieved",
+                components=len(architecture.components),
+                apis=len(architecture.api_contracts)
+            )
 
         # Phase 3: Read source files directly
-        progress.step("build_context", "Reading source files", current=3, total=4)
+        progress.step("build_context", "Reading source files", current=3, total=5)
         await report("filesystem", "Reading relevant source files...")
         implementation = await self._get_implementation_direct(architecture)
         progress.info(
@@ -317,13 +413,29 @@ class ContextAggregator:
         # Phase 4: Find similar features
         similar_features = []
         if include_similar:
-            progress.step("build_context", "Finding similar features", current=4, total=4)
+            progress.step("build_context", "Finding similar features", current=4, total=5)
             await report("neo4j", "Searching for similar features...")
             similar_features = await self._find_similar_direct(request, schema)
             if similar_features:
                 progress.info(f"Found {len(similar_features)} similar features")
 
-        # Build complete context with schema info
+        # Phase 5: Extract feature flows for BRD Sections 7 & 9
+        feature_flows_data = []
+        impl_mapping_md = ""
+        tech_arch_md = ""
+        if self._flow_service:
+            progress.step("build_context", "Extracting feature flows", current=5, total=5)
+            await report("flow", "Extracting end-to-end feature flows...")
+            try:
+                feature_flows_data, impl_mapping_md, tech_arch_md = await self._extract_feature_flows(
+                    architecture, request, progress_callback
+                )
+                if feature_flows_data:
+                    progress.info(f"Extracted {len(feature_flows_data)} feature flows for BRD auto-generation")
+            except Exception as e:
+                logger.warning(f"[AGGREGATOR] Feature flow extraction failed: {e}")
+
+        # Build complete context with schema info and feature flows
         from ..models.context import SchemaInfo
         context = AggregatedContext(
             request=request,
@@ -331,6 +443,10 @@ class ContextAggregator:
             implementation=implementation,
             similar_features=similar_features,
             schema=schema,
+            # Feature flow data for auto-generating BRD sections
+            feature_flows=[flow.model_dump() for flow in feature_flows_data] if feature_flows_data else None,
+            implementation_mapping=impl_mapping_md if impl_mapping_md else None,
+            technical_architecture=tech_arch_md if tech_arch_md else None,
         )
 
         # Check token budget
@@ -340,10 +456,11 @@ class ContextAggregator:
             )
             context = await self._compress_context(context)
 
+        flow_summary = f", {len(feature_flows_data)} flows" if feature_flows_data else ""
         progress.end_operation(
             "build_context",
             success=True,
-            details=f"{len(architecture.components)} components, {len(implementation.key_files)} files, ~{context.estimated_tokens} tokens"
+            details=f"{len(architecture.components)} components, {len(implementation.key_files)} files{flow_summary}, ~{context.estimated_tokens} tokens"
         )
         return context
 
@@ -1499,6 +1616,131 @@ Return ONLY the JSON array, no other text."""
         except Exception as e:
             logger.debug(f"Similar features search failed: {e}")
             return []
+
+    async def _extract_feature_flows(
+        self,
+        architecture: ArchitectureContext,
+        request: str,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> tuple[list[FeatureFlow], str, str]:
+        """
+        Extract feature flows from entry points for BRD auto-generation.
+
+        This method:
+        1. Identifies entry points (JSPs, WebFlows, Controllers) from architecture
+        2. Traces each entry point through to database
+        3. Generates implementation mapping table (Section 9)
+        4. Generates technical architecture markdown (Section 7)
+
+        Args:
+            architecture: Architecture context with components
+            request: Original feature request for naming
+            progress_callback: Optional progress callback
+
+        Returns:
+            Tuple of (feature_flows, implementation_mapping_markdown, technical_architecture_markdown)
+        """
+        if not self._flow_service:
+            logger.info("[FLOW-EXTRACT] Flow service not available, skipping feature flow extraction")
+            return [], "", ""
+
+        async def report(step: str, detail: str) -> None:
+            if progress_callback:
+                await progress_callback(step, detail)
+
+        feature_flows: list[FeatureFlow] = []
+        entry_points_found: list[str] = []
+
+        await report("flow", "Identifying entry points for feature flow extraction...")
+
+        # Step 1: Identify entry points from architecture components
+        # Entry points are JSPs, WebFlows, or Controller classes
+        entry_point_types = {'JSPPage', 'WebFlowDefinition', 'SpringController', 'JavaClass'}
+        entry_point_keywords = {'action', 'controller', 'flow', 'jsp', 'view'}
+
+        for comp in architecture.components:
+            comp_type = comp.type.lower() if comp.type else ""
+            comp_name = comp.name.lower() if comp.name else ""
+
+            is_entry_point = (
+                comp.type in entry_point_types or
+                any(kw in comp_type for kw in entry_point_keywords) or
+                any(kw in comp_name for kw in entry_point_keywords) or
+                comp.path.endswith('.jsp') if comp.path else False
+            )
+
+            if is_entry_point:
+                entry_points_found.append(comp.name)
+
+        # Also try to find entry points using flow service search
+        if not entry_points_found:
+            try:
+                # Extract keywords from request for entry point search
+                keywords = [w for w in request.split() if len(w) > 3]
+                for keyword in keywords[:3]:  # Limit to first 3 keywords
+                    found = await self._flow_service.find_entry_points(keyword, limit=5)
+                    for ep in found:
+                        if ep.get("name") and ep["name"] not in entry_points_found:
+                            entry_points_found.append(ep["name"])
+            except Exception as e:
+                logger.debug(f"[FLOW-EXTRACT] Entry point search failed: {e}")
+
+        logger.info(f"[FLOW-EXTRACT] Found {len(entry_points_found)} potential entry points: {entry_points_found[:10]}")
+
+        if not entry_points_found:
+            logger.info("[FLOW-EXTRACT] No entry points found, skipping flow extraction")
+            return [], "", ""
+
+        # Step 2: Trace each entry point (limit to avoid excessive queries)
+        max_flows = 5
+        await report("flow", f"Tracing {min(len(entry_points_found), max_flows)} feature flows...")
+
+        for entry_point in entry_points_found[:max_flows]:
+            try:
+                logger.info(f"[FLOW-EXTRACT] Tracing flow for: {entry_point}")
+                response = await self._flow_service.extract_feature_flow(
+                    entry_point=entry_point,
+                    entry_point_type="auto",
+                    include_sql=True,
+                    include_data_mappings=True,
+                    max_depth=10,
+                )
+
+                if response.success and response.feature_flow:
+                    feature_flows.append(response.feature_flow)
+                    logger.info(
+                        f"[FLOW-EXTRACT] Flow extracted: {len(response.feature_flow.flow_steps)} steps, "
+                        f"{len(response.feature_flow.sql_operations)} SQL ops"
+                    )
+                else:
+                    if response.error:
+                        logger.debug(f"[FLOW-EXTRACT] Flow extraction failed for {entry_point}: {response.error}")
+
+            except Exception as e:
+                logger.debug(f"[FLOW-EXTRACT] Error tracing {entry_point}: {e}")
+
+        logger.info(f"[FLOW-EXTRACT] Successfully extracted {len(feature_flows)} feature flows")
+
+        if not feature_flows:
+            return [], "", ""
+
+        # Step 3: Generate BRD Section 9 - Implementation Mapping
+        await report("flow", "Generating implementation mapping table...")
+        implementation_mapping = ImplementationMapping.from_feature_flows(feature_flows)
+        impl_mapping_md = implementation_mapping.to_markdown_table()
+        logger.info(f"[FLOW-EXTRACT] Generated implementation mapping: {len(implementation_mapping.operations)} rows")
+
+        # Step 4: Generate BRD Section 7 - Technical Architecture
+        await report("flow", "Generating technical architecture view...")
+        tech_arch_sections = []
+        for flow in feature_flows:
+            arch_view = TechnicalArchitectureView.from_feature_flow(flow)
+            tech_arch_sections.append(arch_view.to_markdown())
+
+        tech_arch_md = "\n\n".join(tech_arch_sections)
+        logger.info(f"[FLOW-EXTRACT] Generated technical architecture for {len(feature_flows)} features")
+
+        return feature_flows, impl_mapping_md, tech_arch_md
 
     async def _compress_context(
         self,

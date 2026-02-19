@@ -240,12 +240,14 @@ class Neo4jMCPClient(MCPClient):
 
         async with self._driver.session(database=self.neo4j_database) as session:
             for keyword in keywords:
-                # Search in class/service names and file paths
+                # Search across all code component types
                 query = """
                     MATCH (n)
-                    WHERE (n:JavaClass OR n:SpringService OR n:SpringController)
+                    WHERE (n:JavaClass OR n:JavaInterface OR n:SpringService OR n:SpringController
+                           OR n:JSPPage OR n:WebFlowDefinition OR n:FlowState OR n:FlowAction
+                           OR n:SQLTable OR n:RestEndpoint)
                     AND (toLower(n.name) CONTAINS $keyword OR toLower(n.filePath) CONTAINS $keyword)
-                    RETURN n.name as name, n.filePath as description
+                    RETURN n.name as name, n.filePath as description, labels(n)[0] as type
                     LIMIT $limit
                 """
                 result = await session.run(query, keyword=keyword, limit=limit)
@@ -476,9 +478,16 @@ class Neo4jMCPClient(MCPClient):
                 keywords = search_terms.lower().split()
                 keyword_filter = " OR ".join([f"toLower(n.name) CONTAINS '{kw}'" for kw in keywords])
 
+                # Include all code component labels for comprehensive search
                 fallback_query = f"""
                     MATCH (n)
-                    WHERE (n:Class OR n:Function OR n:JavaClass OR n:SpringService)
+                    WHERE (n:JavaClass OR n:JavaInterface OR n:JavaMethod OR n:JavaField
+                           OR n:SpringService OR n:SpringController
+                           OR n:JSPPage OR n:JSPForm OR n:JSPInclude OR n:JSPTagLib
+                           OR n:WebFlowDefinition OR n:FlowState OR n:FlowAction OR n:FlowTransition
+                           OR n:SQLTable OR n:SQLView OR n:SQLColumn
+                           OR n:RestEndpoint OR n:Function OR n:Class
+                           OR n:ValidationConstraint OR n:GuardClause OR n:TestAssertion)
                       AND ({keyword_filter})
                     WITH n, COALESCE(n.pageRank, 0.1) AS pageRank
                     RETURN n.name AS name,
@@ -486,7 +495,7 @@ class Neo4jMCPClient(MCPClient):
                            n.filePath AS path,
                            pageRank AS combinedScore
                     ORDER BY combinedScore DESC
-                    LIMIT 50
+                    LIMIT 100
                 """
                 result = await session.run(fallback_query)
                 records = await result.data()

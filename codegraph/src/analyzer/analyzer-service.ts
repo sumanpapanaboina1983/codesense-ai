@@ -527,7 +527,7 @@ export class AnalyzerService {
                     logger.warn(`PageRank computation failed (non-fatal): ${error.message}`);
                     if (callback) {
                         callback.addLog({
-                            level: 'warn',
+                            level: 'warning',
                             phase: 'computing_relevance',
                             message: `PageRank computation skipped: ${error.message}`
                         });

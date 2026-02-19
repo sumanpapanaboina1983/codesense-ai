@@ -844,10 +844,33 @@ Start by querying the codebase using the tools, then provide your verification r
         """Verify claims about business rules.
 
         Example: "Discounts apply only to orders over $100"
-        Look for: Conditional logic, rule classes, validation
+        Look for: Structured business rules in Neo4j (Phase 3), conditional logic, rule classes, validation
         """
+        # PHASE 3: Query structurally extracted business rules from Neo4j
+        # These have higher confidence than pattern matching
+        for keyword in claim.keywords[:5]:
+            # Query validation constraints (highest confidence for rules)
+            evidence = await self._query_validation_constraints(keyword)
+            if evidence:
+                claim.add_evidence(evidence)
+
+            # Query guard clauses
+            evidence = await self._query_guard_clauses(keyword)
+            if evidence:
+                claim.add_evidence(evidence)
+
+            # Query conditional business logic
+            evidence = await self._query_conditional_business_logic(keyword)
+            if evidence:
+                claim.add_evidence(evidence)
+
+            # Query test assertions that encode behavior
+            evidence = await self._query_test_assertions(keyword)
+            if evidence:
+                claim.add_evidence(evidence)
+
+        # Fallback: Search for business logic patterns in code
         for keyword in claim.keywords:
-            # Search for business logic patterns
             evidence = await self._search_code_pattern(
                 keyword,
                 patterns=["rule", "validator", "condition", "if ", "when"]
@@ -1272,6 +1295,307 @@ Start by querying the codebase using the tools, then provide your verification r
         """Verify a threshold/limit value in code or config."""
         # Similar to _verify_quantifier but focused on thresholds
         return await self._verify_quantifier(quantifier, keywords)
+
+    # =========================================================================
+    # Business Rule Evidence Queries (Phase 3)
+    # Query structurally extracted business rules from Neo4j
+    # =========================================================================
+
+    async def _query_validation_constraints(self, keyword: str) -> Optional[EvidenceItem]:
+        """Query ValidationConstraint nodes from Neo4j.
+
+        These are structurally extracted from @NotNull, @Min, @Pattern, etc.
+        Confidence: 0.95 (explicit annotations)
+        """
+        if not self.neo4j_client:
+            return None
+
+        try:
+            query = f"""
+            MATCH (vc:ValidationConstraint)
+            WHERE toLower(vc.ruleText) CONTAINS toLower('{keyword}')
+               OR toLower(vc.targetName) CONTAINS toLower('{keyword}')
+               OR toLower(vc.constraintName) CONTAINS toLower('{keyword}')
+            RETURN vc.ruleText AS ruleText, vc.constraintName AS constraintName,
+                   vc.targetName AS targetName, vc.constraintParameters AS params,
+                   vc.filePath AS filePath, vc.startLine AS startLine, vc.endLine AS endLine,
+                   vc.confidence AS confidence
+            LIMIT 5
+            """
+
+            result = await self.neo4j_client.execute_query(query)
+
+            if result and result.get("records"):
+                records = result["records"]
+                code_refs = []
+                config_values = {}
+
+                for record in records:
+                    if record.get("filePath"):
+                        code_refs.append(CodeReference(
+                            file_path=record["filePath"],
+                            start_line=record.get("startLine", 1),
+                            end_line=record.get("endLine", 1),
+                            entity_type="ValidationConstraint",
+                            entity_name=record.get("constraintName"),
+                        ))
+                        # Capture constraint details
+                        config_values[record.get("targetName", "field")] = (
+                            f"@{record.get('constraintName', '')}: {record.get('ruleText', '')}"
+                        )
+
+                if code_refs:
+                    return EvidenceItem(
+                        evidence_type=EvidenceType.VALIDATION_CONSTRAINT,
+                        category="primary",
+                        description=f"Found {len(code_refs)} validation constraint(s) for '{keyword}'",
+                        confidence=0.95,
+                        code_references=code_refs,
+                        config_values=config_values,
+                        source="neo4j",
+                        query_used=query,
+                        analysis_method="Structurally extracted from annotations",
+                        supports_claim=True,
+                    )
+
+        except Exception as e:
+            logger.warning(f"Validation constraint query failed for '{keyword}': {e}")
+
+        return None
+
+    async def _query_guard_clauses(self, keyword: str) -> Optional[EvidenceItem]:
+        """Query GuardClause nodes from Neo4j.
+
+        These are structurally extracted from if (x == null) throw patterns.
+        Confidence: 0.90 (clear preconditions)
+        """
+        if not self.neo4j_client:
+            return None
+
+        try:
+            query = f"""
+            MATCH (gc:GuardClause)
+            WHERE toLower(gc.ruleText) CONTAINS toLower('{keyword}')
+               OR toLower(gc.guardedMethod) CONTAINS toLower('{keyword}')
+               OR toLower(gc.errorMessage) CONTAINS toLower('{keyword}')
+            RETURN gc.ruleText AS ruleText, gc.condition AS condition,
+                   gc.guardType AS guardType, gc.errorMessage AS errorMessage,
+                   gc.guardedMethod AS guardedMethod,
+                   gc.filePath AS filePath, gc.startLine AS startLine, gc.endLine AS endLine,
+                   gc.confidence AS confidence
+            LIMIT 5
+            """
+
+            result = await self.neo4j_client.execute_query(query)
+
+            if result and result.get("records"):
+                records = result["records"]
+                code_refs = []
+
+                for record in records:
+                    if record.get("filePath"):
+                        code_refs.append(CodeReference(
+                            file_path=record["filePath"],
+                            start_line=record.get("startLine", 1),
+                            end_line=record.get("endLine", 1),
+                            entity_type="GuardClause",
+                            entity_name=record.get("guardedMethod"),
+                            snippet=record.get("condition"),
+                        ))
+
+                if code_refs:
+                    return EvidenceItem(
+                        evidence_type=EvidenceType.GUARD_CLAUSE,
+                        category="primary",
+                        description=f"Found {len(code_refs)} guard clause(s) for '{keyword}'",
+                        confidence=0.90,
+                        code_references=code_refs,
+                        source="neo4j",
+                        query_used=query,
+                        analysis_method="Structurally extracted from guard patterns",
+                        supports_claim=True,
+                    )
+
+        except Exception as e:
+            logger.warning(f"Guard clause query failed for '{keyword}': {e}")
+
+        return None
+
+    async def _query_conditional_business_logic(self, keyword: str) -> Optional[EvidenceItem]:
+        """Query ConditionalBusinessLogic nodes from Neo4j.
+
+        These are extracted from if (amount > 50000) patterns.
+        Confidence: 0.80 (inferred business logic)
+        """
+        if not self.neo4j_client:
+            return None
+
+        try:
+            query = f"""
+            MATCH (cbl:ConditionalBusinessLogic)
+            WHERE toLower(cbl.ruleText) CONTAINS toLower('{keyword}')
+               OR toLower(cbl.variable) CONTAINS toLower('{keyword}')
+               OR toLower(cbl.businessMeaning) CONTAINS toLower('{keyword}')
+            RETURN cbl.ruleText AS ruleText, cbl.condition AS condition,
+                   cbl.variable AS variable, cbl.threshold AS threshold,
+                   cbl.businessMeaning AS businessMeaning,
+                   cbl.filePath AS filePath, cbl.startLine AS startLine, cbl.endLine AS endLine,
+                   cbl.confidence AS confidence
+            LIMIT 5
+            """
+
+            result = await self.neo4j_client.execute_query(query)
+
+            if result and result.get("records"):
+                records = result["records"]
+                code_refs = []
+
+                for record in records:
+                    if record.get("filePath"):
+                        code_refs.append(CodeReference(
+                            file_path=record["filePath"],
+                            start_line=record.get("startLine", 1),
+                            end_line=record.get("endLine", 1),
+                            entity_type="ConditionalBusinessLogic",
+                            entity_name=record.get("variable"),
+                            snippet=record.get("condition"),
+                        ))
+
+                if code_refs:
+                    return EvidenceItem(
+                        evidence_type=EvidenceType.CODE_REFERENCE,  # Using CODE_REFERENCE as fallback
+                        category="primary",
+                        description=f"Found {len(code_refs)} conditional business logic for '{keyword}'",
+                        confidence=0.80,
+                        code_references=code_refs,
+                        source="neo4j",
+                        query_used=query,
+                        analysis_method="Structurally extracted from business conditionals",
+                        supports_claim=True,
+                    )
+
+        except Exception as e:
+            logger.warning(f"Conditional business logic query failed for '{keyword}': {e}")
+
+        return None
+
+    async def _query_test_assertions(self, keyword: str) -> Optional[EvidenceItem]:
+        """Query TestAssertion nodes from Neo4j.
+
+        These derive business rules from test expectations.
+        Confidence: 0.85 (tested behavior)
+        """
+        if not self.neo4j_client:
+            return None
+
+        try:
+            query = f"""
+            MATCH (ta:TestAssertion)
+            WHERE toLower(ta.ruleText) CONTAINS toLower('{keyword}')
+               OR toLower(ta.inferredRule) CONTAINS toLower('{keyword}')
+               OR toLower(ta.testedEntity) CONTAINS toLower('{keyword}')
+            RETURN ta.ruleText AS ruleText, ta.assertionType AS assertionType,
+                   ta.inferredRule AS inferredRule, ta.testedEntity AS testedEntity,
+                   ta.testMethodName AS testMethodName, ta.testClassName AS testClassName,
+                   ta.filePath AS filePath, ta.startLine AS startLine, ta.endLine AS endLine,
+                   ta.confidence AS confidence
+            LIMIT 5
+            """
+
+            result = await self.neo4j_client.execute_query(query)
+
+            if result and result.get("records"):
+                records = result["records"]
+                test_cases = []
+                code_refs = []
+
+                for record in records:
+                    if record.get("filePath"):
+                        code_refs.append(CodeReference(
+                            file_path=record["filePath"],
+                            start_line=record.get("startLine", 1),
+                            end_line=record.get("endLine", 1),
+                            entity_type="TestAssertion",
+                            entity_name=record.get("testMethodName"),
+                        ))
+                        test_cases.append(
+                            f"{record.get('testClassName', '')}.{record.get('testMethodName', '')}"
+                        )
+
+                if code_refs:
+                    return EvidenceItem(
+                        evidence_type=EvidenceType.TEST_ASSERTION,
+                        category="primary",
+                        description=f"Found {len(code_refs)} test assertion(s) encoding behavior for '{keyword}'",
+                        confidence=0.85,
+                        code_references=code_refs,
+                        test_cases=test_cases,
+                        source="neo4j",
+                        query_used=query,
+                        analysis_method="Derived from test assertions",
+                        supports_claim=True,
+                    )
+
+        except Exception as e:
+            logger.warning(f"Test assertion query failed for '{keyword}': {e}")
+
+        return None
+
+    async def _query_business_rules(self, keyword: str) -> Optional[EvidenceItem]:
+        """Query generic BusinessRule nodes from Neo4j.
+
+        This is a catch-all for any business rules not categorized.
+        Confidence: 1.0 (structurally extracted)
+        """
+        if not self.neo4j_client:
+            return None
+
+        try:
+            query = f"""
+            MATCH (br:BusinessRule)
+            WHERE toLower(br.ruleText) CONTAINS toLower('{keyword}')
+               OR toLower(br.condition) CONTAINS toLower('{keyword}')
+            RETURN br.ruleText AS ruleText, br.condition AS condition,
+                   br.ruleType AS ruleType, br.severity AS severity,
+                   br.filePath AS filePath, br.startLine AS startLine, br.endLine AS endLine,
+                   br.confidence AS confidence
+            LIMIT 5
+            """
+
+            result = await self.neo4j_client.execute_query(query)
+
+            if result and result.get("records"):
+                records = result["records"]
+                code_refs = []
+
+                for record in records:
+                    if record.get("filePath"):
+                        code_refs.append(CodeReference(
+                            file_path=record["filePath"],
+                            start_line=record.get("startLine", 1),
+                            end_line=record.get("endLine", 1),
+                            entity_type="BusinessRule",
+                            entity_name=record.get("ruleType"),
+                            snippet=record.get("ruleText"),
+                        ))
+
+                if code_refs:
+                    return EvidenceItem(
+                        evidence_type=EvidenceType.BUSINESS_RULE,
+                        category="primary",
+                        description=f"Found {len(code_refs)} business rule(s) for '{keyword}'",
+                        confidence=1.0,
+                        code_references=code_refs,
+                        source="neo4j",
+                        query_used=query,
+                        analysis_method="Structurally extracted business rule",
+                        supports_claim=True,
+                    )
+
+        except Exception as e:
+            logger.warning(f"Business rule query failed for '{keyword}': {e}")
+
+        return None
 
     async def _find_test_coverage(self, claim: Claim) -> None:
         """Find test cases that validate the claim."""

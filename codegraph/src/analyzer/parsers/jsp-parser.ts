@@ -18,6 +18,7 @@ import {
     SubmitElement
 } from '../types.js';
 import { ensureTempDir, getTempFilePath, generateInstanceId, generateEntityId } from '../parser-utils.js';
+import { BusinessRuleDetector } from './BusinessRuleDetector.js';
 
 const logger = createContextLogger('JSPParser');
 
@@ -33,7 +34,44 @@ const JSP_PATTERNS = {
     FORWARD: /<jsp:forward\s+page\s*=\s*["']([^"']+)["'][^>]*>/g,
     REDIRECT: /<c:redirect\s+url\s*=\s*["']([^"']+)["'][^>]*>/g,
     FORM_ACTION: /<form[^>]+action\s*=\s*["']([^"']+)["'][^>]*>/gi,
+    // Spring form binding patterns
+    SPRING_FORM: /<form:form[^>]*(?:modelAttribute|commandName)\s*=\s*["']([^"']+)["'][^>]*>/gi,
+    SPRING_INPUT: /<form:(input|password|hidden)[^>]*path\s*=\s*["']([^"']+)["'][^>]*>/gi,
+    SPRING_SELECT: /<form:select[^>]*path\s*=\s*["']([^"']+)["'][^>]*>/gi,
+    SPRING_TEXTAREA: /<form:textarea[^>]*path\s*=\s*["']([^"']+)["'][^>]*>/gi,
+    SPRING_CHECKBOX: /<form:(checkbox|checkboxes)[^>]*path\s*=\s*["']([^"']+)["'][^>]*>/gi,
+    SPRING_RADIOBUTTON: /<form:(radiobutton|radiobuttons)[^>]*path\s*=\s*["']([^"']+)["'][^>]*>/gi,
 };
+
+/**
+ * Represents a Spring form field binding (e.g., <form:input path="entity.field"/>)
+ */
+export interface FormFieldBindingNode extends AstNode {
+    kind: 'FormFieldBinding';
+    language: 'JSP';
+    properties: {
+        fieldPath: string;           // e.g., "entity.fieldName"
+        modelAttribute: string;      // e.g., "entity"
+        fieldName: string;           // e.g., "fieldName"
+        inputType: string;           // input, select, textarea, checkbox, etc.
+        required: boolean;
+        validationAttributes: string[];
+        lineNumber: number;
+    };
+}
+
+/**
+ * Represents an entity field binding discovered from JSP form
+ */
+interface FormFieldBindingInfo {
+    fieldPath: string;
+    modelAttribute: string;
+    fieldName: string;
+    inputType: string;
+    required: boolean;
+    validationAttributes: string[];
+    lineNumber: number;
+}
 
 export class JSPParser {
     private instanceCounter: InstanceCounter = { count: 0 };
@@ -119,10 +157,43 @@ export class JSPParser {
             ));
         });
 
+        // Parse Spring form field bindings (Feature Traceability)
+        const { bindingNodes, bindingRelationships } = this.parseSpringFormBindings(
+            content,
+            normalizedPath,
+            jspPageNode.entityId
+        );
+        nodes.push(...bindingNodes);
+        relationships.push(...bindingRelationships);
+
+        if (bindingNodes.length > 0) {
+            logger.debug(
+                `[JSPParser] Spring form bindings detected for ${fileName}: ` +
+                `${bindingNodes.length} field bindings`
+            );
+        }
+
+        // Business Rule Detection (Phase 3)
+        // Extract validation constraints, conditionals, and guards from JSP
+        const businessRuleDetector = new BusinessRuleDetector(normalizedPath, 'JSP');
+        const businessRuleResult = businessRuleDetector.detectJSPRules(
+            content,
+            jspPageNode.properties.servletPath
+        );
+
+        // Merge business rule nodes
+        const businessRuleNodes = businessRuleDetector.getAllNodes();
+        const businessRuleRelationships = businessRuleDetector.getRelationships();
+
+        logger.debug(
+            `[JSPParser] Business rules detected for ${fileName}: ` +
+            `${businessRuleResult.totalRulesDetected} rules`
+        );
+
         return {
             filePath: normalizedPath,
-            nodes,
-            relationships
+            nodes: [...nodes, ...businessRuleNodes],
+            relationships: [...relationships, ...businessRuleRelationships]
         };
     }
 
@@ -521,5 +592,189 @@ export class JSPParser {
             createdAt: this.now,
             weight: 5
         };
+    }
+
+    /**
+     * Parse Spring form field bindings (form:input, form:select, etc.)
+     * Creates BINDS_TO relationships for UI-to-Entity field tracing
+     */
+    private parseSpringFormBindings(
+        content: string,
+        filePath: string,
+        jspPageEntityId: string
+    ): { bindingNodes: FormFieldBindingNode[]; bindingRelationships: RelationshipInfo[] } {
+        const bindingNodes: FormFieldBindingNode[] = [];
+        const bindingRelationships: RelationshipInfo[] = [];
+
+        // First, find all Spring forms and their model attributes
+        const forms = this.extractSpringForms(content);
+
+        // Pattern to extract all Spring form input fields with path attribute
+        const fieldPatterns = [
+            { pattern: JSP_PATTERNS.SPRING_INPUT, type: 'input' },
+            { pattern: JSP_PATTERNS.SPRING_SELECT, type: 'select' },
+            { pattern: JSP_PATTERNS.SPRING_TEXTAREA, type: 'textarea' },
+            { pattern: JSP_PATTERNS.SPRING_CHECKBOX, type: 'checkbox' },
+            { pattern: JSP_PATTERNS.SPRING_RADIOBUTTON, type: 'radio' },
+        ];
+
+        for (const { pattern, type } of fieldPatterns) {
+            pattern.lastIndex = 0;
+            let match;
+
+            while ((match = pattern.exec(content)) !== null) {
+                // Extract path (field binding)
+                const fullMatch = match[0];
+                const fieldPath = match[2] || match[1]; // Different capture groups for different patterns
+
+                if (!fieldPath) continue;
+
+                // Determine model attribute from enclosing form or default
+                const modelAttribute = this.findEnclosingFormModel(content, match.index, forms);
+
+                // Parse field path (e.g., "entity.fieldName" -> fieldName)
+                const fieldName = fieldPath.includes('.')
+                    ? fieldPath.split('.').pop() || fieldPath
+                    : fieldPath;
+
+                // Check for required attribute
+                const required = /required\s*=\s*["']true["']/.test(fullMatch) ||
+                                /\brequired\b/.test(fullMatch);
+
+                // Extract validation attributes
+                const validationAttributes: string[] = [];
+                if (/maxlength\s*=\s*["'](\d+)["']/.test(fullMatch)) {
+                    const maxMatch = fullMatch.match(/maxlength\s*=\s*["'](\d+)["']/);
+                    if (maxMatch) validationAttributes.push(`maxLength:${maxMatch[1]}`);
+                }
+                if (/size\s*=\s*["'](\d+)["']/.test(fullMatch)) {
+                    const sizeMatch = fullMatch.match(/size\s*=\s*["'](\d+)["']/);
+                    if (sizeMatch) validationAttributes.push(`size:${sizeMatch[1]}`);
+                }
+                if (required) validationAttributes.push('required');
+
+                const lineNumber = this.getLineNumber(content, match.index);
+
+                // Create FormFieldBinding node
+                const bindingEntityId = generateEntityId('formfieldbinding',
+                    `${filePath}:${lineNumber}:${fieldPath}`);
+
+                const bindingNode: FormFieldBindingNode = {
+                    id: generateInstanceId(this.instanceCounter, 'formfieldbinding',
+                        `${fieldPath}:${lineNumber}`),
+                    entityId: bindingEntityId,
+                    kind: 'FormFieldBinding',
+                    name: fieldPath,
+                    filePath,
+                    language: 'JSP',
+                    startLine: lineNumber,
+                    endLine: lineNumber,
+                    startColumn: 0,
+                    endColumn: 0,
+                    parentId: jspPageEntityId,
+                    createdAt: this.now,
+                    properties: {
+                        fieldPath,
+                        modelAttribute,
+                        fieldName,
+                        inputType: type,
+                        required,
+                        validationAttributes,
+                        lineNumber,
+                    },
+                };
+
+                bindingNodes.push(bindingNode);
+
+                // Create HAS_FIELD_BINDING relationship from JSP page to binding
+                bindingRelationships.push({
+                    id: generateInstanceId(this.instanceCounter, 'has_field_binding',
+                        `${jspPageEntityId}:${bindingEntityId}`),
+                    entityId: generateEntityId('has_field_binding',
+                        `${jspPageEntityId}:${bindingEntityId}`),
+                    type: 'HAS_FIELD_BINDING',
+                    sourceId: jspPageEntityId,
+                    targetId: bindingEntityId,
+                    properties: {
+                        lineNumber,
+                        fieldPath,
+                        inputType: type,
+                    },
+                    weight: 6,
+                    createdAt: this.now,
+                });
+
+                // Create BINDS_TO relationship for entity field resolution
+                // Note: Actual entity field resolution happens in Pass 2 or at query time
+                // Here we create a placeholder relationship that can be resolved later
+                const entityFieldId = generateEntityId('javafield',
+                    `${modelAttribute}.${fieldName}`);
+
+                bindingRelationships.push({
+                    id: generateInstanceId(this.instanceCounter, 'binds_to',
+                        `${bindingEntityId}:${entityFieldId}`),
+                    entityId: generateEntityId('binds_to',
+                        `${bindingEntityId}:${entityFieldId}`),
+                    type: 'BINDS_TO',
+                    sourceId: bindingEntityId,
+                    targetId: entityFieldId,
+                    properties: {
+                        fieldPath,
+                        modelAttribute,
+                        fieldName,
+                        inputType: type,
+                        isResolved: false, // Will be resolved in Pass 2
+                    },
+                    weight: 8,
+                    createdAt: this.now,
+                });
+            }
+        }
+
+        return { bindingNodes, bindingRelationships };
+    }
+
+    /**
+     * Extract Spring form definitions and their model attributes
+     */
+    private extractSpringForms(content: string): Map<number, string> {
+        const forms = new Map<number, string>();
+
+        JSP_PATTERNS.SPRING_FORM.lastIndex = 0;
+        let match;
+
+        while ((match = JSP_PATTERNS.SPRING_FORM.exec(content)) !== null) {
+            const modelAttribute = match[1];
+            if (modelAttribute) {
+                forms.set(match.index, modelAttribute);
+            }
+        }
+
+        return forms;
+    }
+
+    /**
+     * Find the model attribute for the form enclosing a given position
+     */
+    private findEnclosingFormModel(
+        content: string,
+        position: number,
+        forms: Map<number, string>
+    ): string {
+        let closestFormPosition = -1;
+        let closestModelAttribute = 'command'; // Default Spring form command name
+
+        for (const [formPosition, modelAttribute] of forms.entries()) {
+            if (formPosition < position && formPosition > closestFormPosition) {
+                // Check if form is closed before our position
+                const formEndMatch = content.substring(formPosition, position).match(/<\/form:form>/i);
+                if (!formEndMatch) {
+                    closestFormPosition = formPosition;
+                    closestModelAttribute = modelAttribute;
+                }
+            }
+        }
+
+        return closestModelAttribute;
     }
 }

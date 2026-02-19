@@ -457,13 +457,14 @@ Output ONLY valid JSON, no other text.
         """Return a default BRD template structure."""
         return ParsedBRDTemplate(
             template_name="Default BRD Template",
-            purpose="Document business requirements clearly for stakeholders and developers.",
+            purpose="Document business requirements and technical implementation details for stakeholders and developers.",
             writing_guidelines=[
-                "Use plain English, avoid technical jargon",
+                "Use plain English, avoid unnecessary jargon",
                 "Be specific and deterministic, avoid vague phrases",
-                "Describe 'what' not 'how' - focus on outcomes",
-                "Capture all business rules explicitly",
+                "Include technical implementation details for development planning",
+                "Capture all business rules explicitly with code references",
                 "Use numbered lists for process flows",
+                "Reference actual component names, file paths, and entity fields",
             ],
             sections=[
                 BRDSection(
@@ -474,8 +475,9 @@ Output ONLY valid JSON, no other text.
                         "Answer: What problem does this solve?",
                         "Answer: Who benefits from this feature?",
                         "Keep it high-level and business-focused",
+                        "Mention key entry points (JSPs, WebFlows) at the end",
                     ],
-                    format_hints=["Use paragraphs"],
+                    format_hints=["Use paragraphs", "End with key components list"],
                 ),
                 BRDSection(
                     name="Functional Requirements",
@@ -489,7 +491,7 @@ Output ONLY valid JSON, no other text.
                     format_hints=["Use bulleted list"],
                 ),
                 BRDSection(
-                    name="Business Rules and Validations",
+                    name="Business Validations and Rules",
                     order=3,
                     description="Capture all logic constraints and business rules.",
                     content_guidelines=[
@@ -500,7 +502,7 @@ Output ONLY valid JSON, no other text.
                     format_hints=["Use bulleted list"],
                 ),
                 BRDSection(
-                    name="Actors and Interactions",
+                    name="Actors and System Interactions",
                     order=4,
                     description="List all user roles or systems that interact with this functionality.",
                     content_guidelines=[
@@ -521,19 +523,81 @@ Output ONLY valid JSON, no other text.
                     format_hints=["Use numbered list"],
                 ),
                 BRDSection(
-                    name="Assumptions and Constraints",
+                    name="Sequence Diagram",
                     order=6,
+                    description="Visual representation of the flow between system components.",
+                    content_guidelines=[
+                        "Show interaction between UI, controllers, services, and data layer",
+                        "Use actual component names from the codebase",
+                        "Include key method calls",
+                    ],
+                    format_hints=["Use Mermaid sequenceDiagram syntax"],
+                    is_diagram=True,
+                ),
+                BRDSection(
+                    name="Technical Architecture",
+                    order=7,
+                    description="Component inventory organized by implementation layer for development planning.",
+                    content_guidelines=[
+                        "List all UI components (JSP pages) with file paths",
+                        "List all WebFlow definitions with state names",
+                        "List all Controllers/Actions with key methods",
+                        "List all Services/Builders/Validators",
+                        "List all DAOs/Repositories with entity associations",
+                        "Show the flow: UI → WebFlow → Controller → Service → DAO → Entity",
+                    ],
+                    format_hints=[
+                        "Use tables with Name | Path | Description columns",
+                        "Group by layer: UI Layer, Flow Layer, Controller Layer, Service Layer, Data Layer",
+                    ],
+                ),
+                BRDSection(
+                    name="Data Model",
+                    order=8,
+                    description="Entity definitions with fields, data types, and relationships for database planning.",
+                    content_guidelines=[
+                        "List each entity with its purpose",
+                        "Show all fields with their data types",
+                        "Include validation annotations (@NotNull, @Size, @Range)",
+                        "Document relationships between entities (FK references)",
+                        "Note any database constraints",
+                    ],
+                    format_hints=[
+                        "Use table format: Field | Type | Constraints | Description",
+                        "Group related entities together",
+                        "Include entity relationship summary",
+                    ],
+                ),
+                BRDSection(
+                    name="Implementation Mapping",
+                    order=9,
+                    description="End-to-end mapping from UI to database for each major operation.",
+                    content_guidelines=[
+                        "Map each UI action to its implementation path",
+                        "Show: UI Field → Controller Method → Service Method → DAO Method → Entity Field",
+                        "Include validation checkpoints in the flow",
+                        "Document where business rules are enforced",
+                    ],
+                    format_hints=[
+                        "Use flow diagrams or tables",
+                        "Example: 'Save Legal Entity' → LegalEntityWizardAction.saveEntity() → LegalEntityBuilder.build() → LeslegalEntityDao.persist() → LeslegalEntity",
+                    ],
+                ),
+                BRDSection(
+                    name="Assumptions and Constraints",
+                    order=10,
                     description="State conditions assumed by the system and any limitations.",
                     content_guidelines=[
                         "List what is assumed to be true",
                         "Document scope limitations",
                         "Note any exclusions",
+                        "Include technical constraints (frameworks, patterns used)",
                     ],
                     format_hints=["Use bulleted list"],
                 ),
                 BRDSection(
                     name="Acceptance Criteria",
-                    order=7,
+                    order=11,
                     description="List business-facing pass/fail conditions for feature completion.",
                     content_guidelines=[
                         "Make criteria measurable and actionable",
