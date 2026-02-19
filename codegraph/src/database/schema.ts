@@ -52,6 +52,12 @@ export const NODE_LABELS = [
     'UIPage',               // File-based UI page (Next.js, Nuxt, SvelteKit, Remix)
     // Feature Discovery (Phase 2)
     'Feature',              // Discovered end-to-end feature
+    // Business Rule Extraction (Phase 3)
+    'BusinessRule',         // Generic business rule
+    'ValidationConstraint', // Annotation-based validation (@NotNull, @Min, etc.)
+    'GuardClause',          // Precondition guard (if (x == null) throw)
+    'ConditionalBusinessLogic', // Business conditional logic (if (amount > 50000))
+    'TestAssertion',        // Test-derived business rule
 ];
 
 // Define Relationship Types used in the graph
@@ -143,6 +149,15 @@ export const RELATIONSHIP_TYPES = [
     'FEATURE_HAS_SERVICE',     // Feature -> Service class
     'FEATURE_HAS_DATA',        // Feature -> Entity/Repository
     'RELATED_FEATURE',         // Feature -> Feature
+    // Business Rule Extraction (Phase 3) - Rule relationship types
+    'VALIDATES_FIELD',         // ValidationConstraint -> Field/Parameter
+    'GUARDS_METHOD',           // GuardClause -> Method
+    'ENFORCES_RULE',           // Method/Class -> BusinessRule
+    'TESTS_RULE',              // TestAssertion -> BusinessRule
+    'DERIVED_FROM',            // BusinessRule -> Source (annotation, if statement, etc.)
+    'APPLIES_TO_PARAMETER',    // ValidationConstraint -> Parameter
+    'THROWS_ON_VIOLATION',     // GuardClause -> Exception type
+    'CONDITIONAL_AFFECTS',     // ConditionalBusinessLogic -> Method/Field
 ];
 
 // Define relationship types that can cross file boundaries
@@ -264,10 +279,11 @@ const ENTRY_POINT_INDEXES = [
 
 // Full-text search indexes for semantic relevance-based queries
 const FULLTEXT_INDEXES = [
-    // Component full-text search (name + description + docstring)
+    // Component full-text search (name + documentation + docComment)
+    // Note: Uses actual AstNode property names from types.ts
     `CREATE FULLTEXT INDEX component_fulltext_search IF NOT EXISTS
      FOR (n:Class|Interface|Function|Method|JavaClass|JavaInterface|JavaMethod|SpringController|SpringService|PythonClass|PythonFunction|CSharpClass|GoFunction|GoStruct|Component)
-     ON EACH [n.name, n.description, n.docstring]`,
+     ON EACH [n.name, n.documentation, n.docComment]`,
     // File full-text search
     `CREATE FULLTEXT INDEX file_fulltext_search IF NOT EXISTS
      FOR (n:File)
@@ -284,6 +300,47 @@ const FULLTEXT_INDEXES = [
     `CREATE FULLTEXT INDEX jsp_spring_fulltext_search IF NOT EXISTS
      FOR (n:JSPPage|WebFlowDefinition|FlowState)
      ON EACH [n.name, n.description, n.servletPath, n.flowId]`,
+    // Business Rule full-text search (Phase 3)
+    `CREATE FULLTEXT INDEX businessrule_fulltext_search IF NOT EXISTS
+     FOR (n:BusinessRule|ValidationConstraint|GuardClause|ConditionalBusinessLogic|TestAssertion)
+     ON EACH [n.ruleText, n.condition, n.targetName, n.errorMessage]`,
+];
+
+// Business Rule Extraction (Phase 3) - Constraints
+const BUSINESS_RULE_CONSTRAINTS = [
+    `CREATE CONSTRAINT businessrule_entityid_unique IF NOT EXISTS FOR (n:BusinessRule) REQUIRE n.entityId IS UNIQUE`,
+    `CREATE CONSTRAINT validationconstraint_entityid_unique IF NOT EXISTS FOR (n:ValidationConstraint) REQUIRE n.entityId IS UNIQUE`,
+    `CREATE CONSTRAINT guardclause_entityid_unique IF NOT EXISTS FOR (n:GuardClause) REQUIRE n.entityId IS UNIQUE`,
+    `CREATE CONSTRAINT conditionalbusinesslogic_entityid_unique IF NOT EXISTS FOR (n:ConditionalBusinessLogic) REQUIRE n.entityId IS UNIQUE`,
+    `CREATE CONSTRAINT testassertion_entityid_unique IF NOT EXISTS FOR (n:TestAssertion) REQUIRE n.entityId IS UNIQUE`,
+];
+
+// Business Rule Extraction (Phase 3) - Indexes
+const BUSINESS_RULE_INDEXES = [
+    // BusinessRule indexes
+    `CREATE INDEX businessrule_ruletype_idx IF NOT EXISTS FOR (n:BusinessRule) ON (n.ruleType)`,
+    `CREATE INDEX businessrule_severity_idx IF NOT EXISTS FOR (n:BusinessRule) ON (n.severity)`,
+    `CREATE INDEX businessrule_confidence_idx IF NOT EXISTS FOR (n:BusinessRule) ON (n.confidence)`,
+    `CREATE INDEX businessrule_targetname_idx IF NOT EXISTS FOR (n:BusinessRule) ON (n.targetName)`,
+    // ValidationConstraint indexes
+    `CREATE INDEX validationconstraint_constraintname_idx IF NOT EXISTS FOR (n:ValidationConstraint) ON (n.constraintName)`,
+    `CREATE INDEX validationconstraint_targetname_idx IF NOT EXISTS FOR (n:ValidationConstraint) ON (n.targetName)`,
+    `CREATE INDEX validationconstraint_framework_idx IF NOT EXISTS FOR (n:ValidationConstraint) ON (n.framework)`,
+    `CREATE INDEX validationconstraint_confidence_idx IF NOT EXISTS FOR (n:ValidationConstraint) ON (n.confidence)`,
+    // GuardClause indexes
+    `CREATE INDEX guardclause_guardtype_idx IF NOT EXISTS FOR (n:GuardClause) ON (n.guardType)`,
+    `CREATE INDEX guardclause_guardedmethod_idx IF NOT EXISTS FOR (n:GuardClause) ON (n.guardedMethod)`,
+    `CREATE INDEX guardclause_isprecondition_idx IF NOT EXISTS FOR (n:GuardClause) ON (n.isPrecondition)`,
+    `CREATE INDEX guardclause_confidence_idx IF NOT EXISTS FOR (n:GuardClause) ON (n.confidence)`,
+    // ConditionalBusinessLogic indexes
+    `CREATE INDEX conditionalbusinesslogic_variable_idx IF NOT EXISTS FOR (n:ConditionalBusinessLogic) ON (n.variable)`,
+    `CREATE INDEX conditionalbusinesslogic_operator_idx IF NOT EXISTS FOR (n:ConditionalBusinessLogic) ON (n.operator)`,
+    `CREATE INDEX conditionalbusinesslogic_confidence_idx IF NOT EXISTS FOR (n:ConditionalBusinessLogic) ON (n.confidence)`,
+    // TestAssertion indexes
+    `CREATE INDEX testassertion_assertiontype_idx IF NOT EXISTS FOR (n:TestAssertion) ON (n.assertionType)`,
+    `CREATE INDEX testassertion_testmethodname_idx IF NOT EXISTS FOR (n:TestAssertion) ON (n.testMethodName)`,
+    `CREATE INDEX testassertion_testedentity_idx IF NOT EXISTS FOR (n:TestAssertion) ON (n.testedEntity)`,
+    `CREATE INDEX testassertion_testframework_idx IF NOT EXISTS FOR (n:TestAssertion) ON (n.testFramework)`,
 ];
 
 // Repository Overview Feature - Analysis property indexes (for AstNode properties)
@@ -325,6 +382,7 @@ const nodeUniquenessConstraints = [
     ...INDEX_STATE_CONSTRAINTS,
     ...MODULE_CONSTRAINTS,
     ...ENTRY_POINT_CONSTRAINTS,
+    ...BUSINESS_RULE_CONSTRAINTS,
 ];
 
 // Indexes for faster lookups (Essential for performance)
@@ -338,6 +396,7 @@ const indexes = [
     ...MODULE_INDEXES,
     ...ENTRY_POINT_INDEXES,
     ...ANALYSIS_INDEXES,
+    ...BUSINESS_RULE_INDEXES,
     ...FULLTEXT_INDEXES,
 ];
 
