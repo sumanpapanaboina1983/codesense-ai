@@ -24,6 +24,8 @@ import { JSPParser } from './parsers/jsp-parser.js';
 import { WebFlowParser } from './parsers/webflow-parser.js';
 import { EnhancedJavaParser } from './parsers/java-parser-enhanced.js';
 import { JSPSpringIntegrator, IntegrationContext } from './integrators/jsp-spring-integrator.js';
+import { MenuParser } from './parsers/menu-parser.js';
+import { ResourceBundleParser } from './parsers/resource-bundle-parser.js';
 
 import { createContextLogger } from '../utils/logger.js';
 import { ParserError } from '../utils/errors.js';
@@ -49,6 +51,8 @@ export class Parser {
     private webFlowParser: WebFlowParser;
     private enhancedJavaParser: EnhancedJavaParser;
     private jspSpringIntegrator: JSPSpringIntegrator;
+    private menuParser: MenuParser;
+    private resourceBundleParser: ResourceBundleParser;
     private analysisContext?: AnalysisContext; // Store analysis context for multi-repository support
 
     constructor() {
@@ -78,10 +82,12 @@ export class Parser {
         this.webFlowParser = new WebFlowParser();
         this.enhancedJavaParser = new EnhancedJavaParser();
         this.jspSpringIntegrator = new JSPSpringIntegrator();
+        this.menuParser = new MenuParser();
+        this.resourceBundleParser = new ResourceBundleParser();
 
         // this.sqlParser = new SqlParser(); // Temporarily disabled
         // Removed tsParser instantiation
-        logger.info('Parser initialized with default compiler options (SQL parser temporarily disabled).');
+        logger.info('Parser initialized with default compiler options (Menu parser, ResourceBundle parser enabled, SQL parser temporarily disabled).');
     }
 
     /**
@@ -140,11 +146,22 @@ export class Parser {
                     case '.jspx':
                         parsePromise = this.jspParser.parseFile(file);
                         break;
+                    case '.properties':
+                        // Parse resource bundle files for error messages and i18n
+                        parsePromise = this.resourceBundleParser.parseFile(file);
+                        break;
                     case '.xml':
-                        // Check if it's a Spring Web Flow file
-                         if (this.isWebFlowFile(file.path)) {
+                        // Check if it's a menu config file first
+                        if (this.menuParser.isMenuConfigFile(file.path)) {
+                            // Set repository ID if available
+                            if (context?.repositoryId) {
+                                this.menuParser.setRepositoryId(context.repositoryId);
+                            }
+                            parsePromise = this.menuParser.parseFile(file);
+                        } else if (this.isWebFlowFile(file.path)) {
+                            // Check if it's a Spring Web Flow file
                             parsePromise = this.webFlowParser.parseFile(file);
-                         } else {
+                        } else {
                             parsePromise = Promise.resolve(null);
                         }
                         break;

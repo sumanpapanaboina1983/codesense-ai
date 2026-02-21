@@ -202,7 +202,7 @@ class LLMSynthesizer:
         feature_request: str,
         detail_level: str = "standard",
         custom_sections: Optional[list[dict]] = None,
-        default_section_words: int = 300,
+        default_section_words: Optional[int] = None,
     ) -> BRDDocument:
         """
         Generate BRD using pre-gathered context (CONTEXT-FIRST approach).
@@ -222,7 +222,7 @@ class LLMSynthesizer:
             feature_request: The feature to generate BRD for
             detail_level: 'concise', 'standard', or 'detailed'
             custom_sections: Optional list of custom section definitions
-            default_section_words: Default target word count per section (100-2000)
+            default_section_words: Default target word count per section (None = no limit)
 
         Returns:
             BRDDocument generated with explicit context
@@ -253,6 +253,40 @@ class LLMSynthesizer:
             labels = ", ".join(context.schema.component_labels[:10]) if context.schema.component_labels else "N/A"
             rels = ", ".join(context.schema.dependency_relationships[:10]) if context.schema.dependency_relationships else "N/A"
             schema_text = f"### Codebase Schema\nComponent types: {labels}\nRelationships: {rels}"
+
+        # Build enhanced context sections (Phase 11)
+        code_snippets_text = ""
+        if context.code_snippets:
+            snippets = [snippet.to_markdown() for snippet in context.code_snippets[:10]]
+            code_snippets_text = "### Code Implementation Details\n" + "\n\n".join(snippets)
+
+        security_rules_text = ""
+        if context.security_rules:
+            rules = [rule.to_markdown() for rule in context.security_rules[:15]]
+            security_rules_text = "### Security & Access Control\n" + "\n".join(rules)
+
+        error_messages_text = ""
+        if context.error_messages:
+            errors = [err.to_markdown() for err in context.error_messages[:20]]
+            error_messages_text = "### Error Messages & Validation Feedback\n" + "\n".join(errors)
+
+        transition_conditions_text = ""
+        if context.transition_conditions:
+            conditions = [cond.to_markdown() for cond in context.transition_conditions[:15]]
+            transition_conditions_text = "### Flow Transitions & Business Rules\n" + "\n".join(conditions)
+
+        form_fields_text = ""
+        if context.form_field_details:
+            form_fields_text = "### UI Form Fields & Validation\n"
+            form_fields_text += "| Field | Label | Type/Validation |\n"
+            form_fields_text += "|-------|-------|------------------|\n"
+            for field in context.form_field_details[:30]:
+                form_fields_text += field.to_markdown() + "\n"
+
+        enhanced_methods_text = ""
+        if context.enhanced_methods:
+            methods = [method.to_markdown() for method in context.enhanced_methods[:8]]
+            enhanced_methods_text = "### Key Method Implementations\n" + "\n\n---\n\n".join(methods)
 
         # Detail level instructions
         detail_instructions = self._get_detail_level_instructions(detail_level)
@@ -286,6 +320,20 @@ The feature "{feature_request}" ALREADY EXISTS in this codebase. Your task is to
 
 {similar_text}
 
+## Extracted Business Logic (from actual code)
+
+{code_snippets_text}
+
+{security_rules_text}
+
+{error_messages_text}
+
+{transition_conditions_text}
+
+{form_fields_text}
+
+{enhanced_methods_text}
+
 {detail_instructions}
 
 ## Writing Instructions
@@ -297,14 +345,30 @@ The feature "{feature_request}" ALREADY EXISTS in this codebase. Your task is to
 - Use numbered lists for process flows
 - Include actual business rules extracted from code
 
+### Using the Enhanced Context
+
+1. **Code Snippets**: Use the provided code snippets to understand exact implementation details. Reference specific lines when describing business logic.
+
+2. **Security Rules**: Include security requirements from @PreAuthorize, @Secured, and @RolesAllowed annotations. Document required roles and access control rules.
+
+3. **Error Messages**: Use actual error messages to document validation rules and user feedback. These are from real .properties files and throw statements.
+
+4. **Flow Transitions**: Use the parsed transition conditions to document business decision points. The conditions show when and why state changes occur.
+
+5. **Form Fields**: Document user input fields with their labels, validation rules, and required status. Use actual field names from JSP forms.
+
+6. **Method Implementations**: Reference the method code to accurately describe business logic. Do NOT invent behavior - describe what the code ACTUALLY does.
+
 OUTPUT THE FULL BRD DOCUMENT IN MARKDOWN FORMAT.
 
 {sections_template}
 
-CRITICAL: Document what EXISTS, not what should be built. Reference actual components: {', '.join([c.name for c in context.architecture.components[:15]])}"""
+CRITICAL: Document what EXISTS, not what should be built. Use the code snippets, security rules, and error messages provided above. Reference actual components: {', '.join([c.name for c in context.architecture.components[:15]])}"""
 
         logger.info(f"[CONTEXT-BRD] Sending prompt with context ({len(prompt)} chars)")
         logger.info(f"[CONTEXT-BRD] Context: {len(context.architecture.components)} components, {len(context.implementation.key_files)} files")
+        logger.info(f"[CONTEXT-BRD] Enhanced: {len(context.code_snippets)} snippets, {len(context.security_rules)} security rules, "
+                   f"{len(context.error_messages)} errors, {len(context.enhanced_methods)} methods")
 
         progress.step("generate_brd", "Sending context + prompt to LLM")
 
@@ -427,14 +491,14 @@ CRITICAL: Document what EXISTS, not what should be built. Reference actual compo
         self,
         custom_sections: Optional[list[dict]],
         context: "AggregatedContext",
-        default_section_words: int = 300,
+        default_section_words: Optional[int] = None,
     ) -> str:
         """Build sections template for BRD output.
 
         Args:
             custom_sections: User-defined sections with name, description, and target_words
             context: Aggregated context for component references
-            default_section_words: Default target word count per section (used if not specified per-section)
+            default_section_words: Default target word count per section (None = no limit)
 
         Returns:
             Formatted sections template for the prompt
@@ -453,8 +517,9 @@ CRITICAL: Document what EXISTS, not what should be built. Reference actual compo
 
             sections_text += f"## {i}. {name}\n"
 
-            # Add target length instruction
-            sections_text += f"**Target Length:** Approximately {target_words} words for this section.\n\n"
+            # Add target length instruction only if target_words is explicitly set
+            if target_words:
+                sections_text += f"**Target Length:** Approximately {target_words} words for this section.\n\n"
 
             if description:
                 # Use the description as guidance

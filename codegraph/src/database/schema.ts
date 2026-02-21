@@ -58,6 +58,26 @@ export const NODE_LABELS = [
     'GuardClause',          // Precondition guard (if (x == null) throw)
     'ConditionalBusinessLogic', // Business conditional logic (if (amount > 50000))
     'TestAssertion',        // Test-derived business rule
+    // Menu & Screen Indexing (Phase 1 - Menu Navigation)
+    'MenuItem',             // Menu item from menu-config.xml
+    'MenuHierarchy',        // Top-level menu structure
+    'Screen',               // WebFlow view-state/screen
+    // Deep Traversal (Phase 2)
+    'ServiceMethod',        // Method with call chain details
+    // Shared Components (Phase 3)
+    'SharedComponent',      // Utility, helper, common classes
+    // Enhanced Business Rules (Phase 4)
+    'EnrichedBusinessRule', // Business rule with full context
+    'ValidationChain',      // Validation chain from UI to DB
+    // Security & Error Messages (Phase 5 - BRD Enhancement)
+    'SecurityRule',         // Security constraint from @PreAuthorize, @Secured, etc.
+    'ErrorMessage',         // Error message from .properties files
+    // Business Logic Blueprint (Phase 6)
+    'DataTable',            // Data table/grid from JSP
+    'BusinessConstant',     // Magic number/threshold from code
+    'ScreenMode',           // Screen mode information (Create/Edit/View)
+    'FeatureBlueprint',     // Complete feature blueprint
+    'SelectOption',         // Dropdown option from JSP
 ];
 
 // Define Relationship Types used in the graph
@@ -158,6 +178,46 @@ export const RELATIONSHIP_TYPES = [
     'APPLIES_TO_PARAMETER',    // ValidationConstraint -> Parameter
     'THROWS_ON_VIOLATION',     // GuardClause -> Exception type
     'CONDITIONAL_AFFECTS',     // ConditionalBusinessLogic -> Method/Field
+    // Menu & Screen Indexing (Phase 1)
+    'HAS_MENU_ITEM',           // MenuHierarchy -> MenuItem
+    'PARENT_MENU_ITEM',        // MenuItem -> MenuItem (nested)
+    'MENU_OPENS_SCREEN',       // MenuItem -> Screen
+    'MENU_OPENS_FLOW',         // MenuItem -> WebFlowDefinition
+    'SCREEN_USES_FLOW',        // Screen -> WebFlowDefinition
+    'SCREEN_CALLS_ACTION',     // Screen -> JavaClass (action)
+    'SCREEN_RENDERS_JSP',      // Screen -> JSPPage
+    'SCREEN_NAVIGATES_TO',     // Screen -> Screen
+    'SCREEN_INHERITS',         // Screen -> Screen (parent)
+    // Deep Traversal (Phase 2)
+    'METHOD_CALLS_METHOD',     // ServiceMethod -> ServiceMethod
+    'METHOD_USES_ENTITY',      // ServiceMethod -> JavaClass
+    'METHOD_QUERIES_DAO',      // ServiceMethod -> DAO method
+    'METHOD_VALIDATES_WITH',   // ServiceMethod -> Validator
+    'SERVICE_DELEGATES_TO',    // Service -> Service
+    'INJECTS_SERVICE',         // Class -> Service (autowired)
+    // Cross-Feature Analysis (Phase 5)
+    'FEATURE_DEPENDS_ON',      // MenuItem -> MenuItem
+    'SHARES_ENTITY',           // Screen -> Screen
+    'SHARES_SERVICE',          // Screen -> Screen
+    'TRIGGERS_VALIDATION_IN',  // Action -> Action
+    'CASCADES_TO',             // Entity cascade
+    'FEATURE_AFFECTS',         // Feature -> Feature
+    // Security & Error Messages (Phase 6 - BRD Enhancement)
+    'SECURED_BY',              // Method/Class -> SecurityRule
+    'HAS_ERROR_MESSAGE',       // Method/GuardClause -> ErrorMessage
+    'REFERENCES_MESSAGE',      // Code -> ErrorMessage (by key)
+    // Business Logic Blueprint (Phase 7)
+    'HAS_DATA_TABLE',          // Screen/JSP -> DataTable
+    'HAS_TABLE_COLUMN',        // DataTable -> TableColumn (embedded in properties)
+    'HAS_SELECT_OPTIONS',      // FormField -> SelectOption
+    'OPTIONS_FROM',            // FormField -> Service/Enum (data source)
+    'HAS_SCREEN_MODE',         // Screen -> ScreenMode
+    'HAS_CONSTANT',            // Class -> BusinessConstant
+    'USES_CONSTANT',           // Method -> BusinessConstant
+    'HAS_BLUEPRINT',           // MenuItem -> FeatureBlueprint
+    'FIELD_DEPENDS_ON',        // FormField -> FormField (cross-field dependency)
+    'ACTION_TRIGGERS',         // ScreenAction -> Method
+    'HAS_TRANSACTION',         // Method -> TransactionBoundary (embedded)
 ];
 
 // Define relationship types that can cross file boundaries
@@ -304,6 +364,18 @@ const FULLTEXT_INDEXES = [
     `CREATE FULLTEXT INDEX businessrule_fulltext_search IF NOT EXISTS
      FOR (n:BusinessRule|ValidationConstraint|GuardClause|ConditionalBusinessLogic|TestAssertion)
      ON EACH [n.ruleText, n.condition, n.targetName, n.errorMessage]`,
+    // Security Rule full-text search (Phase 6 - BRD Enhancement)
+    `CREATE FULLTEXT INDEX security_fulltext_search IF NOT EXISTS
+     FOR (n:SecurityRule)
+     ON EACH [n.annotationText, n.expression, n.ruleDescription]`,
+    // Error Message full-text search (Phase 6 - BRD Enhancement)
+    `CREATE FULLTEXT INDEX errormessage_fulltext_search IF NOT EXISTS
+     FOR (n:ErrorMessage)
+     ON EACH [n.messageKey, n.messageText]`,
+    // Method error messages full-text search (for code snippets)
+    `CREATE FULLTEXT INDEX method_errors_fulltext_search IF NOT EXISTS
+     FOR (n:JavaMethod)
+     ON EACH [n.errorMessages, n.codeSnippet]`,
 ];
 
 // Business Rule Extraction (Phase 3) - Constraints
@@ -313,6 +385,40 @@ const BUSINESS_RULE_CONSTRAINTS = [
     `CREATE CONSTRAINT guardclause_entityid_unique IF NOT EXISTS FOR (n:GuardClause) REQUIRE n.entityId IS UNIQUE`,
     `CREATE CONSTRAINT conditionalbusinesslogic_entityid_unique IF NOT EXISTS FOR (n:ConditionalBusinessLogic) REQUIRE n.entityId IS UNIQUE`,
     `CREATE CONSTRAINT testassertion_entityid_unique IF NOT EXISTS FOR (n:TestAssertion) REQUIRE n.entityId IS UNIQUE`,
+];
+
+// Menu & Screen Indexing (Phase 1) - Indexes
+const MENU_SCREEN_INDEXES = [
+    // MenuItem indexes
+    `CREATE INDEX menuitem_label_idx IF NOT EXISTS FOR (n:MenuItem) ON (n.label)`,
+    `CREATE INDEX menuitem_url_idx IF NOT EXISTS FOR (n:MenuItem) ON (n.url)`,
+    `CREATE INDEX menuitem_flowid_idx IF NOT EXISTS FOR (n:MenuItem) ON (n.flowId)`,
+    `CREATE INDEX menuitem_viewstateid_idx IF NOT EXISTS FOR (n:MenuItem) ON (n.viewStateId)`,
+    `CREATE INDEX menuitem_parentmenu_idx IF NOT EXISTS FOR (n:MenuItem) ON (n.parentMenu)`,
+    `CREATE INDEX menuitem_menulevel_idx IF NOT EXISTS FOR (n:MenuItem) ON (n.menuLevel)`,
+    // Screen indexes
+    `CREATE INDEX screen_screenid_idx IF NOT EXISTS FOR (n:Screen) ON (n.screenId)`,
+    `CREATE INDEX screen_title_idx IF NOT EXISTS FOR (n:Screen) ON (n.title)`,
+    `CREATE INDEX screen_flowid_idx IF NOT EXISTS FOR (n:Screen) ON (n.flowId)`,
+    `CREATE INDEX screen_screentype_idx IF NOT EXISTS FOR (n:Screen) ON (n.screenType)`,
+    `CREATE INDEX screen_actionclass_idx IF NOT EXISTS FOR (n:Screen) ON (n.actionClass)`,
+    // ServiceMethod indexes
+    `CREATE INDEX servicemethod_classname_idx IF NOT EXISTS FOR (n:ServiceMethod) ON (n.className)`,
+    `CREATE INDEX servicemethod_methodname_idx IF NOT EXISTS FOR (n:ServiceMethod) ON (n.methodName)`,
+    // SharedComponent indexes
+    `CREATE INDEX sharedcomponent_type_idx IF NOT EXISTS FOR (n:SharedComponent) ON (n.componentType)`,
+    `CREATE INDEX sharedcomponent_usagecount_idx IF NOT EXISTS FOR (n:SharedComponent) ON (n.usageCount)`,
+    // EnrichedBusinessRule indexes
+    `CREATE INDEX enrichedbusinessrule_ruletype_idx IF NOT EXISTS FOR (n:EnrichedBusinessRule) ON (n.ruleType)`,
+    `CREATE INDEX enrichedbusinessrule_severity_idx IF NOT EXISTS FOR (n:EnrichedBusinessRule) ON (n.severity)`,
+    `CREATE INDEX enrichedbusinessrule_menuitem_idx IF NOT EXISTS FOR (n:EnrichedBusinessRule) ON (n.menuItem)`,
+];
+
+// Menu & Screen full-text search
+const MENU_SCREEN_FULLTEXT_INDEXES = [
+    `CREATE FULLTEXT INDEX menu_fulltext_search IF NOT EXISTS
+     FOR (n:MenuItem|Screen)
+     ON EACH [n.label, n.title, n.name, n.url]`,
 ];
 
 // Business Rule Extraction (Phase 3) - Indexes
@@ -341,6 +447,25 @@ const BUSINESS_RULE_INDEXES = [
     `CREATE INDEX testassertion_testmethodname_idx IF NOT EXISTS FOR (n:TestAssertion) ON (n.testMethodName)`,
     `CREATE INDEX testassertion_testedentity_idx IF NOT EXISTS FOR (n:TestAssertion) ON (n.testedEntity)`,
     `CREATE INDEX testassertion_testframework_idx IF NOT EXISTS FOR (n:TestAssertion) ON (n.testFramework)`,
+    // SecurityRule indexes (Phase 6 - BRD Enhancement)
+    `CREATE INDEX securityrule_annotationtype_idx IF NOT EXISTS FOR (n:SecurityRule) ON (n.annotationType)`,
+    `CREATE INDEX securityrule_roles_idx IF NOT EXISTS FOR (n:SecurityRule) ON (n.roles)`,
+    `CREATE INDEX securityrule_targettype_idx IF NOT EXISTS FOR (n:SecurityRule) ON (n.targetType)`,
+    // ErrorMessage indexes (Phase 6 - BRD Enhancement)
+    `CREATE INDEX errormessage_messagekey_idx IF NOT EXISTS FOR (n:ErrorMessage) ON (n.messageKey)`,
+    `CREATE INDEX errormessage_sourcefile_idx IF NOT EXISTS FOR (n:ErrorMessage) ON (n.sourceFile)`,
+    `CREATE INDEX errormessage_locale_idx IF NOT EXISTS FOR (n:ErrorMessage) ON (n.locale)`,
+    // Business Logic Blueprint indexes (Phase 7)
+    `CREATE INDEX datatable_id_idx IF NOT EXISTS FOR (n:DataTable) ON (n.tableId)`,
+    `CREATE INDEX datatable_datasource_idx IF NOT EXISTS FOR (n:DataTable) ON (n.dataSource)`,
+    `CREATE INDEX businessconstant_name_idx IF NOT EXISTS FOR (n:BusinessConstant) ON (n.constantName)`,
+    `CREATE INDEX businessconstant_value_idx IF NOT EXISTS FOR (n:BusinessConstant) ON (n.value)`,
+    `CREATE INDEX businessconstant_type_idx IF NOT EXISTS FOR (n:BusinessConstant) ON (n.constantType)`,
+    `CREATE INDEX screenmode_mode_idx IF NOT EXISTS FOR (n:ScreenMode) ON (n.mode)`,
+    `CREATE INDEX screenmode_source_idx IF NOT EXISTS FOR (n:ScreenMode) ON (n.modeSource)`,
+    `CREATE INDEX featureblueprint_name_idx IF NOT EXISTS FOR (n:FeatureBlueprint) ON (n.featureName)`,
+    `CREATE INDEX featureblueprint_confidence_idx IF NOT EXISTS FOR (n:FeatureBlueprint) ON (n.confidence)`,
+    `CREATE INDEX selectoption_value_idx IF NOT EXISTS FOR (n:SelectOption) ON (n.value)`,
 ];
 
 // Repository Overview Feature - Analysis property indexes (for AstNode properties)
@@ -398,6 +523,8 @@ const indexes = [
     ...ANALYSIS_INDEXES,
     ...BUSINESS_RULE_INDEXES,
     ...FULLTEXT_INDEXES,
+    ...MENU_SCREEN_INDEXES,
+    ...MENU_SCREEN_FULLTEXT_INDEXES,
 ];
 
 // Export schema arrays

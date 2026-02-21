@@ -415,7 +415,7 @@ Extract 3-8 key business claims from this section.
                     AND (toLower(n.name) CONTAINS toLower('{keyword}')
                          OR toLower(n.entityId) CONTAINS toLower('{keyword}'))
                     RETURN DISTINCT n.name AS name
-                    LIMIT 5
+                    LIMIT 50
                     """
 
                     result = await self.neo4j_client.execute_query(query)
@@ -943,7 +943,7 @@ Start by querying the codebase using the tools, then provide your verification r
                    m.filePath AS filePath, m.startLine AS startLine, m.endLine AS endLine,
                    m.complexity AS complexity
             ORDER BY m.endLine - m.startLine DESC
-            LIMIT 10
+            LIMIT 100
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1007,7 +1007,7 @@ Start by querying the codebase using the tools, then provide your verification r
             AND (n.name CONTAINS '{entity}' OR n.filePath CONTAINS '{entity.lower()}')
             RETURN n.name AS name, n.kind AS kind, n.filePath AS filePath,
                    n.startLine AS startLine, n.endLine AS endLine
-            LIMIT 5
+            LIMIT 50
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1157,7 +1157,7 @@ Start by querying the codebase using the tools, then provide your verification r
             AND m.name CONTAINS '{action}'
             RETURN c.name AS className, m.name AS methodName,
                    m.filePath AS filePath, m.startLine AS startLine, m.endLine AS endLine
-            LIMIT 5
+            LIMIT 50
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1203,7 +1203,7 @@ Start by querying the codebase using the tools, then provide your verification r
             MATCH path = (source)-[:CALLS|USES|IMPORTS*1..3]->(target)
             WHERE source.name CONTAINS '{entity}' OR target.name CONTAINS '{entity}'
             RETURN nodes(path) AS nodes, relationships(path) AS rels
-            LIMIT 10
+            LIMIT 100
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1320,7 +1320,7 @@ Start by querying the codebase using the tools, then provide your verification r
                    vc.targetName AS targetName, vc.constraintParameters AS params,
                    vc.filePath AS filePath, vc.startLine AS startLine, vc.endLine AS endLine,
                    vc.confidence AS confidence
-            LIMIT 5
+            LIMIT 50
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1383,7 +1383,7 @@ Start by querying the codebase using the tools, then provide your verification r
                    gc.guardedMethod AS guardedMethod,
                    gc.filePath AS filePath, gc.startLine AS startLine, gc.endLine AS endLine,
                    gc.confidence AS confidence
-            LIMIT 5
+            LIMIT 50
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1441,7 +1441,7 @@ Start by querying the codebase using the tools, then provide your verification r
                    cbl.businessMeaning AS businessMeaning,
                    cbl.filePath AS filePath, cbl.startLine AS startLine, cbl.endLine AS endLine,
                    cbl.confidence AS confidence
-            LIMIT 5
+            LIMIT 50
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1499,7 +1499,7 @@ Start by querying the codebase using the tools, then provide your verification r
                    ta.testMethodName AS testMethodName, ta.testClassName AS testClassName,
                    ta.filePath AS filePath, ta.startLine AS startLine, ta.endLine AS endLine,
                    ta.confidence AS confidence
-            LIMIT 5
+            LIMIT 50
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1559,7 +1559,7 @@ Start by querying the codebase using the tools, then provide your verification r
                    br.ruleType AS ruleType, br.severity AS severity,
                    br.filePath AS filePath, br.startLine AS startLine, br.endLine AS endLine,
                    br.confidence AS confidence
-            LIMIT 5
+            LIMIT 50
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1655,7 +1655,7 @@ Start by querying the codebase using the tools, then provide your verification r
             WHERE n.name CONTAINS '{entity}' OR n.entityId CONTAINS '{entity}'
             RETURN n.name AS name, n.kind AS kind, n.filePath AS filePath,
                    n.startLine AS startLine, n.endLine AS endLine
-            LIMIT 5
+            LIMIT 50
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1701,7 +1701,7 @@ Start by querying the codebase using the tools, then provide your verification r
             WHERE source.name CONTAINS '{entity}' OR target.name CONTAINS '{entity}'
             RETURN source.name AS sourceName, type(r) AS relType, target.name AS targetName,
                    source.filePath AS sourceFile, target.filePath AS targetFile
-            LIMIT 10
+            LIMIT 100
             """
 
             result = await self.neo4j_client.execute_query(query)
@@ -1746,7 +1746,7 @@ Start by querying the codebase using the tools, then provide your verification r
             WHERE source.name CONTAINS '{entity}' OR target.name CONTAINS '{entity}'
             RETURN source.name AS sourceName, type(r) AS relType, target.name AS targetName,
                    source.filePath AS sourceFile
-            LIMIT 10
+            LIMIT 100
             """
 
             result = await self.neo4j_client.execute_query(query)

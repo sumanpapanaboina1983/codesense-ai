@@ -115,7 +115,8 @@ const config: Config = {
     , '.java',                   // Java
     '.cs',                       // C#
     '.go',                       // Go
-    '.sql'                       // SQL
+    '.sql',                      // SQL
+    '.properties'                // Java properties files (resource bundles, i18n)
   ],
 
 };

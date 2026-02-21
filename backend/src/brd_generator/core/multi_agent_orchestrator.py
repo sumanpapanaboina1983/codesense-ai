@@ -138,7 +138,7 @@ class MultiAgentOrchestrator:
         temperature: float = 0.0,
         seed: Optional[int] = None,
         claims_per_section: int = 5,
-        default_section_words: int = 300,
+        default_section_words: Optional[int] = None,
         skip_verification: bool = False,
     ):
         """
@@ -156,7 +156,7 @@ class MultiAgentOrchestrator:
             temperature: LLM temperature (0.0-1.0, lower = more consistent). Default 0.0.
             seed: Optional seed for reproducible outputs
             claims_per_section: Target number of claims to extract per section (default: 5)
-            default_section_words: Default target word count per section (default: 300)
+            default_section_words: Default target word count per section (None = no limit)
             sufficiency_criteria: Custom criteria for what makes a complete analysis.
                 Structure:
                 {
@@ -225,8 +225,12 @@ class MultiAgentOrchestrator:
 
         # Claim extraction and section length controls
         self.claims_per_section = max(3, min(15, claims_per_section))  # Clamp to 3-15
-        self.default_section_words = max(100, min(2000, default_section_words))  # Clamp to 100-2000
-        logger.info(f"Content controls: claims_per_section={self.claims_per_section}, default_section_words={self.default_section_words}")
+        # Only clamp if explicitly set, otherwise None means no limit
+        if default_section_words is not None:
+            self.default_section_words = max(100, min(5000, default_section_words))  # Clamp to 100-5000
+        else:
+            self.default_section_words = None  # No length restriction
+        logger.info(f"Content controls: claims_per_section={self.claims_per_section}, default_section_words={self.default_section_words or 'unlimited'}")
 
         # Draft mode - skip verification for faster generation
         self.skip_verification = skip_verification
@@ -967,7 +971,16 @@ Return as JSON:
                         target_words = s.get("target_words")
                     break
 
-        word_count_instruction = f"\n**Target Length:** Approximately {target_words} words for this section.\n"
+        # Only add word count instruction if target_words is explicitly set
+        word_count_instruction = ""
+        if target_words:
+            word_count_instruction = f"\n**Target Length:** Approximately {target_words} words for this section.\n"
+
+        # Check for auto-generated content from feature flow extraction
+        # This content comes from actual code graph traversal and should be preserved
+        auto_generated_content, auto_gen_instructions = self._get_auto_generated_content(
+            section_name, context
+        )
 
         # REVERSE ENGINEERING prompt with BRD best practices
         prompt = f"""You are an expert Business Analyst reverse engineering EXISTING code to create a BRD.
@@ -995,9 +1008,23 @@ The feature "{context.request}" ALREADY EXISTS in this codebase. Document what t
 
 **Key Source Files ({len(context.implementation.key_files)}):**
 {self._format_files(context)}
+
+{self._format_menu_items(context)}
+
+{self._format_sub_features(context)}
+
+{self._format_validation_chains(context)}
+
+{self._format_cross_feature_context(context)}
+
+{self._format_enriched_business_rules(context)}
+
+{self._format_enhanced_context(context)}
 {prev_sections_text}
 {feedback_text}
 {sufficiency_text}
+{auto_generated_content}
+{auto_gen_instructions}
 
 ## Writing Instructions
 
@@ -1007,6 +1034,20 @@ The feature "{context.request}" ALREADY EXISTS in this codebase. Document what t
 - Explain "what" not "how" - describe outcomes, not implementation
 - Use numbered lists for process flows
 - Capture all business rules from the code
+
+### Using the Enhanced Context
+
+1. **Code Snippets**: Use the provided code snippets to understand exact implementation details. Reference specific lines when describing business logic.
+
+2. **Security Rules**: Include security requirements from @PreAuthorize, @Secured, and @RolesAllowed annotations. Document required roles and access control rules.
+
+3. **Error Messages**: Use actual error messages to document validation rules and user feedback. These are from real .properties files and throw statements.
+
+4. **Flow Transitions**: Use the parsed transition conditions to document business decision points. The conditions show when and why state changes occur.
+
+5. **Form Fields**: Document user input fields with their labels, validation rules, and required status. Use actual field names from JSP forms.
+
+6. **Method Implementations**: Reference the method code to accurately describe business logic. Do NOT invent behavior - describe what the code ACTUALLY does.
 
 First show your analysis (wrapped in <thinking> tags), then the section:
 
@@ -1019,6 +1060,806 @@ First show your analysis (wrapped in <thinking> tags), then the section:
 [Document what the EXISTING code does based on your analysis]
 """
         return prompt
+
+    def _get_auto_generated_content(
+        self,
+        section_name: str,
+        context: AggregatedContext,
+    ) -> tuple[str, str]:
+        """Get auto-generated content for sections that have pre-extracted data.
+
+        For Technical Architecture, Implementation Mapping, and Data Model sections,
+        we have pre-generated content from actual code graph traversal via FeatureFlowService.
+        This content should be PRESERVED and enhanced by the LLM, not replaced.
+
+        Args:
+            section_name: Name of the section being generated
+            context: Aggregated context containing feature flows and pre-generated content
+
+        Returns:
+            Tuple of (auto_generated_content, instructions_for_llm)
+        """
+        name_lower = section_name.lower().replace(" ", "_")
+
+        # Technical Architecture section - inject pre-generated layered architecture
+        if "technical_architecture" in name_lower or ("technical" in name_lower and "architecture" in name_lower):
+            if context.technical_architecture:
+                logger.info(f"[{section_name}] Injecting auto-generated Technical Architecture from code traversal")
+                return (
+                    f"""
+## 🔧 AUTO-GENERATED CONTENT (from code graph traversal)
+
+The following architecture was extracted by tracing actual code paths from UI to database.
+**File paths and line numbers are from real code - DO NOT modify them.**
+
+{context.technical_architecture}
+""",
+                    """
+## ⚠️ CRITICAL INSTRUCTIONS FOR THIS SECTION
+
+1. **PRESERVE** all auto-generated file paths, line numbers, and component references exactly as shown
+2. The layered structure (UI → Flow → Controller → Service → DAO → Database) is accurate from code traversal
+3. You may **ADD** additional context such as:
+   - Business purpose of each layer/component
+   - How data flows between layers
+   - Error handling and validation points
+   - Dependencies between components
+4. **DO NOT** invent new file paths or line numbers
+5. **DO NOT** remove or modify the existing code references
+6. Format the content for readability while preserving all technical references
+"""
+                )
+
+        # Implementation Mapping section - inject pre-generated operation-to-code mapping
+        if "implementation_mapping" in name_lower or ("implementation" in name_lower and "mapping" in name_lower):
+            if context.implementation_mapping:
+                logger.info(f"[{section_name}] Injecting auto-generated Implementation Mapping from code traversal")
+                return (
+                    f"""
+## 🔧 AUTO-GENERATED CONTENT (from code graph traversal)
+
+The following mapping was extracted by tracing actual code execution paths.
+**File paths and line numbers are from real code - DO NOT modify them.**
+
+{context.implementation_mapping}
+""",
+                    """
+## ⚠️ CRITICAL INSTRUCTIONS FOR THIS SECTION
+
+1. **PRESERVE** all auto-generated table rows with file paths and line numbers exactly as shown
+2. The Operation-to-Implementation table shows actual code locations from graph traversal
+3. You may **ADD**:
+   - Additional operations discovered from code analysis
+   - Explanatory text about how to read the mapping
+   - Business context for each operation
+4. **DO NOT** modify existing file:line references - they are from actual code traversal
+5. **DO NOT** invent new file paths or make up line numbers
+6. Ensure the table format is preserved and readable
+"""
+                )
+
+        # Data Model section - extract from feature flows if available
+        if "data_model" in name_lower or ("data" in name_lower and "model" in name_lower):
+            if context.feature_flows:
+                data_model_content = self._extract_data_model_from_flows(context)
+                if data_model_content:
+                    logger.info(f"[{section_name}] Injecting extracted Data Model from feature flows")
+                    return (
+                        f"""
+## 🔧 AUTO-GENERATED CONTENT (from SQL operations in code)
+
+The following data model was extracted from actual SQL operations found in the codebase.
+
+{data_model_content}
+""",
+                        """
+## ⚠️ CRITICAL INSTRUCTIONS FOR THIS SECTION
+
+1. The table and column information was extracted from actual SQL operations in the code
+2. You may **ADD**:
+   - Entity class information if visible in the context
+   - Relationship descriptions based on code analysis
+   - Validation annotations observed in entity classes
+   - Business meaning of each table/column
+3. **DO NOT** invent tables or columns not found in the code
+4. Preserve the extracted database structure accurately
+"""
+                    )
+
+        # Frontend Components section - extract UI/JSP/WebFlow info from feature flows
+        if "frontend_components" in name_lower or ("frontend" in name_lower and "component" in name_lower):
+            if context.feature_flows:
+                frontend_content = self._extract_frontend_content_from_flows(context)
+                if frontend_content:
+                    logger.info(f"[{section_name}] Injecting extracted Frontend Components from feature flows")
+                    return (
+                        f"""
+## 🔧 AUTO-GENERATED CONTENT (from code graph traversal)
+
+The following UI components were extracted from actual code paths in the codebase.
+**File paths and line numbers are from real code - DO NOT modify them.**
+
+{frontend_content}
+""",
+                        """
+## ⚠️ CRITICAL INSTRUCTIONS FOR THIS SECTION
+
+1. **PRESERVE** all auto-generated file paths, line numbers, and component references exactly as shown
+2. The JSP pages, form fields, and WebFlow states are from actual code traversal
+3. You may **ADD**:
+   - Business purpose of each UI component
+   - User experience flow descriptions
+   - Field-level validation requirements in business terms
+   - Client-side interaction patterns
+4. **DO NOT** invent new file paths or line numbers
+5. **DO NOT** remove or modify existing code references
+6. Add context about what business function each UI element serves
+"""
+                    )
+
+        # Backend Services section - extract controller/service info from feature flows
+        if "backend_services" in name_lower or ("backend" in name_lower and "service" in name_lower):
+            if context.feature_flows:
+                backend_content = self._extract_backend_content_from_flows(context)
+                if backend_content:
+                    logger.info(f"[{section_name}] Injecting extracted Backend Services from feature flows")
+                    return (
+                        f"""
+## 🔧 AUTO-GENERATED CONTENT (from code graph traversal)
+
+The following backend components were extracted from actual code paths in the codebase.
+**File paths and line numbers are from real code - DO NOT modify them.**
+
+{backend_content}
+""",
+                        """
+## ⚠️ CRITICAL INSTRUCTIONS FOR THIS SECTION
+
+1. **PRESERVE** all auto-generated class names, method signatures, and line numbers exactly as shown
+2. The controller/service/validator mappings are from actual code traversal
+3. You may **ADD**:
+   - Business rules implemented by each method (in business terms)
+   - Data transformations performed
+   - Error handling and validation logic descriptions
+   - Dependency relationships between services
+4. **DO NOT** invent new method signatures or line numbers
+5. **DO NOT** remove or modify existing code references
+6. Explain what business logic each service method implements
+"""
+                    )
+
+        # Persistence Layer section - extract DAO/SQL info from feature flows
+        if "persistence_layer" in name_lower or ("persistence" in name_lower and "layer" in name_lower):
+            if context.feature_flows:
+                persistence_content = self._extract_persistence_content_from_flows(context)
+                if persistence_content:
+                    logger.info(f"[{section_name}] Injecting extracted Persistence Layer from feature flows")
+                    return (
+                        f"""
+## 🔧 AUTO-GENERATED CONTENT (from code graph traversal)
+
+The following persistence layer components were extracted from actual code paths in the codebase.
+**File paths, line numbers, and SQL operations are from real code - DO NOT modify them.**
+
+{persistence_content}
+""",
+                        """
+## ⚠️ CRITICAL INSTRUCTIONS FOR THIS SECTION
+
+1. **PRESERVE** all auto-generated DAO classes, entity mappings, and SQL operations exactly as shown
+2. The database operations and field mappings are from actual code traversal
+3. You may **ADD**:
+   - Business meaning of each database table and column
+   - Data integrity rules and constraints explanation
+   - Transaction boundary descriptions
+   - Audit field usage and purpose
+4. **DO NOT** invent new tables, columns, or SQL operations
+5. **DO NOT** remove or modify existing database references
+6. Explain what business data each table/entity represents
+"""
+                    )
+
+        # No auto-generated content for this section
+        return ("", "")
+
+    def _extract_data_model_from_flows(self, context: AggregatedContext) -> str:
+        """Extract data model information from feature flows.
+
+        Args:
+            context: Aggregated context containing feature flows
+
+        Returns:
+            Markdown string describing the data model
+        """
+        if not context.feature_flows:
+            return ""
+
+        sections = []
+        sections.append("### Database Tables\n")
+        sections.append("*Tables and columns extracted from SQL operations in the code*\n")
+
+        # Collect unique tables and their columns
+        tables: dict[str, dict] = {}  # table_name -> {columns, operations, source}
+
+        for flow_dict in context.feature_flows:
+            # Handle both dict and object representations
+            sql_ops = flow_dict.get("sql_operations", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "sql_operations", [])
+
+            for op in sql_ops:
+                if isinstance(op, dict):
+                    table = op.get("table_name", "unknown")
+                    columns = op.get("columns", [])
+                    op_type = op.get("statement_type", "UNKNOWN")
+                    source = op.get("source_location", "")
+                else:
+                    table = getattr(op, "table_name", "unknown")
+                    columns = getattr(op, "columns", [])
+                    op_type = getattr(op, "statement_type", "UNKNOWN")
+                    source = getattr(op, "source_location", "")
+
+                if table and table != "unknown":
+                    if table not in tables:
+                        tables[table] = {"columns": set(), "operations": set(), "sources": set()}
+                    tables[table]["columns"].update(columns if columns else [])
+                    tables[table]["operations"].add(op_type)
+                    if source:
+                        tables[table]["sources"].add(source)
+
+        if tables:
+            sections.append("\n| Table | Columns | Operations | Source |")
+            sections.append("|-------|---------|------------|--------|")
+            for table_name, info in sorted(tables.items()):
+                cols = ", ".join(sorted(info["columns"])[:5])  # Limit columns shown
+                if len(info["columns"]) > 5:
+                    cols += f" (+{len(info['columns']) - 5} more)"
+                ops = ", ".join(sorted(info["operations"]))
+                sources = ", ".join(list(info["sources"])[:2])  # Limit sources shown
+                sections.append(f"| {table_name} | {cols} | {ops} | {sources} |")
+        else:
+            sections.append("\n*No SQL operations found in the traced code paths.*")
+
+        # Add data mappings section if available
+        data_mappings_found = False
+        for flow_dict in context.feature_flows:
+            mappings = flow_dict.get("data_mappings", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "data_mappings", [])
+            if mappings:
+                data_mappings_found = True
+                break
+
+        if data_mappings_found:
+            sections.append("\n### Field Mappings\n")
+            sections.append("*UI field to database column mappings*\n")
+            sections.append("\n| Entity Field | DB Column | DB Table | Data Type |")
+            sections.append("|--------------|-----------|----------|-----------|")
+
+            for flow_dict in context.feature_flows:
+                mappings = flow_dict.get("data_mappings", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "data_mappings", [])
+                for dm in mappings[:10]:  # Limit to 10 mappings
+                    if isinstance(dm, dict):
+                        entity_field = dm.get("entity_field", "-")
+                        db_column = dm.get("db_column", "-")
+                        db_table = dm.get("db_table", "-")
+                        data_type = dm.get("data_type", "-")
+                    else:
+                        entity_field = getattr(dm, "entity_field", "-")
+                        db_column = getattr(dm, "db_column", "-")
+                        db_table = getattr(dm, "db_table", "-")
+                        data_type = getattr(dm, "data_type", "-")
+                    sections.append(f"| {entity_field} | {db_column} | {db_table} | {data_type} |")
+
+        return "\n".join(sections)
+
+    def _format_layer_context(self, context: AggregatedContext, layer: str) -> str:
+        """Format layer-organized components for prompts.
+
+        Args:
+            context: Aggregated context containing feature flows and components
+            layer: One of 'frontend', 'backend', 'persistence'
+
+        Returns:
+            Markdown string describing components in the specified layer
+        """
+        if not context.feature_flows:
+            return ""
+
+        sections = []
+
+        for flow_dict in context.feature_flows:
+            flow_name = flow_dict.get("entry_point", "Unknown") if isinstance(flow_dict, dict) else getattr(flow_dict, "entry_point", "Unknown")
+            layers = flow_dict.get("layers", {}) if isinstance(flow_dict, dict) else getattr(flow_dict, "layers", {})
+
+            if not layers:
+                continue
+
+            layer_data = layers.get(layer, {})
+            if not layer_data:
+                continue
+
+            components = layer_data.get("components", []) if isinstance(layer_data, dict) else getattr(layer_data, "components", [])
+
+            if components:
+                sections.append(f"\n### {flow_name}\n")
+                for comp in components[:15]:  # Limit components per flow
+                    if isinstance(comp, dict):
+                        name = comp.get("name", "Unknown")
+                        comp_type = comp.get("type", "Component")
+                        file_path = comp.get("file_path", "")
+                        line = comp.get("line", "")
+                        methods = comp.get("methods", [])
+                    else:
+                        name = getattr(comp, "name", "Unknown")
+                        comp_type = getattr(comp, "type", "Component")
+                        file_path = getattr(comp, "file_path", "")
+                        line = getattr(comp, "line", "")
+                        methods = getattr(comp, "methods", [])
+
+                    location = f"{file_path}:{line}" if file_path and line else file_path or "-"
+                    sections.append(f"- **{name}** ({comp_type}) @ `{location}`")
+
+                    if methods:
+                        for method in methods[:5]:
+                            if isinstance(method, dict):
+                                method_name = method.get("name", "")
+                                method_line = method.get("line", "")
+                                signature = method.get("signature", "")
+                            else:
+                                method_name = getattr(method, "name", "")
+                                method_line = getattr(method, "line", "")
+                                signature = getattr(method, "signature", "")
+                            if method_name:
+                                sig_str = f": `{signature}`" if signature else ""
+                                sections.append(f"  - `{method_name}()` line {method_line}{sig_str}")
+
+        return "\n".join(sections) if sections else f"*No {layer} components found in feature flows.*"
+
+    def _extract_frontend_content_from_flows(self, context: AggregatedContext) -> str:
+        """Extract UI components from feature flows.
+
+        Args:
+            context: Aggregated context containing feature flows
+
+        Returns:
+            Markdown string describing frontend components
+        """
+        if not context.feature_flows:
+            return ""
+
+        sections = []
+        sections.append("### JSP Pages / Views\n")
+        sections.append("| Page | File Path | Purpose | WebFlow State |")
+        sections.append("|------|-----------|---------|---------------|")
+
+        jsp_pages = []
+        form_fields = []
+        webflow_states = []
+
+        for flow_dict in context.feature_flows:
+            # Extract UI layer components
+            layers = flow_dict.get("layers", {}) if isinstance(flow_dict, dict) else getattr(flow_dict, "layers", {})
+            ui_layer = layers.get("ui", {}) or layers.get("frontend", {}) or layers.get("view", {})
+
+            if ui_layer:
+                components = ui_layer.get("components", []) if isinstance(ui_layer, dict) else getattr(ui_layer, "components", [])
+                for comp in components:
+                    if isinstance(comp, dict):
+                        name = comp.get("name", "")
+                        file_path = comp.get("file_path", "")
+                        purpose = comp.get("purpose", comp.get("description", "-"))
+                        state = comp.get("webflow_state", "-")
+                    else:
+                        name = getattr(comp, "name", "")
+                        file_path = getattr(comp, "file_path", "")
+                        purpose = getattr(comp, "purpose", getattr(comp, "description", "-"))
+                        state = getattr(comp, "webflow_state", "-")
+
+                    if name and (name.endswith(".jsp") or "View" in name or "Form" in name):
+                        jsp_pages.append(f"| {name} | {file_path} | {purpose[:50]} | {state} |")
+
+            # Extract form fields from data mappings
+            data_mappings = flow_dict.get("data_mappings", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "data_mappings", [])
+            for dm in data_mappings:
+                if isinstance(dm, dict):
+                    ui_field = dm.get("ui_field", dm.get("entity_field", ""))
+                    field_type = dm.get("field_type", dm.get("data_type", "text"))
+                    required = dm.get("required", "-")
+                    validations = dm.get("validations", "-")
+                else:
+                    ui_field = getattr(dm, "ui_field", getattr(dm, "entity_field", ""))
+                    field_type = getattr(dm, "field_type", getattr(dm, "data_type", "text"))
+                    required = getattr(dm, "required", "-")
+                    validations = getattr(dm, "validations", "-")
+
+                if ui_field:
+                    form_fields.append({
+                        "name": ui_field,
+                        "type": field_type,
+                        "required": required,
+                        "validations": validations
+                    })
+
+            # Extract WebFlow states
+            flow_states = flow_dict.get("flow_states", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "flow_states", [])
+            for state in flow_states:
+                if isinstance(state, dict):
+                    state_name = state.get("name", "")
+                    state_view = state.get("view", "-")
+                    transitions = state.get("transitions", [])
+                else:
+                    state_name = getattr(state, "name", "")
+                    state_view = getattr(state, "view", "-")
+                    transitions = getattr(state, "transitions", [])
+
+                if state_name:
+                    webflow_states.append({
+                        "name": state_name,
+                        "view": state_view,
+                        "transitions": transitions
+                    })
+
+        # Add JSP pages
+        if jsp_pages:
+            sections.extend(jsp_pages[:10])
+        else:
+            sections.append("| *No JSP pages found* | - | - | - |")
+
+        # Add form fields section
+        if form_fields:
+            sections.append("\n### Form Fields\n")
+            sections.append("| Field Name | Type | Required | Validations |")
+            sections.append("|------------|------|----------|-------------|")
+            for field in form_fields[:15]:
+                sections.append(f"| {field['name']} | {field['type']} | {field['required']} | {field['validations']} |")
+
+        # Add WebFlow states section
+        if webflow_states:
+            sections.append("\n### WebFlow Navigation\n")
+            sections.append("| State | View | Transitions |")
+            sections.append("|-------|------|-------------|")
+            for state in webflow_states[:10]:
+                trans_str = ", ".join(str(t) for t in state["transitions"][:3]) if state["transitions"] else "-"
+                sections.append(f"| {state['name']} | {state['view']} | {trans_str} |")
+
+        # Add layer context
+        layer_content = self._format_layer_context(context, "frontend")
+        if layer_content and "*No frontend" not in layer_content:
+            sections.append("\n### Additional UI Components\n")
+            sections.append(layer_content)
+
+        return "\n".join(sections)
+
+    def _extract_backend_content_from_flows(self, context: AggregatedContext) -> str:
+        """Extract controller/service info from feature flows.
+
+        Args:
+            context: Aggregated context containing feature flows
+
+        Returns:
+            Markdown string describing backend components
+        """
+        if not context.feature_flows:
+            return ""
+
+        sections = []
+        controllers = []
+        services = []
+        validators = []
+
+        for flow_dict in context.feature_flows:
+            layers = flow_dict.get("layers", {}) if isinstance(flow_dict, dict) else getattr(flow_dict, "layers", {})
+
+            # Extract controller layer
+            controller_layer = layers.get("controller", {}) or layers.get("action", {})
+            if controller_layer:
+                components = controller_layer.get("components", []) if isinstance(controller_layer, dict) else getattr(controller_layer, "components", [])
+                for comp in components:
+                    if isinstance(comp, dict):
+                        name = comp.get("name", "")
+                        file_path = comp.get("file_path", "")
+                        methods = comp.get("methods", [])
+                    else:
+                        name = getattr(comp, "name", "")
+                        file_path = getattr(comp, "file_path", "")
+                        methods = getattr(comp, "methods", [])
+
+                    for method in methods[:5]:
+                        if isinstance(method, dict):
+                            method_name = method.get("name", "")
+                            signature = method.get("signature", f"{method_name}()")
+                            start_line = method.get("start_line", method.get("line", "-"))
+                            end_line = method.get("end_line", "-")
+                            purpose = method.get("purpose", "-")
+                        else:
+                            method_name = getattr(method, "name", "")
+                            signature = getattr(method, "signature", f"{method_name}()")
+                            start_line = getattr(method, "start_line", getattr(method, "line", "-"))
+                            end_line = getattr(method, "end_line", "-")
+                            purpose = getattr(method, "purpose", "-")
+
+                        lines = f"{start_line}-{end_line}" if end_line != "-" else str(start_line)
+                        controllers.append({
+                            "class": name,
+                            "method": method_name,
+                            "signature": signature,
+                            "lines": lines,
+                            "purpose": purpose,
+                            "file": file_path
+                        })
+
+            # Extract service layer
+            service_layer = layers.get("service", {}) or layers.get("business", {})
+            if service_layer:
+                components = service_layer.get("components", []) if isinstance(service_layer, dict) else getattr(service_layer, "components", [])
+                for comp in components:
+                    if isinstance(comp, dict):
+                        name = comp.get("name", "")
+                        file_path = comp.get("file_path", "")
+                        methods = comp.get("methods", [])
+                        interface = comp.get("interface", "-")
+                    else:
+                        name = getattr(comp, "name", "")
+                        file_path = getattr(comp, "file_path", "")
+                        methods = getattr(comp, "methods", [])
+                        interface = getattr(comp, "interface", "-")
+
+                    for method in methods[:5]:
+                        if isinstance(method, dict):
+                            method_name = method.get("name", "")
+                            start_line = method.get("start_line", method.get("line", "-"))
+                            end_line = method.get("end_line", "-")
+                            business_rules = method.get("business_rules", "-")
+                        else:
+                            method_name = getattr(method, "name", "")
+                            start_line = getattr(method, "start_line", getattr(method, "line", "-"))
+                            end_line = getattr(method, "end_line", "-")
+                            business_rules = getattr(method, "business_rules", "-")
+
+                        lines = f"{start_line}-{end_line}" if end_line != "-" else str(start_line)
+                        services.append({
+                            "interface": interface,
+                            "implementation": name,
+                            "method": method_name,
+                            "lines": lines,
+                            "business_rules": business_rules,
+                            "file": file_path
+                        })
+
+            # Extract validators/builders
+            validator_layer = layers.get("validator", {}) or layers.get("builder", {})
+            if validator_layer:
+                components = validator_layer.get("components", []) if isinstance(validator_layer, dict) else getattr(validator_layer, "components", [])
+                for comp in components:
+                    if isinstance(comp, dict):
+                        name = comp.get("name", "")
+                        file_path = comp.get("file_path", "")
+                        methods = comp.get("methods", [])
+                    else:
+                        name = getattr(comp, "name", "")
+                        file_path = getattr(comp, "file_path", "")
+                        methods = getattr(comp, "methods", [])
+
+                    for method in methods[:3]:
+                        if isinstance(method, dict):
+                            method_name = method.get("name", "")
+                            purpose = method.get("purpose", "-")
+                            lines = method.get("line", "-")
+                        else:
+                            method_name = getattr(method, "name", "")
+                            purpose = getattr(method, "purpose", "-")
+                            lines = getattr(method, "line", "-")
+
+                        validators.append({
+                            "class": name,
+                            "method": method_name,
+                            "purpose": purpose,
+                            "lines": lines,
+                            "file": file_path
+                        })
+
+        # Build output sections
+        sections.append("### Controller/Action Layer\n")
+        if controllers:
+            sections.append("| Class | Method | Signature | Lines | Purpose |")
+            sections.append("|-------|--------|-----------|-------|---------|")
+            for ctrl in controllers[:10]:
+                sections.append(f"| {ctrl['class']} | {ctrl['method']} | `{ctrl['signature'][:40]}` | {ctrl['lines']} | {ctrl['purpose'][:30]} |")
+        else:
+            sections.append("*No controller methods found in feature flows.*")
+
+        sections.append("\n### Service Layer\n")
+        if services:
+            sections.append("| Interface | Implementation | Method | Lines | Business Rules |")
+            sections.append("|-----------|----------------|--------|-------|----------------|")
+            for svc in services[:10]:
+                sections.append(f"| {svc['interface']} | {svc['implementation']} | {svc['method']} | {svc['lines']} | {svc['business_rules'][:30] if isinstance(svc['business_rules'], str) else '-'} |")
+        else:
+            sections.append("*No service methods found in feature flows.*")
+
+        if validators:
+            sections.append("\n### Builder/Validator Classes\n")
+            sections.append("| Class | Method | Purpose | Lines |")
+            sections.append("|-------|--------|---------|-------|")
+            for val in validators[:8]:
+                sections.append(f"| {val['class']} | {val['method']} | {val['purpose'][:40]} | {val['lines']} |")
+
+        # Add layer context for additional backend components
+        layer_content = self._format_layer_context(context, "backend")
+        if layer_content and "*No backend" not in layer_content:
+            sections.append("\n### Additional Backend Components\n")
+            sections.append(layer_content)
+
+        return "\n".join(sections)
+
+    def _extract_persistence_content_from_flows(self, context: AggregatedContext) -> str:
+        """Extract DAO/SQL info from feature flows.
+
+        Args:
+            context: Aggregated context containing feature flows
+
+        Returns:
+            Markdown string describing persistence layer components
+        """
+        if not context.feature_flows:
+            return ""
+
+        sections = []
+        daos = []
+        entities = []
+        sql_operations = []
+        field_mappings = []
+
+        for flow_dict in context.feature_flows:
+            layers = flow_dict.get("layers", {}) if isinstance(flow_dict, dict) else getattr(flow_dict, "layers", {})
+
+            # Extract DAO layer
+            dao_layer = layers.get("dao", {}) or layers.get("repository", {}) or layers.get("persistence", {})
+            if dao_layer:
+                components = dao_layer.get("components", []) if isinstance(dao_layer, dict) else getattr(dao_layer, "components", [])
+                for comp in components:
+                    if isinstance(comp, dict):
+                        name = comp.get("name", "")
+                        file_path = comp.get("file_path", "")
+                        methods = comp.get("methods", [])
+                    else:
+                        name = getattr(comp, "name", "")
+                        file_path = getattr(comp, "file_path", "")
+                        methods = getattr(comp, "methods", [])
+
+                    for method in methods[:5]:
+                        if isinstance(method, dict):
+                            method_name = method.get("name", "")
+                            purpose = method.get("purpose", "-")
+                            lines = method.get("line", "-")
+                        else:
+                            method_name = getattr(method, "name", "")
+                            purpose = getattr(method, "purpose", "-")
+                            lines = getattr(method, "line", "-")
+
+                        daos.append({
+                            "class": name,
+                            "method": method_name,
+                            "purpose": purpose,
+                            "file_path": file_path,
+                            "lines": lines
+                        })
+
+            # Extract entity layer
+            entity_layer = layers.get("entity", {}) or layers.get("model", {})
+            if entity_layer:
+                components = entity_layer.get("components", []) if isinstance(entity_layer, dict) else getattr(entity_layer, "components", [])
+                for comp in components:
+                    if isinstance(comp, dict):
+                        name = comp.get("name", "")
+                        table = comp.get("table", comp.get("table_name", "-"))
+                        file_path = comp.get("file_path", "")
+                        annotations = comp.get("annotations", [])
+                    else:
+                        name = getattr(comp, "name", "")
+                        table = getattr(comp, "table", getattr(comp, "table_name", "-"))
+                        file_path = getattr(comp, "file_path", "")
+                        annotations = getattr(comp, "annotations", [])
+
+                    annotations_str = ", ".join(annotations[:3]) if annotations else "@Entity"
+                    entities.append({
+                        "entity": name,
+                        "table": table,
+                        "file_path": file_path,
+                        "annotations": annotations_str
+                    })
+
+            # Extract SQL operations
+            sql_ops = flow_dict.get("sql_operations", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "sql_operations", [])
+            for op in sql_ops:
+                if isinstance(op, dict):
+                    stmt_type = op.get("statement_type", "UNKNOWN")
+                    table = op.get("table_name", "-")
+                    columns = op.get("columns", [])
+                    source = op.get("source_location", op.get("source_method", "-"))
+                    line = op.get("line", "-")
+                else:
+                    stmt_type = getattr(op, "statement_type", "UNKNOWN")
+                    table = getattr(op, "table_name", "-")
+                    columns = getattr(op, "columns", [])
+                    source = getattr(op, "source_location", getattr(op, "source_method", "-"))
+                    line = getattr(op, "line", "-")
+
+                columns_str = ", ".join(columns[:5]) if columns else "*"
+                if len(columns) > 5:
+                    columns_str += f" (+{len(columns) - 5} more)"
+
+                sql_operations.append({
+                    "type": stmt_type,
+                    "table": table,
+                    "columns": columns_str,
+                    "source": source,
+                    "line": line
+                })
+
+            # Extract field mappings
+            data_mappings = flow_dict.get("data_mappings", []) if isinstance(flow_dict, dict) else getattr(flow_dict, "data_mappings", [])
+            for dm in data_mappings:
+                if isinstance(dm, dict):
+                    entity_field = dm.get("entity_field", "-")
+                    db_column = dm.get("db_column", "-")
+                    data_type = dm.get("data_type", "-")
+                    constraints = dm.get("constraints", "-")
+                    validations = dm.get("validations", "-")
+                else:
+                    entity_field = getattr(dm, "entity_field", "-")
+                    db_column = getattr(dm, "db_column", "-")
+                    data_type = getattr(dm, "data_type", "-")
+                    constraints = getattr(dm, "constraints", "-")
+                    validations = getattr(dm, "validations", "-")
+
+                field_mappings.append({
+                    "entity_field": entity_field,
+                    "db_column": db_column,
+                    "data_type": data_type,
+                    "constraints": constraints,
+                    "validations": validations
+                })
+
+        # Build output sections
+        sections.append("### DAO/Repository Classes\n")
+        if daos:
+            sections.append("| Class | Method | Purpose | File Path | Lines |")
+            sections.append("|-------|--------|---------|-----------|-------|")
+            for dao in daos[:10]:
+                sections.append(f"| {dao['class']} | {dao['method']} | {dao['purpose'][:30]} | {dao['file_path']} | {dao['lines']} |")
+        else:
+            sections.append("*No DAO/Repository classes found in feature flows.*")
+
+        sections.append("\n### Entity Classes\n")
+        if entities:
+            sections.append("| Entity | Table | File Path | Key Annotations |")
+            sections.append("|--------|-------|-----------|-----------------|")
+            for ent in entities[:10]:
+                sections.append(f"| {ent['entity']} | {ent['table']} | {ent['file_path']} | {ent['annotations']} |")
+        else:
+            sections.append("*No Entity classes found in feature flows.*")
+
+        sections.append("\n### SQL Operations\n")
+        if sql_operations:
+            sections.append("| Statement Type | Table | Columns | Source Method | Line |")
+            sections.append("|----------------|-------|---------|---------------|------|")
+            for sql in sql_operations[:15]:
+                sections.append(f"| {sql['type']} | {sql['table']} | {sql['columns']} | {sql['source']} | {sql['line']} |")
+        else:
+            sections.append("*No SQL operations found in feature flows.*")
+
+        if field_mappings:
+            sections.append("\n### Field-to-Column Mapping\n")
+            sections.append("| Entity Field | DB Column | Data Type | Constraints | Validations |")
+            sections.append("|--------------|-----------|-----------|-------------|-------------|")
+            for fm in field_mappings[:15]:
+                sections.append(f"| {fm['entity_field']} | {fm['db_column']} | {fm['data_type']} | {fm['constraints']} | {fm['validations']} |")
+
+        # Add layer context for additional persistence components
+        layer_content = self._format_layer_context(context, "persistence")
+        if layer_content and "*No persistence" not in layer_content:
+            sections.append("\n### Additional Persistence Components\n")
+            sections.append(layer_content)
+
+        return "\n".join(sections)
 
     def _get_detail_level_instructions(self) -> str:
         """Get writing instructions based on detail level."""
@@ -1535,6 +2376,222 @@ Remember to:
             lines.append(f"- {file.path}")
         return "\n".join(lines)
 
+    def _format_menu_items(self, context: AggregatedContext) -> str:
+        """Format menu items for prompt."""
+        if not context.menu_items:
+            return ""
+
+        lines = ["**Menu Items:**"]
+        for item in context.menu_items[:10]:
+            lines.append(f"- **{item.label}** ({item.name})")
+            lines.append(f"  - URL: {item.url}")
+            lines.append(f"  - Flow: {item.flow_id}")
+            if item.required_roles:
+                lines.append(f"  - Roles: {', '.join(item.required_roles)}")
+        return "\n".join(lines)
+
+    def _format_sub_features(self, context: AggregatedContext) -> str:
+        """Format sub-features (screens) for prompt."""
+        if not context.sub_features:
+            return ""
+
+        lines = ["**Sub-Features (Screens):**"]
+        for sf in context.sub_features[:15]:
+            lines.append(f"\n**{sf.title}** ({sf.screen_type})")
+            lines.append(f"- Screen ID: {sf.screen_id}")
+            if sf.action_class:
+                lines.append(f"- Action Class: `{sf.action_class}`")
+            if sf.action_methods:
+                lines.append(f"- Methods: {', '.join(sf.action_methods[:5])}")
+            if sf.jsps:
+                lines.append(f"- JSPs: {', '.join(sf.jsps[:3])}")
+            if sf.transitions_to:
+                lines.append(f"- Transitions to: {', '.join(sf.transitions_to[:3])}")
+        return "\n".join(lines)
+
+    def _format_validation_chains(self, context: AggregatedContext) -> str:
+        """Format validation chains for prompt."""
+        if not context.validation_chains:
+            return ""
+
+        lines = ["**Validation Chains:**"]
+        for chain in context.validation_chains[:5]:
+            lines.append(f"\n**Entry Point:** `{chain.entry_point}`")
+            lines.append(f"- Total Rules: {chain.total_rules}")
+            if chain.validated_fields:
+                lines.append(f"- Validated Fields: {', '.join(chain.validated_fields[:10])}")
+            lines.append("- Steps:")
+            for step in chain.validation_steps[:5]:
+                lines.append(f"  {step.order}. [{step.step_type}] `{step.class_name}`")
+                if step.rules:
+                    for rule in step.rules[:3]:
+                        lines.append(f"     - {rule}")
+        return "\n".join(lines)
+
+    def _format_cross_feature_context(self, context: AggregatedContext) -> str:
+        """Format cross-feature dependencies for prompt."""
+        if not context.cross_feature_context:
+            return ""
+
+        cfc = context.cross_feature_context
+        lines = ["**Cross-Feature Dependencies:**"]
+
+        if cfc.shared_entities:
+            lines.append("\n*Shared Entities:*")
+            for entity, features in list(cfc.shared_entities.items())[:5]:
+                lines.append(f"- `{entity}` used by: {', '.join(features[:3])}")
+
+        if cfc.shared_services:
+            lines.append("\n*Shared Services:*")
+            for service, features in list(cfc.shared_services.items())[:5]:
+                lines.append(f"- `{service}` used by: {', '.join(features[:3])}")
+
+        if cfc.dependencies:
+            lines.append("\n*Dependencies:*")
+            for dep in cfc.dependencies[:5]:
+                lines.append(f"- {dep.source_feature} → {dep.target_feature}")
+                lines.append(f"  Type: {dep.relationship_type}, Component: {dep.shared_component}")
+                lines.append(f"  Impact: {dep.implication}")
+
+        if cfc.impact_summary:
+            lines.append(f"\n*Impact Summary:* {cfc.impact_summary}")
+
+        return "\n".join(lines)
+
+    def _format_enriched_business_rules(self, context: AggregatedContext) -> str:
+        """Format enriched business rules for prompt."""
+        if not context.enriched_business_rules:
+            return ""
+
+        lines = ["**Business Rules with Feature Context:**"]
+        for rule in context.enriched_business_rules[:10]:
+            rule_type = rule.get("rule_type", "validation")
+            description = rule.get("description", "")
+            source_class = rule.get("source_class", "")
+            source_method = rule.get("source_method", "")
+            condition = rule.get("condition", "")
+            feature_ctx = rule.get("feature_context", {})
+
+            lines.append(f"\n**Rule:** {description}")
+            lines.append(f"- Type: {rule_type}")
+            if source_class:
+                lines.append(f"- Source: `{source_class}.{source_method}`")
+            if condition:
+                lines.append(f"- Condition: {condition}")
+            if feature_ctx:
+                if feature_ctx.get("menu_item"):
+                    lines.append(f"- Menu Item: {feature_ctx['menu_item']}")
+                if feature_ctx.get("screen"):
+                    lines.append(f"- Screen: {feature_ctx['screen']}")
+
+        return "\n".join(lines)
+
+    # =========================================================================
+    # Phase 11: Enhanced Context Formatters
+    # =========================================================================
+
+    def _format_code_snippets(self, context: AggregatedContext) -> str:
+        """Format code snippets for prompt."""
+        if not context.code_snippets:
+            return ""
+
+        lines = ["**Code Implementation Details:**"]
+        for snippet in context.code_snippets[:10]:
+            lines.append(snippet.to_markdown())
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def _format_security_rules(self, context: AggregatedContext) -> str:
+        """Format security rules for prompt."""
+        if not context.security_rules:
+            return ""
+
+        lines = ["**Security & Access Control:**"]
+        for rule in context.security_rules[:15]:
+            lines.append(rule.to_markdown())
+
+        return "\n".join(lines)
+
+    def _format_error_messages(self, context: AggregatedContext) -> str:
+        """Format error messages for prompt."""
+        if not context.error_messages:
+            return ""
+
+        lines = ["**Error Messages & Validation Feedback:**"]
+        for err in context.error_messages[:20]:
+            lines.append(err.to_markdown())
+
+        return "\n".join(lines)
+
+    def _format_transition_conditions(self, context: AggregatedContext) -> str:
+        """Format transition conditions for prompt."""
+        if not context.transition_conditions:
+            return ""
+
+        lines = ["**Flow Transitions & Business Rules:**"]
+        for cond in context.transition_conditions[:15]:
+            lines.append(cond.to_markdown())
+
+        return "\n".join(lines)
+
+    def _format_form_field_details(self, context: AggregatedContext) -> str:
+        """Format form field details for prompt."""
+        if not context.form_field_details:
+            return ""
+
+        lines = ["**UI Form Fields & Validation:**"]
+        lines.append("| Field | Label | Type/Validation |")
+        lines.append("|-------|-------|-----------------|")
+        for field in context.form_field_details[:30]:
+            lines.append(field.to_markdown())
+
+        return "\n".join(lines)
+
+    def _format_enhanced_methods(self, context: AggregatedContext) -> str:
+        """Format enhanced methods for prompt."""
+        if not context.enhanced_methods:
+            return ""
+
+        lines = ["**Key Method Implementations:**"]
+        for method in context.enhanced_methods[:8]:
+            lines.append(method.to_markdown())
+            lines.append("\n---\n")
+
+        return "\n".join(lines)
+
+    def _format_enhanced_context(self, context: AggregatedContext) -> str:
+        """Format all enhanced context fields for prompt."""
+        sections = []
+
+        code_snippets = self._format_code_snippets(context)
+        if code_snippets:
+            sections.append(code_snippets)
+
+        security = self._format_security_rules(context)
+        if security:
+            sections.append(security)
+
+        errors = self._format_error_messages(context)
+        if errors:
+            sections.append(errors)
+
+        transitions = self._format_transition_conditions(context)
+        if transitions:
+            sections.append(transitions)
+
+        form_fields = self._format_form_field_details(context)
+        if form_fields:
+            sections.append(form_fields)
+
+        enhanced_methods = self._format_enhanced_methods(context)
+        if enhanced_methods:
+            sections.append(enhanced_methods)
+
+        if sections:
+            return "\n## Extracted Business Logic (from actual code)\n\n" + "\n\n".join(sections)
+        return ""
+
     def _generate_mock_response(self, prompt: str) -> str:
         """Generate mock response when SDK unavailable."""
         if "verify" in prompt.lower():
@@ -1691,7 +2748,7 @@ class VerifiedBRDGenerator:
         temperature: float = 0.0,
         seed: Optional[int] = None,
         claims_per_section: int = 5,
-        default_section_words: int = 300,
+        default_section_words: Optional[int] = None,
         skip_verification: bool = False,
     ):
         self.orchestrator = MultiAgentOrchestrator(

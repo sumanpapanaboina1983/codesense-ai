@@ -15,7 +15,13 @@ import {
     JSPTagLibNode,
     TagLibrary,
     FormField,
-    SubmitElement
+    SubmitElement,
+    SelectOption,
+    DataSourceInfo,
+    TableColumnInfo,
+    DataTableInfo,
+    DataTableNode,
+    TableActionInfo
 } from '../types.js';
 import { ensureTempDir, getTempFilePath, generateInstanceId, generateEntityId } from '../parser-utils.js';
 import { BusinessRuleDetector } from './BusinessRuleDetector.js';
@@ -190,10 +196,29 @@ export class JSPParser {
             `${businessRuleResult.totalRulesDetected} rules`
         );
 
+        // Business Logic Blueprint: Extract data tables
+        const { nodes: tableNodes, relationships: tableRelationships } =
+            this.extractDataTables(content, normalizedPath, jspPageNode.entityId);
+
+        if (tableNodes.length > 0) {
+            logger.debug(
+                `[JSPParser] Data tables detected for ${fileName}: ${tableNodes.length} tables`
+            );
+        }
+
+        // Business Logic Blueprint: Extract Spring select options and store on JSP node
+        const springSelectOptions = this.extractSpringSelectOptions(content);
+        if (springSelectOptions.size > 0) {
+            jspPageNode.properties.springSelectOptions = Object.fromEntries(springSelectOptions);
+            logger.debug(
+                `[JSPParser] Spring select options detected for ${fileName}: ${springSelectOptions.size} fields`
+            );
+        }
+
         return {
             filePath: normalizedPath,
-            nodes: [...nodes, ...businessRuleNodes],
-            relationships: [...relationships, ...businessRuleRelationships]
+            nodes: [...nodes, ...businessRuleNodes, ...tableNodes],
+            relationships: [...relationships, ...businessRuleRelationships, ...tableRelationships]
         };
     }
 
@@ -536,16 +561,504 @@ export class JSPParser {
         inputs.forEach(input => {
             const name = input.getAttribute('name');
             if (name) {
+                // Extract label for this field
+                const label = this.extractFieldLabel(form, name, input as Element);
+
+                // Extract validation rules from HTML5 attributes
+                const validationRules: FormField['validationRules'] = {};
+
+                const pattern = input.getAttribute('pattern');
+                if (pattern) validationRules.pattern = pattern;
+
+                const min = input.getAttribute('min');
+                if (min) validationRules.min = min;
+
+                const max = input.getAttribute('max');
+                if (max) validationRules.max = max;
+
+                const minLength = input.getAttribute('minlength');
+                if (minLength) validationRules.minLength = parseInt(minLength, 10);
+
+                const maxLength = input.getAttribute('maxlength');
+                if (maxLength) validationRules.maxLength = parseInt(maxLength, 10);
+
+                const step = input.getAttribute('step');
+                if (step) validationRules.step = parseFloat(step);
+
+                // Extract CSS classes for error styling detection
+                const cssClasses = (input.getAttribute('class') || '')
+                    .split(/\s+/)
+                    .filter(c => c.length > 0);
+
+                // Extract cssErrorClass from Spring form tags
+                const cssErrorClass = input.getAttribute('cssErrorClass') || undefined;
+
+                // Extract select options if this is a select element
+                let selectOptions: SelectOption[] | undefined;
+                let dataSource: DataSourceInfo | undefined;
+                if (input.tagName.toLowerCase() === 'select') {
+                    const optionResult = this.extractSelectOptions(input as Element);
+                    selectOptions = optionResult.options;
+                    dataSource = optionResult.dataSource;
+                }
+
+                // Check for read-only and disabled states
+                const readOnly = input.hasAttribute('readonly');
+                const disabled = input.hasAttribute('disabled');
+
                 fields.push({
                     name,
                     type: input.getAttribute('type') || input.tagName.toLowerCase(),
                     required: input.hasAttribute('required'),
-                    defaultValue: input.getAttribute('value') || undefined
+                    defaultValue: input.getAttribute('value') || undefined,
+                    // BRD Enhancement: Label text
+                    label,
+                    // BRD Enhancement: Placeholder and help text
+                    placeholder: input.getAttribute('placeholder') || undefined,
+                    helpText: input.getAttribute('title') || undefined,
+                    // BRD Enhancement: Validation rules
+                    validationRules: Object.keys(validationRules).length > 0 ? validationRules : undefined,
+                    // BRD Enhancement: CSS classes
+                    cssClasses: cssClasses.length > 0 ? cssClasses : undefined,
+                    cssErrorClass,
+                    // Blueprint Enhancement: Select options
+                    selectOptions,
+                    dataSource,
+                    readOnly,
+                    disabled,
                 });
             }
         });
 
         return fields;
+    }
+
+    /**
+     * Extract options from a <select> element.
+     * Handles both static <option> tags and dynamic data sources.
+     */
+    private extractSelectOptions(select: Element): { options: SelectOption[]; dataSource?: DataSourceInfo } {
+        const options: SelectOption[] = [];
+        let dataSource: DataSourceInfo | undefined;
+
+        // Extract static options
+        const optionElements = select.querySelectorAll('option');
+        optionElements.forEach(opt => {
+            const value = opt.getAttribute('value') || opt.textContent || '';
+            const label = opt.textContent?.trim() || value;
+            const isDefault = opt.hasAttribute('selected');
+            const disabled = opt.hasAttribute('disabled');
+
+            options.push({
+                value,
+                label,
+                isDefault,
+                disabled: disabled || undefined,
+            });
+        });
+
+        // Check for dynamic data source (items attribute pattern)
+        // This handles patterns like: items="${stateHolder.types}"
+        const itemsAttr = select.getAttribute('items');
+        if (itemsAttr) {
+            const itemValueAttr = select.getAttribute('itemValue') || 'value';
+            const itemLabelAttr = select.getAttribute('itemLabel') || 'label';
+
+            dataSource = {
+                type: 'items-attribute',
+                itemsPath: itemsAttr,
+                itemValue: itemValueAttr,
+                itemLabel: itemLabelAttr,
+            };
+        }
+
+        return { options, dataSource };
+    }
+
+    /**
+     * Extract Spring form:select options from raw JSP content.
+     * Handles <form:select>, <form:option>, <form:options> tags.
+     */
+    private extractSpringSelectOptions(content: string): Map<string, { options: SelectOption[]; dataSource?: DataSourceInfo }> {
+        const selectMap = new Map<string, { options: SelectOption[]; dataSource?: DataSourceInfo }>();
+
+        // Pattern for <form:select path="..." items="...">
+        const selectPattern = /<form:select[^>]*path\s*=\s*["']([^"']+)["'][^>]*>/gi;
+        let selectMatch;
+
+        while ((selectMatch = selectPattern.exec(content)) !== null) {
+            const fieldPath = selectMatch[1];
+            const fullTag = selectMatch[0];
+            const options: SelectOption[] = [];
+            let dataSource: DataSourceInfo | undefined;
+
+            // Check for items attribute (dynamic options)
+            const itemsMatch = fullTag.match(/items\s*=\s*["']\$?\{?([^"'}]+)\}?["']/);
+            if (itemsMatch) {
+                const itemValueMatch = fullTag.match(/itemValue\s*=\s*["']([^"']+)["']/);
+                const itemLabelMatch = fullTag.match(/itemLabel\s*=\s*["']([^"']+)["']/);
+
+                dataSource = {
+                    type: 'items-attribute',
+                    itemsPath: itemsMatch[1],
+                    itemValue: itemValueMatch?.[1] || 'value',
+                    itemLabel: itemLabelMatch?.[1] || 'label',
+                };
+            }
+
+            // Look for nested <form:option> tags
+            const selectEndIndex = content.indexOf('</form:select>', selectMatch.index);
+            if (selectEndIndex > selectMatch.index) {
+                const selectContent = content.substring(selectMatch.index, selectEndIndex);
+
+                // Extract <form:option value="..." label="...">
+                const optionPattern = /<form:option[^>]*value\s*=\s*["']([^"']+)["'][^>]*(?:label\s*=\s*["']([^"']+)["'])?[^>]*>/gi;
+                let optionMatch;
+
+                while ((optionMatch = optionPattern.exec(selectContent)) !== null) {
+                    options.push({
+                        value: optionMatch[1],
+                        label: optionMatch[2] || optionMatch[1],
+                    });
+                }
+
+                // Extract <form:options items="...">
+                const optionsPattern = /<form:options[^>]*items\s*=\s*["']\$?\{?([^"'}]+)\}?["'][^>]*>/gi;
+                const optionsMatch = optionsPattern.exec(selectContent);
+                if (optionsMatch && !dataSource) {
+                    const itemValueMatch = optionsMatch[0].match(/itemValue\s*=\s*["']([^"']+)["']/);
+                    const itemLabelMatch = optionsMatch[0].match(/itemLabel\s*=\s*["']([^"']+)["']/);
+
+                    dataSource = {
+                        type: 'items-attribute',
+                        itemsPath: optionsMatch[1],
+                        itemValue: itemValueMatch?.[1] || 'value',
+                        itemLabel: itemLabelMatch?.[1] || 'label',
+                    };
+                }
+            }
+
+            selectMap.set(fieldPath, { options, dataSource });
+        }
+
+        return selectMap;
+    }
+
+    /**
+     * Extract data tables from JSP content.
+     * Handles <table>, <display:table>, and custom grid components.
+     */
+    private extractDataTables(content: string, filePath: string, parentId: string): { nodes: DataTableNode[]; relationships: RelationshipInfo[] } {
+        const nodes: DataTableNode[] = [];
+        const relationships: RelationshipInfo[] = [];
+
+        try {
+            const cleanedContent = this.cleanJSPForHTMLParsing(content);
+            const dom = new JSDOM(cleanedContent);
+            const document = dom.window.document;
+
+            // Extract standard HTML tables with data attributes
+            const tables = document.querySelectorAll('table[id], table.data-table, table.display-table');
+            let tableIndex = 0;
+
+            tables.forEach(table => {
+                const tableId = table.getAttribute('id') || `table_${tableIndex++}`;
+                const columns = this.extractTableColumns(table);
+
+                if (columns.length > 0) {
+                    const tableEntityId = generateEntityId('datatable', `${filePath}:${tableId}`);
+
+                    const tableNode: DataTableNode = {
+                        id: generateInstanceId(this.instanceCounter, 'datatable', tableId),
+                        entityId: tableEntityId,
+                        kind: 'DataTable',
+                        name: tableId,
+                        filePath,
+                        language: 'JSP',
+                        startLine: 1,
+                        endLine: 1,
+                        startColumn: 0,
+                        endColumn: 0,
+                        parentId,
+                        createdAt: this.now,
+                        properties: {
+                            id: tableId,
+                            dataSource: table.getAttribute('data-source') || '',
+                            columns,
+                            paginated: table.classList.contains('paginated') || table.hasAttribute('data-paginated'),
+                            selectable: table.classList.contains('selectable') || table.hasAttribute('data-selectable'),
+                        },
+                    };
+
+                    nodes.push(tableNode);
+
+                    relationships.push({
+                        id: generateInstanceId(this.instanceCounter, 'has_data_table', `${parentId}:${tableEntityId}`),
+                        entityId: generateEntityId('has_data_table', `${parentId}:${tableEntityId}`),
+                        type: 'HAS_DATA_TABLE',
+                        sourceId: parentId,
+                        targetId: tableEntityId,
+                        weight: 5,
+                        createdAt: this.now,
+                    });
+                }
+            });
+
+        } catch (error: any) {
+            logger.warn(`Error extracting tables from JSP: ${error.message}`);
+        }
+
+        // Also extract display:table tags from raw content
+        const displayTableResult = this.extractDisplayTables(content, filePath, parentId);
+        nodes.push(...displayTableResult.nodes);
+        relationships.push(...displayTableResult.relationships);
+
+        return { nodes, relationships };
+    }
+
+    /**
+     * Extract column information from an HTML table.
+     */
+    private extractTableColumns(table: Element): TableColumnInfo[] {
+        const columns: TableColumnInfo[] = [];
+
+        // Look for thead > tr > th
+        const headerRow = table.querySelector('thead tr') || table.querySelector('tr:first-child');
+        if (!headerRow) return columns;
+
+        const headers = headerRow.querySelectorAll('th, td');
+        headers.forEach((th, index) => {
+            const header = th.textContent?.trim() || `Column ${index + 1}`;
+            const dataField = th.getAttribute('data-field') || th.getAttribute('property') || undefined;
+            const sortable = th.hasAttribute('data-sortable') || th.classList.contains('sortable');
+            const width = th.getAttribute('width') || undefined;
+
+            // Detect column type from CSS classes or data attributes
+            let dataType: TableColumnInfo['dataType'] = 'text';
+            if (th.classList.contains('number') || th.classList.contains('numeric')) dataType = 'number';
+            if (th.classList.contains('date')) dataType = 'date';
+            if (th.classList.contains('currency')) dataType = 'currency';
+            if (th.classList.contains('actions') || th.classList.contains('action')) dataType = 'action';
+
+            // Extract action buttons if action column
+            let actions: TableActionInfo[] | undefined;
+            if (dataType === 'action') {
+                actions = this.extractTableActions(th);
+            }
+
+            columns.push({
+                header,
+                dataField,
+                dataType,
+                sortable,
+                width,
+                actions,
+            });
+        });
+
+        return columns;
+    }
+
+    /**
+     * Extract action buttons from a table action column.
+     */
+    private extractTableActions(cell: Element): TableActionInfo[] {
+        const actions: TableActionInfo[] = [];
+
+        const buttons = cell.querySelectorAll('a, button, input[type="button"], input[type="submit"]');
+        buttons.forEach(btn => {
+            const label = btn.textContent?.trim() || btn.getAttribute('title') || btn.getAttribute('value') || 'Action';
+            const name = btn.getAttribute('name') || btn.getAttribute('data-action') || label.toLowerCase();
+            const urlPattern = btn.getAttribute('href') || undefined;
+            const confirmMessage = btn.getAttribute('data-confirm') || btn.getAttribute('onclick')?.match(/confirm\(['"]([^'"]+)['"]\)/)?.[1];
+
+            actions.push({
+                name,
+                label,
+                urlPattern,
+                confirmMessage,
+            });
+        });
+
+        return actions;
+    }
+
+    /**
+     * Extract display:table tags (DisplayTag library).
+     */
+    private extractDisplayTables(content: string, filePath: string, parentId: string): { nodes: DataTableNode[]; relationships: RelationshipInfo[] } {
+        const nodes: DataTableNode[] = [];
+        const relationships: RelationshipInfo[] = [];
+
+        // Pattern for <display:table name="..." id="...">
+        const displayTablePattern = /<display:table[^>]*>/gi;
+        let tableIndex = 0;
+        let match;
+
+        while ((match = displayTablePattern.exec(content)) !== null) {
+            const tagContent = match[0];
+
+            // Extract attributes
+            const idMatch = tagContent.match(/id\s*=\s*["']([^"']+)["']/);
+            const nameMatch = tagContent.match(/name\s*=\s*["']([^"']+)["']/);
+            const pageSizeMatch = tagContent.match(/pagesize\s*=\s*["'](\d+)["']/);
+
+            const tableId = idMatch?.[1] || `displaytable_${tableIndex++}`;
+            const dataSource = nameMatch?.[1] || '';
+
+            // Find closing tag and extract columns
+            const closeTagIndex = content.indexOf('</display:table>', match.index);
+            const columns: TableColumnInfo[] = [];
+
+            if (closeTagIndex > match.index) {
+                const tableContent = content.substring(match.index, closeTagIndex);
+
+                // Extract <display:column> tags
+                const columnPattern = /<display:column[^>]*>/gi;
+                let colMatch;
+
+                while ((colMatch = columnPattern.exec(tableContent)) !== null) {
+                    const colTag = colMatch[0];
+
+                    const propertyMatch = colTag.match(/property\s*=\s*["']([^"']+)["']/);
+                    const titleMatch = colTag.match(/title\s*=\s*["']([^"']+)["']/);
+                    const titleKeyMatch = colTag.match(/titleKey\s*=\s*["']([^"']+)["']/);
+                    const sortableMatch = colTag.match(/sortable\s*=\s*["'](\w+)["']/);
+                    const formatMatch = colTag.match(/format\s*=\s*["']([^"']+)["']/);
+
+                    columns.push({
+                        header: titleMatch?.[1] || propertyMatch?.[1] || 'Column',
+                        headerKey: titleKeyMatch?.[1],
+                        dataField: propertyMatch?.[1],
+                        sortable: sortableMatch?.[1] === 'true',
+                        format: formatMatch?.[1],
+                    });
+                }
+            }
+
+            if (columns.length > 0 || dataSource) {
+                const tableEntityId = generateEntityId('datatable', `${filePath}:${tableId}`);
+
+                const tableNode: DataTableNode = {
+                    id: generateInstanceId(this.instanceCounter, 'datatable', tableId),
+                    entityId: tableEntityId,
+                    kind: 'DataTable',
+                    name: tableId,
+                    filePath,
+                    language: 'JSP',
+                    startLine: this.getLineNumber(content, match.index),
+                    endLine: closeTagIndex > 0 ? this.getLineNumber(content, closeTagIndex) : this.getLineNumber(content, match.index),
+                    startColumn: 0,
+                    endColumn: 0,
+                    parentId,
+                    createdAt: this.now,
+                    properties: {
+                        id: tableId,
+                        dataSource,
+                        columns,
+                        paginated: !!pageSizeMatch,
+                        pageSize: pageSizeMatch ? parseInt(pageSizeMatch[1], 10) : undefined,
+                    },
+                };
+
+                nodes.push(tableNode);
+
+                relationships.push({
+                    id: generateInstanceId(this.instanceCounter, 'has_data_table', `${parentId}:${tableEntityId}`),
+                    entityId: generateEntityId('has_data_table', `${parentId}:${tableEntityId}`),
+                    type: 'HAS_DATA_TABLE',
+                    sourceId: parentId,
+                    targetId: tableEntityId,
+                    weight: 5,
+                    createdAt: this.now,
+                });
+            }
+        }
+
+        return { nodes, relationships };
+    }
+
+    /**
+     * Extract label text for a form field.
+     * Looks for:
+     * 1. <label for="fieldId"> tags
+     * 2. Parent <label> element
+     * 3. aria-label attribute
+     * 4. Adjacent text nodes with "label" class
+     * 5. <fmt:message key="..."> patterns
+     */
+    private extractFieldLabel(form: Element, fieldName: string, input: Element): string | undefined {
+        // 1. Look for explicit label with 'for' attribute
+        const fieldId = input.getAttribute('id') || fieldName;
+        const labels = form.querySelectorAll(`label[for="${fieldId}"]`);
+        if (labels.length > 0 && labels[0]) {
+            const labelText = labels[0].textContent?.trim();
+            if (labelText) return labelText;
+        }
+
+        // 2. Check for parent label
+        const parentLabel = input.closest('label');
+        if (parentLabel) {
+            // Get text content excluding the input element itself
+            const clone = parentLabel.cloneNode(true) as Element;
+            clone.querySelectorAll('input, select, textarea').forEach(el => el.remove());
+            const labelText = clone.textContent?.trim();
+            if (labelText) return labelText;
+        }
+
+        // 3. Check aria-label
+        const ariaLabel = input.getAttribute('aria-label');
+        if (ariaLabel) return ariaLabel;
+
+        // 4. Look for preceding text/label sibling with "label" class
+        const prevSibling = input.previousElementSibling;
+        if (prevSibling) {
+            const classList = prevSibling.getAttribute('class') || '';
+            if (classList.includes('label') || prevSibling.tagName.toLowerCase() === 'label') {
+                const labelText = prevSibling.textContent?.trim();
+                if (labelText) return labelText;
+            }
+        }
+
+        // 5. Check parent's previous sibling (common pattern: <td class="label">...</td><td><input></td>)
+        const parentTd = input.closest('td');
+        if (parentTd && parentTd.previousElementSibling) {
+            const prevTd = parentTd.previousElementSibling;
+            const classList = prevTd.getAttribute('class') || '';
+            if (classList.includes('label')) {
+                const labelText = prevTd.textContent?.trim();
+                if (labelText) return labelText;
+            }
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Extract <form:errors> elements and their paths from raw JSP content.
+     * Returns a map of field path -> error display configuration.
+     */
+    private extractFormErrors(content: string): Map<string, { path: string; cssClass?: string }> {
+        const errors = new Map<string, { path: string; cssClass?: string }>();
+
+        // Pattern for <form:errors path="..." ...>
+        const errorPattern = /<form:errors\s+([^>]*)>/gi;
+        let match;
+
+        while ((match = errorPattern.exec(content)) !== null) {
+            const attributes = match[1];
+            const pathMatch = attributes.match(/path\s*=\s*["']([^"']+)["']/);
+            const cssClassMatch = attributes.match(/cssClass\s*=\s*["']([^"']+)["']/);
+
+            if (pathMatch && pathMatch[1]) {
+                errors.set(pathMatch[1], {
+                    path: pathMatch[1],
+                    cssClass: cssClassMatch?.[1]
+                });
+            }
+        }
+
+        return errors;
     }
 
     private extractSubmitElements(form: Element): SubmitElement[] {

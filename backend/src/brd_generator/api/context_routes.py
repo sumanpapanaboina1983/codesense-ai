@@ -432,7 +432,7 @@ async def find_entry_points(
                80 AS layer_score,
                action_score + pagerank * 10 AS relevance_score
         ORDER BY relevance_score DESC
-        LIMIT 10
+        LIMIT 500
     """
 
     try:
@@ -473,7 +473,7 @@ async def find_entry_points(
                    w.filePath AS path,
                    'flow' AS layer,
                    90 AS layer_score
-            LIMIT 10
+            LIMIT 500
         """
 
         try:
@@ -511,7 +511,7 @@ async def find_entry_points(
                    j.filePath AS path,
                    'ui' AS layer,
                    100 AS layer_score
-            LIMIT 10
+            LIMIT 500
         """
 
         # Also find JSPs by naming pattern (e.g., LegalEntityWizardAction → legalEntityWizard*.jsp)
@@ -543,7 +543,7 @@ async def find_entry_points(
                        100 AS layer_score,
                        relevance
                 ORDER BY relevance DESC
-                LIMIT 10
+                LIMIT 500
             """
         else:
             jsp_relevance_query = f"""
@@ -554,7 +554,7 @@ async def find_entry_points(
                        j.filePath AS path,
                        'ui' AS layer,
                        100 AS layer_score
-                LIMIT 10
+                LIMIT 500
             """
 
         try:
@@ -626,7 +626,7 @@ async def traverse_dependencies(
                related.description AS description,
                1 AS distance,
                type(r) AS relationship
-        LIMIT 100
+        LIMIT 500
     """
 
     # Query 2: Two-hop relationships (depth 2)
@@ -641,7 +641,7 @@ async def traverse_dependencies(
                related.description AS description,
                2 AS distance,
                type(r2) AS relationship
-        LIMIT 100
+        LIMIT 500
     """
 
     # Query 3: Find classes that the entry point imports/uses
@@ -654,7 +654,7 @@ async def traverse_dependencies(
                imported.description AS description,
                1 AS distance,
                'IMPORTS' AS relationship
-        LIMIT 50
+        LIMIT 200
     """
 
     # Query 4: Find services/classes that match field names (dependency injection pattern)
@@ -675,7 +675,7 @@ async def traverse_dependencies(
                service.description AS description,
                1 AS distance,
                'INJECTED_SERVICE' AS relationship
-        LIMIT 30
+        LIMIT 150
     """
 
     # Query 5: Find Actions referenced by WebFlows
@@ -703,7 +703,7 @@ async def traverse_dependencies(
                'Referenced by WebFlow' AS description,
                1 AS distance,
                'WEBFLOW_EXECUTES' AS relationship
-        LIMIT 20
+        LIMIT 500
     """
 
     # Query 6: Find related services by similar naming patterns
@@ -725,7 +725,7 @@ async def traverse_dependencies(
                s.description AS description,
                2 AS distance,
                'RELATED_BY_NAME' AS relationship
-        LIMIT 20
+        LIMIT 500
     """
 
     # Query 7: Find DAOs/Repositories in the data layer
@@ -746,7 +746,7 @@ async def traverse_dependencies(
                d.description AS description,
                3 AS distance,
                'DATA_LAYER' AS relationship
-        LIMIT 15
+        LIMIT 500
     """
 
     # Query 8: Find database entities/tables related to the feature
@@ -764,7 +764,7 @@ async def traverse_dependencies(
                    n.description AS description,
                    4 AS distance,
                    'DATABASE' AS relationship
-            LIMIT 10
+            LIMIT 500
         """
 
     try:
@@ -1418,7 +1418,7 @@ async def get_flow_graph(
 
             RETURN source_name, source_type, source_path,
                    target_name, target_type, target_path, relationship
-            LIMIT 100
+            LIMIT 500
         """
 
         result = await neo4j_client.query_code_structure(query)

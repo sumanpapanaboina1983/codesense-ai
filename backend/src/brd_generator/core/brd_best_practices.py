@@ -14,14 +14,25 @@ BRD_BEST_PRACTICES = """
 ### Purpose
 Create Business Requirements Documents that are:
 - Clear and understandable to NON-TECHNICAL business stakeholders
-- Detailed enough for accurate system design and implementation
-- Usable by AI development tools to generate aligned code
+- Comprehensive in capturing ALL business logic and rules from the code
+- Written in plain English without ANY code references (no class names, method names, file paths, or line numbers)
+
+### Critical: Extract ALL Business Logic
+You must thoroughly extract and document:
+- **Every validation rule**: What inputs are checked? What makes them valid/invalid?
+- **Every business constraint**: What limits exist? What conditions must be met?
+- **Every conditional behavior**: What happens when X? What happens when Y?
+- **Every data transformation**: How is data processed, converted, or calculated?
+- **Every state transition**: What causes status changes? What are the allowed states?
+- **Every error condition**: What can go wrong? How does the system respond?
+- **Every default behavior**: What happens when no input is provided? What are the default values?
 
 ### Writing Guidelines
 
 | Practice | Guideline |
 |----------|-----------|
-| Use plain English | Avoid code or technical jargon unless business-relevant |
+| Use plain English | NEVER mention class names, methods, file paths, or technical terms |
+| Be exhaustive | Extract EVERY business rule found in code - don't summarize or skip |
 | Be deterministic | Avoid vague phrases like "maybe" or "usually"; describe exact behavior |
 | Write for business readers | Assume the reader is a product manager, BA, or executive |
 | Explain "what" not "how" | Describe outcomes and behavior, not implementation details |
@@ -29,14 +40,26 @@ Create Business Requirements Documents that are:
 | Use numbered lists for flows | Improves traceability and readability |
 | Include visual diagrams | Sequence diagrams help clarify complex flows |
 
+### Translating Code to Business Language
+
+| Code Concept | Business Language |
+|--------------|-------------------|
+| if (amount > 10000) | "When the amount exceeds $10,000..." |
+| validateNotNull(field) | "The [field name] is required and cannot be left blank" |
+| status == "ACTIVE" | "Only records with active status..." |
+| list.size() > maxResults | "When the number of results exceeds the maximum allowed..." |
+| toUpperCase() | "The system converts the input to uppercase for consistent matching" |
+| trim() | "The system removes leading and trailing spaces from the input" |
+
 ### Common Pitfalls to Avoid
 
 | Pitfall | Fix |
 |---------|-----|
-| Mixing UI behavior with logic | Only include UI if it drives a functional requirement |
-| Using terms like "method" or "API" | Replace with "action," "service," or "system interaction" |
-| Skipping edge cases | Always ask: "What if this input is missing, invalid, or late?" |
+| Mentioning code references | Replace "UserValidator.validate()" with "The system validates user information" |
+| Skipping validation rules | Document EVERY validation - field requirements, formats, ranges |
+| Missing edge cases | Always ask: "What if this input is missing, invalid, or at boundary values?" |
 | Over-generalizing | Be precise. Instead of "system may notify," say "system must..." |
+| Incomplete rule extraction | If code has 10 validation rules, document all 10 in business terms |
 """
 
 # =============================================================================
@@ -47,212 +70,203 @@ DEFAULT_BRD_SECTIONS = [
     {
         "name": "Feature Overview",
         "description": """A plain English summary of what the feature enables from a business standpoint.
-Should answer: What problem does this solve? Who benefits?
-Example: "This feature enables registered users to request a statement of all wire transfers
-made in the last 12 months. It improves self-service transparency and reduces call center load." """,
+Should answer: What problem does this solve? Who benefits? How does it work at a high level?
+
+This section should:
+- Explain the business problem being solved
+- Identify who benefits from this feature (user groups, departments)
+- Describe key capabilities in business terms
+- Explain how it fits into broader business processes
+
+Write in clear, accessible prose that any stakeholder can understand.
+Avoid technical jargon - focus on business value and user outcomes.""",
         "required": True,
     },
     {
         "name": "Functional Requirements",
-        "description": """Describe what the system must do in terms of BUSINESS BEHAVIOR.
-Use simple, active statements (e.g., "The system must notify the customer...")
-Group similar requirements under subheadings if needed (e.g., "Data Entry", "Review and Approval")
-Format: Bullet points with "The system must..." or "Users must be able to..." """,
+        "description": """Document EVERYTHING the system does in terms of BUSINESS BEHAVIOR.
+Extract ALL capabilities from the code and describe them in plain English.
+
+**IMPORTANT**: Be comprehensive. Document every feature, every capability, every user action supported.
+
+Group requirements under clear subheadings:
+
+**Core Capabilities**
+- What are the primary functions of this feature?
+- What different methods/options does it provide to accomplish the goal?
+- What are all the ways users can interact with this feature?
+
+**Data Entry and Input**
+- What inputs does the system accept?
+- What fields are available for user entry?
+- How does the system help users enter data (auto-focus, defaults, enabling/disabling fields)?
+
+**Search/Query Features** (if applicable)
+- What search methods are available?
+- How does each search method work from a user perspective?
+- What filtering options exist?
+
+**Results Display**
+- How are results presented to users?
+- What information is shown for each result?
+- What actions can users take on results (sort, export, select)?
+
+**User Experience Features**
+- What feedback does the system provide (loading indicators, messages)?
+- How does the system handle errors or edge cases?
+- What keyboard shortcuts or convenience features exist?
+
+Format each requirement as:
+- "The system must [action]..."
+- "Users must be able to [capability]..."
+- "When [condition], the system must [behavior]..."
+
+NEVER mention code references - describe only what users see and experience.""",
         "required": True,
     },
     {
         "name": "Business Validations and Rules",
-        "description": """Capture ALL logic constraints, typically enforced via conditional checks in code.
-Explain what is ALLOWED, REQUIRED, or BLOCKED, in business terms.
-Examples:
-- Transfer amount must be less than $50,000 unless user has verified identity.
-- Users with "suspended" status cannot initiate transfers.
-- Orders can only be placed between 6:00 AM and 10:00 PM local time.""",
+        "description": """This is the MOST CRITICAL section. Extract and document EVERY business rule and validation from the code.
+
+**IMPORTANT**: Be EXHAUSTIVE. If the code has 20 validation rules, document all 20. Do not summarize or skip any rules.
+
+Organize into logical categories:
+
+**Input Validation Rules**
+- Required fields: Which fields must be provided?
+- Format requirements: What formats are accepted (length limits, character types, numeric ranges)?
+- Conditional requirements: Which fields are required based on other selections?
+- Data transformations: How does the system process input before use (uppercase conversion, trimming, etc.)?
+
+**Search/Query Execution Rules**
+- How does each search type work?
+- What comparisons are performed (exact match, starts with, contains, range)?
+- Is matching case-sensitive or case-insensitive?
+- How are special characters or spaces handled?
+
+**Status and Filtering Rules**
+- What status values exist and what do they mean?
+- How does status filtering work?
+- What is the default filter behavior?
+- How are active/inactive records determined?
+
+**Result Set Management Rules**
+- Are there limits on how many results can be returned?
+- What happens when limits are exceeded?
+- How are results sorted by default?
+- Can users change the sort order?
+
+**Selection and Navigation Rules**
+- What happens when a user selects a record?
+- Are there different behaviors in different contexts (standalone vs popup)?
+- What information is passed between screens?
+
+For EACH rule, explain in plain English:
+- What the rule is (the business constraint)
+- When it applies (the condition)
+- What happens (the outcome or error)
+
+NEVER mention code references - translate everything to business language.""",
         "required": True,
     },
     {
         "name": "Actors and System Interactions",
         "description": """List ALL user roles or systems that interact with this functionality.
-Use friendly, business-facing terms like "Customer," "Back Office User," "KYC API," etc.
+Use friendly, business-facing terms like "Customer," "Back Office User," "Validation Service," etc.
+
 Format as a table:
-| Actor | Role in Process |
+| Actor / System | Role in Process |
+|----------------|-----------------|
 | Customer | Initiates the request |
-| Fraud Detection API | Performs real-time risk analysis |""",
+| Validation Service | Performs real-time checks |
+| Agent | Approves flagged requests |
+
+Include both human actors AND system components that participate in the process.
+Briefly explain what each actor does and why they're involved.""",
         "required": True,
     },
     {
         "name": "Business Process Flow",
         "description": """Describe step-by-step how the feature works from initiation to resolution.
 Use NUMBERED LISTS for linear flows and "if...then..." for conditionals.
-Example:
-1. Customer logs in and selects "Transfer Funds."
-2. System displays transfer form.
-3. Customer enters amount, recipient, and purpose.
-4. If amount > $10,000, system triggers enhanced validation.
-5. Upon confirmation, system creates the request and sends notification.""",
+
+If there are multiple modes or paths, document each separately:
+- **Mode 1 (e.g., Standalone Mode)**
+  1. Step one...
+  2. Step two...
+
+- **Mode 2 (e.g., Modal/Popup Mode)**
+  1. Step one...
+  2. Step two...
+
+Include decision points clearly:
+- "If [condition], then [action]"
+- "When [event occurs], the system [response]"
+
+End each flow with the final outcome or resolution.""",
         "required": True,
     },
     {
         "name": "Sequence Diagram",
-        "description": """Use Mermaid syntax to visualize component-level interactions.
-Focus on BUSINESS-RELEVANT systems and flow, not technical layers.
+        "description": """Use Mermaid syntax to visualize the interactions between actors and systems.
+Focus on BUSINESS-RELEVANT systems and flow, not technical implementation layers.
+
+Show the key participants and message flows that matter to stakeholders.
+Include decision points (alt blocks) for important conditional flows.
+
 Example:
 ```mermaid
 sequenceDiagram
-    participant Customer
-    participant App
+    participant User
+    participant SearchScreen
     participant ValidationService
-    Customer->>App: Submit Request
-    App->>ValidationService: Validate
-    ValidationService-->>App: Result
-    App-->>Customer: Confirmation
+    participant Database
+
+    User->>SearchScreen: Enter search criteria
+    SearchScreen->>ValidationService: Validate input
+    ValidationService-->>SearchScreen: Validation result
+    SearchScreen->>Database: Execute search
+    Database-->>SearchScreen: Return results
+    SearchScreen-->>User: Display results
 ```""",
         "required": False,
     },
     {
-        "name": "Technical Architecture",
-        "description": """Document the complete end-to-end technical flow from UI to database.
-This section provides FULL TRACEABILITY for architects, developers, and QA teams.
-
-**Required content:**
-
-1. **Data Flow Visualization**: Show the path UI → Flow → Controller → Service → DAO → Database
-
-2. **UI Layer (Entry Point)**:
-   - JSP/HTML files handling user input
-   - Form fields and their input types
-   - Client-side validations
-   - File path and line numbers
-
-3. **Flow/Navigation Layer** (if applicable):
-   - WebFlow definitions or navigation rules
-   - State transitions and conditions
-   - View-to-action mappings
-
-4. **Controller Layer (Request Processing)**:
-   - Action/Controller class name
-   - Method handling the request
-   - Method signature with parameters
-   - File path and line numbers (e.g., lines 234-267)
-   - Request validations performed
-
-5. **Service Layer (Business Logic)**:
-   - Service/Builder/Validator classes
-   - Business logic methods with signatures
-   - Business rules applied (list each rule)
-   - Data transformations performed
-   - File path and line numbers
-
-6. **Data Access Layer (Persistence)**:
-   - DAO/Repository class name
-   - Persistence methods (persist, update, delete, find)
-   - File path and line numbers
-
-7. **Database Layer**:
-   - SQL operations (INSERT, UPDATE, SELECT, DELETE)
-   - Table names and affected columns
-   - Database constraints (PK, FK, UNIQUE, NOT NULL)
-
-8. **Field-Level Data Mapping** (table showing):
-   | UI Field | Entity Property | DB Column | Data Type | Required | Validations |
-
-This section is AUTO-GENERATED from code graph traversal when available.
-LLM should preserve auto-generated content and enhance with additional context.""",
-        "required": False,
-    },
-    {
-        "name": "Implementation Mapping",
-        "description": """Provide comprehensive tabular mapping of operations to implementation components.
-This section enables IMPACT ANALYSIS and ESTIMATION for development teams.
-
-**Required tables:**
-
-1. **Operation-to-Implementation Mapping**:
-   Maps each business operation to implementing code at each architectural layer.
-
-   | Operation | UI | Controller | Service | DAO | Database |
-   |-----------|-----|------------|---------|-----|----------|
-   | Save Entity | Form.jsp:45 | saveAction():234 | build():45 | persist():123 | INSERT table |
-   | Validate Entity | - | validate():189 | validator():78 | - | SELECT table |
-
-   Format: `ClassName.methodName():lineNumber` or `filename:lineNumber`
-
-2. **Field-Level Data Mapping**:
-   Traces each data field from UI through all layers to database.
-
-   | Field | UI Location | Entity Property | DB Column | Validations | Required |
-   |-------|-------------|-----------------|-----------|-------------|----------|
-   | entityName | Form.jsp:45 | LegalEntity.name | entity_name | @NotNull, @Size | Yes |
-   | taxId | Form.jsp:52 | LegalEntity.taxId | tax_id | @Pattern | Yes |
-
-3. **Validation Checkpoints** (where each business rule is enforced):
-
-   | Layer | Component | Validation Rule | Line |
-   |-------|-----------|-----------------|------|
-   | Controller | EntityAction.validate() | Required fields check | 189 |
-   | Service | EntityValidator.validateTaxId() | Tax ID format validation | 78 |
-
-**Legend:**
-- Format for code references: `ClassName.methodName():lineNumber`
-- UI references: `filename:lineNumber`
-- Database operations: `OPERATION tableName`
-
-This section is AUTO-GENERATED from code graph traversal when available.
-LLM should preserve auto-generated mappings and add any missing operations discovered from code analysis.""",
-        "required": False,
-    },
-    {
-        "name": "Data Model",
-        "description": """Document the data entities and their relationships involved in this feature.
-
-**Required content:**
-
-1. **Entity Classes**:
-   For each entity involved:
-   - Entity class name and file path
-   - Key fields with data types
-   - Validation annotations (@NotNull, @Size, @Pattern, etc.)
-   - Relationships to other entities (OneToMany, ManyToOne, etc.)
-
-2. **Database Tables**:
-   | Table | Column | Type | Constraints | Description |
-   |-------|--------|------|-------------|-------------|
-   | les_legal_entity | entity_id | NUMBER | PK | Primary key |
-   | les_legal_entity | entity_name | VARCHAR(100) | NOT NULL | Entity display name |
-   | les_legal_entity | tax_id | VARCHAR(20) | UNIQUE | Tax identification |
-
-3. **Entity Relationships** (if applicable):
-   ```
-   LegalEntity (1) --- (N) Address
-   LegalEntity (N) --- (N) Contact
-   ```
-
-4. **Audit Fields** (if applicable):
-   - created_date, created_by
-   - updated_date, updated_by
-   - version (optimistic locking)
-
-This section helps developers understand the data structures and QA teams design test data.""",
-        "required": False,
-    },
-    {
         "name": "Assumptions and Constraints",
-        "description": """State conditions assumed by the system and any limitations.
-Helps developers and testers align with edge-case behavior.
-Examples:
-- Assumes customer is already registered and verified.
-- Applies only to domestic transactions; cross-border excluded.
-- Does not apply to mobile app users (web only).""",
+        "description": """Document the conditions assumed by the system and any limitations.
+
+**Assumptions**: What must be true for the feature to work correctly?
+- User authentication and authorization assumptions
+- Data integrity assumptions
+- Integration assumptions
+
+**Constraints**: What are the boundaries or limitations?
+- Input field limits (character counts, numeric ranges)
+- Result set limits
+- Feature scope boundaries (what's NOT included)
+- Platform/channel constraints (web only, mobile excluded, etc.)
+
+Be specific - these help developers understand edge cases and testers design test scenarios.""",
         "required": True,
     },
     {
         "name": "Acceptance Criteria",
         "description": """List business-facing pass/fail conditions for the feature to be considered complete.
 Make them MEASURABLE and ACTIONABLE.
-Examples:
-- Users must receive email confirmation within 1 minute of submission.
-- High-risk transactions must trigger manual review 100% of the time.
-- "No results found" page must include retry option.""",
+
+Organize by functional area:
+- **Search Functionality**: What search behaviors must work correctly?
+- **Validation**: What validation behaviors must be enforced?
+- **Display/Results**: What display behaviors must be correct?
+- **User Experience**: What UX requirements must be met?
+
+Format each criterion as a testable statement:
+- "When [action], the system must [expected behavior]"
+- "Given [condition], then [expected outcome]"
+
+Example:
+- When a user enters "NAT" in the name search, the system must return all entities whose names start with "NAT" (case-insensitive).
+- When results exceed the maximum limit, the system must display a warning message.""",
         "required": True,
     },
 ]
@@ -308,7 +322,7 @@ def build_brd_system_prompt(detail_level: str = "standard") -> str:
 
     detail_instructions = {
         "concise": "Keep sections brief (1-2 paragraphs). Use bullet points. Focus on key points only.",
-        "standard": "Provide balanced coverage (2-4 paragraphs per section). Mix prose and bullets.",
+        "standard": "Provide balanced coverage. Use clear prose with bullet points where appropriate. Be thorough but not verbose.",
         "detailed": "Provide comprehensive coverage with full explanations, examples, and edge cases.",
     }
 
@@ -322,25 +336,45 @@ def build_brd_system_prompt(detail_level: str = "standard") -> str:
 ## Required BRD Structure
 Your BRD must include these sections in order:
 
-1. **Feature Overview** - Plain English summary of what the feature enables
-2. **Functional Requirements** - What the system must do (business behavior)
-3. **Business Validations and Rules** - All logic constraints in business terms
-4. **Actors and System Interactions** - User roles and systems involved
-5. **Business Process Flow** - Step-by-step flow with numbered lists
-6. **Sequence Diagram** - Mermaid diagram of interactions (if complex)
-7. **Technical Architecture** - End-to-end flow from UI to database with file paths/line numbers (AUTO-GENERATED when available)
-8. **Data Model** - Entity classes, database tables, and relationships
-9. **Implementation Mapping** - Tabular mapping of operations to code (AUTO-GENERATED when available)
-10. **Assumptions and Constraints** - Conditions assumed and limitations
-11. **Acceptance Criteria** - Measurable pass/fail conditions
+1. **Feature Overview** - Plain English summary of what the feature enables, the problem it solves, and who benefits
+2. **Functional Requirements** - What the system must do in terms of business behavior, grouped by capability area
+3. **Business Validations and Rules** - All logic constraints and business rules in plain business terms
+4. **Actors and System Interactions** - User roles and systems involved, formatted as a table
+5. **Business Process Flow** - Step-by-step flow with numbered lists, covering all modes/paths
+6. **Sequence Diagram** - Mermaid diagram showing interactions between actors and systems
+7. **Assumptions and Constraints** - Conditions assumed and limitations of the feature
+8. **Acceptance Criteria** - Measurable pass/fail conditions organized by functional area
 
-## Special Instructions for Technical Sections (7, 8, 9)
-When auto-generated content is provided for Technical Architecture and Implementation Mapping:
-- PRESERVE the auto-generated file paths, line numbers, and component mappings
-- ENHANCE with additional context discovered from code analysis
-- These sections provide TRACEABILITY for developers and QA teams
+## Writing Style Guidelines
+- Write in clear, accessible prose that any business stakeholder can understand
+- Use subheadings to organize content within sections
+- Use tables for structured data (actors, field mappings, etc.)
+- Use numbered lists for sequential processes
+- Use bullet points for requirements and rules
+- Be specific and deterministic - avoid "may", "might", "usually"
+- Every claim should be based on actual system behavior
 
-Remember: Write for BUSINESS readers, not developers. Focus on WHAT, not HOW.
+## Critical: No Code References
+NEVER include in your output:
+- Class names, method names, or variable names
+- File paths or line numbers
+- Technical terms like "DAO", "entity", "controller", "service"
+- Code syntax or pseudo-code
+
+ALWAYS translate to business language:
+- "UserValidator.validateName()" → "The system validates the user name"
+- "if (amount > 10000)" → "When the amount exceeds $10,000"
+- "searchResults.size() > maxLimit" → "When results exceed the maximum allowed"
+
+## Critical: Exhaustive Rule Extraction
+Do NOT summarize or skip business rules. If the code contains:
+- 10 validation rules → document all 10
+- 5 search types → explain all 5
+- 8 error conditions → describe all 8
+
+The Business Validations and Rules section should be the most detailed section of the BRD.
+
+Remember: Write for BUSINESS readers, not developers. Focus on WHAT the system does, not HOW it's implemented.
 """
 
 
@@ -355,17 +389,65 @@ def build_reverse_engineering_prompt(feature_description: str, detail_level: str
 
 You are reverse engineering EXISTING code to create a BRD. The feature "{feature_description}" ALREADY EXISTS.
 
-Your task is to:
-1. ANALYZE the existing implementation from the provided context
-2. DOCUMENT what the code currently does in business terms
-3. EXTRACT business rules from the actual code behavior
-4. DESCRIBE the existing flow, not propose new development
+### Your Primary Task: EXHAUSTIVE Business Logic Extraction
 
-DO NOT:
-- Propose new features or enhancements
-- Write requirements for things that don't exist in the code
-- Make assumptions without evidence from the code
-- Use technical jargon - translate code behavior to business language
+You must extract and document EVERY piece of business logic from the code:
 
-All claims must be backed by actual code found in the analysis.
+1. **ANALYZE** the existing implementation thoroughly
+2. **EXTRACT** every validation, rule, condition, and behavior
+3. **TRANSLATE** all code logic into plain English business language
+4. **DOCUMENT** comprehensively - do not summarize or skip any rules
+
+### What to Extract (Be Exhaustive)
+
+**From Validation Code:**
+- Every field that is validated (required, format, length, range)
+- Every conditional validation (field X required when Y is selected)
+- Every error message and when it appears
+- Every data transformation (trimming, uppercase conversion, etc.)
+
+**From Business Logic:**
+- Every condition and its outcome (if X then Y)
+- Every calculation or data processing rule
+- Every status check and what statuses mean
+- Every limit, threshold, or boundary condition
+
+**From User Interface Logic:**
+- Every field and its purpose
+- Every button/action and what it does
+- Every screen transition and when it occurs
+- Every feedback message shown to users
+
+**From Query/Search Logic:**
+- How each search type works
+- What matching rules apply (exact, partial, case-sensitivity)
+- How results are filtered, sorted, and limited
+
+### Writing Rules
+
+**NEVER include:**
+- Class names (e.g., "UserValidator", "SearchService")
+- Method names (e.g., "validate()", "executeSearch()")
+- File paths (e.g., "/src/main/java/...")
+- Line numbers
+- Technical terms (e.g., "DAO", "entity", "null check")
+
+**ALWAYS use:**
+- Plain English descriptions
+- Business terminology
+- User-centric language
+- "The system must..." or "When the user..."
+
+### Translation Examples
+
+| Code Pattern | Business Language |
+|--------------|-------------------|
+| `if (field == null)` | "The field is required" |
+| `field.length() <= 40` | "The field accepts up to 40 characters" |
+| `searchType == "NAME_BEGINS"` | "When searching by name prefix..." |
+| `results.size() > maxLimit` | "When results exceed the maximum allowed..." |
+| `input.trim().toUpperCase()` | "The system removes extra spaces and performs case-insensitive matching" |
+| `status == "ACTIVE"` | "Only currently active records are included" |
+
+All claims must be backed by actual code found in the analysis, but expressed entirely in business terms.
 """

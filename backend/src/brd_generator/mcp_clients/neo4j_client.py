@@ -331,7 +331,7 @@ class Neo4jMCPClient(MCPClient):
                        depth,
                        pageRank
                 ORDER BY depth ASC, pageRank DESC
-                LIMIT 30
+                LIMIT 150
             """
             result = await session.run(query, name=component_name, maxDepth=max_depth)
             records = await result.data()
@@ -495,7 +495,7 @@ class Neo4jMCPClient(MCPClient):
                            n.filePath AS path,
                            pageRank AS combinedScore
                     ORDER BY combinedScore DESC
-                    LIMIT 100
+                    LIMIT 500
                 """
                 result = await session.run(fallback_query)
                 records = await result.data()
@@ -546,7 +546,7 @@ class Neo4jMCPClient(MCPClient):
                     WITH connected, length(path) AS distance, path
                     RETURN connected, distance, path
                     ORDER BY connected.pageRank DESC
-                    LIMIT 20
+                    LIMIT 500
                 }}
                 WITH seed, connected, distance,
                      [node IN nodes(path) | node.name] AS pathNodes

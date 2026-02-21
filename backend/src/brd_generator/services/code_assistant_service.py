@@ -226,7 +226,7 @@ class CodeAssistantService:
                 AND toLower(n.name) CONTAINS toLower($keyword)
                 RETURN n.name as name, n.filePath as filePath, n.startLine as startLine,
                        n.endLine as endLine, labels(n)[0] as type, n.sourceCode as sourceCode
-                LIMIT 10
+                LIMIT 100
             """
             result = await self.neo4j_client.query_code_structure(query, {"keyword": keyword})
             for node in result.get("nodes", []):
@@ -246,7 +246,7 @@ class CodeAssistantService:
                 WHERE n:Class OR n:Interface OR n:Module OR n:JavaClass OR n:SpringService OR n:SpringController
                 RETURN n.name as name, n.filePath as filePath, n.startLine as startLine,
                        n.endLine as endLine, labels(n)[0] as type, n.sourceCode as sourceCode
-                LIMIT 20
+                LIMIT 100
             """
             result = await self.neo4j_client.query_code_structure(query, {})
             for node in result.get("nodes", []):
@@ -272,7 +272,7 @@ class CodeAssistantService:
                 WHERE n.name = $keyword OR toLower(n.name) = toLower($keyword)
                 RETURN n.name as name, n.filePath as filePath, n.startLine as startLine,
                        n.endLine as endLine, labels(n)[0] as type, n.sourceCode as sourceCode
-                LIMIT 5
+                LIMIT 50
             """
             result = await self.neo4j_client.query_code_structure(query, {"keyword": keyword})
             for node in result.get("nodes", []):
@@ -292,7 +292,7 @@ class CodeAssistantService:
                     WHERE toLower(n.name) CONTAINS toLower($keyword)
                     RETURN n.name as name, n.filePath as filePath, n.startLine as startLine,
                            n.endLine as endLine, labels(n)[0] as type, n.sourceCode as sourceCode
-                    LIMIT 10
+                    LIMIT 100
                 """
                 result = await self.neo4j_client.query_code_structure(query, {"keyword": keyword})
                 for node in result.get("nodes", []):
@@ -321,7 +321,7 @@ class CodeAssistantService:
                        target.name as targetName, target.filePath as targetPath,
                        source.filePath as sourcePath, source.startLine as startLine,
                        source.endLine as endLine, source.sourceCode as sourceCode
-                LIMIT 15
+                LIMIT 100
             """
             result = await self.neo4j_client.query_code_structure(query, {"keyword": keyword})
             for node in result.get("nodes", []):
@@ -348,7 +348,7 @@ class CodeAssistantService:
                        target.name as targetName, source.filePath as sourcePath,
                        source.startLine as startLine, source.endLine as endLine,
                        source.sourceCode as sourceCode
-                LIMIT 15
+                LIMIT 100
             """
             result = await self.neo4j_client.query_code_structure(query, {"keyword": keyword})
             for node in result.get("nodes", []):
@@ -371,7 +371,7 @@ class CodeAssistantService:
                        method.name as targetName, cls.filePath as sourcePath,
                        method.startLine as startLine, method.endLine as endLine,
                        method.sourceCode as sourceCode
-                LIMIT 10
+                LIMIT 100
             """
             result = await self.neo4j_client.query_code_structure(query, {"keyword": keyword})
             for node in result.get("nodes", []):
@@ -394,7 +394,7 @@ class CodeAssistantService:
                        entity.name as targetName, cls.filePath as sourcePath,
                        entity.startLine as startLine, entity.endLine as endLine,
                        entity.sourceCode as sourceCode
-                LIMIT 10
+                LIMIT 100
             """
             result = await self.neo4j_client.query_code_structure(query, {"keyword": keyword})
             for node in result.get("nodes", []):
@@ -422,7 +422,7 @@ class CodeAssistantService:
                    OR toLower(n.filePath) CONTAINS toLower($keyword)
                 RETURN n.name as name, n.filePath as filePath, n.startLine as startLine,
                        n.endLine as endLine, labels(n)[0] as type, n.sourceCode as sourceCode
-                LIMIT 10
+                LIMIT 100
             """
             result = await self.neo4j_client.query_code_structure(query, {"keyword": keyword})
             for node in result.get("nodes", []):

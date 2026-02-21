@@ -20,6 +20,19 @@ from ..models.context import (
     FileContext,
     APIContract,
     DataModel,
+    MenuItemInfo,
+    SubFeatureInfo,
+    ValidationStep,
+    ValidationChainInfo,
+    CrossFeatureDependency,
+    CrossFeatureContext,
+    # Phase 11: Enhanced models
+    CodeSnippetInfo,
+    SecurityRuleInfo,
+    ErrorMessageInfo,
+    TransitionConditionInfo,
+    FormFieldDetailInfo,
+    EnhancedMethodContext,
 )
 from ..models.flow_context import (
     FeatureFlow,
@@ -435,6 +448,234 @@ class ContextAggregator:
             except Exception as e:
                 logger.warning(f"[AGGREGATOR] Feature flow extraction failed: {e}")
 
+        # Phase 6: Extract enhanced context (menu items, sub-features, validation chains, cross-feature deps)
+        menu_items_list: list[MenuItemInfo] = []
+        sub_features_list: list[SubFeatureInfo] = []
+        validation_chains_list: list[ValidationChainInfo] = []
+        cross_feature_ctx: Optional[CrossFeatureContext] = None
+        enriched_rules_list: list[dict] = []
+
+        if self._enhanced_retriever:
+            progress.step("build_context", "Extracting enhanced context", current=6, total=6)
+            await report("enhanced", "Extracting menu items, sub-features, and cross-feature dependencies...")
+            try:
+                # Get menu-based entry points
+                menu_result = await self._enhanced_retriever._find_entry_points_by_menu(request, max_entry_points=10)
+                if menu_result and menu_result.get("menu_items"):
+                    for item in menu_result["menu_items"]:
+                        menu_items_list.append(MenuItemInfo(
+                            name=item.get("name", ""),
+                            label=item.get("label", item.get("name", "")),
+                            url=item.get("url", ""),
+                            flow_id=item.get("flow_id", ""),
+                            view_state_id=item.get("view_state_id"),
+                            menu_level=item.get("menu_level", 0),
+                            parent_menu=item.get("parent_menu"),
+                            required_roles=item.get("required_roles", []),
+                        ))
+
+                    # Get sub-features for the first matching flow
+                    if menu_result.get("flow_id"):
+                        sub_features_raw = await self._enhanced_retriever._get_sub_features(menu_result["flow_id"])
+                        for sf in sub_features_raw:
+                            sub_features_list.append(SubFeatureInfo(
+                                screen_id=sf.get("screen_id", ""),
+                                title=sf.get("title", ""),
+                                screen_type=sf.get("screen_type", "unknown"),
+                                jsps=sf.get("jsps", []),
+                                action_class=sf.get("action_class"),
+                                action_methods=sf.get("action_methods", []),
+                                transitions_to=sf.get("transitions_to", []),
+                                url_pattern=sf.get("url_pattern"),
+                            ))
+
+                        # Get cross-feature dependencies
+                        cross_feature_data = await self._enhanced_retriever.get_cross_feature_dependencies(menu_result["flow_id"])
+                        if cross_feature_data:
+                            deps = []
+                            for dep in cross_feature_data.get("dependencies", []):
+                                deps.append(CrossFeatureDependency(
+                                    source_feature=dep.get("source_feature", ""),
+                                    target_feature=dep.get("target_feature", ""),
+                                    relationship_type=dep.get("relationship_type", ""),
+                                    shared_component=dep.get("shared_component", ""),
+                                    implication=dep.get("implication", ""),
+                                ))
+                            cross_feature_ctx = CrossFeatureContext(
+                                dependencies=deps,
+                                shared_entities=cross_feature_data.get("shared_entities", {}),
+                                shared_services=cross_feature_data.get("shared_services", {}),
+                                impact_summary=cross_feature_data.get("impact_summary"),
+                            )
+
+                # Get enriched business rules
+                if architecture.components:
+                    feature_context = {
+                        "menu_item": menu_items_list[0].label if menu_items_list else None,
+                        "request": request,
+                    }
+                    enriched_rules_raw = await self._enhanced_retriever.get_enriched_business_rules(
+                        entry_points=[{"name": c.name, "type": c.type} for c in architecture.components[:10]],
+                        feature_context=feature_context,
+                        max_rules=20
+                    )
+                    enriched_rules_list = enriched_rules_raw if enriched_rules_raw else []
+
+                # Get validation chains (from entry points)
+                # This would need to be implemented in enhanced_context.py
+                # For now, we extract basic validation info from components
+                for comp in architecture.components[:5]:
+                    if "action" in comp.type.lower() or "validator" in comp.type.lower():
+                        validation_chains_list.append(ValidationChainInfo(
+                            entry_point=comp.name,
+                            validation_steps=[
+                                ValidationStep(
+                                    order=1,
+                                    step_type="action" if "action" in comp.type.lower() else "validator",
+                                    class_name=comp.name,
+                                    rules=[f"Validation in {comp.name}"],
+                                )
+                            ],
+                            total_rules=1,
+                            validated_fields=[],
+                        ))
+
+                logger.info(f"[ENHANCED] Extracted {len(menu_items_list)} menu items, "
+                           f"{len(sub_features_list)} sub-features, "
+                           f"{len(validation_chains_list)} validation chains, "
+                           f"{len(enriched_rules_list)} enriched rules")
+
+            except Exception as e:
+                logger.warning(f"[ENHANCED] Enhanced context extraction failed: {e}")
+
+        # Phase 7: Extract code snippets, security rules, error messages (Phase 11 enhancement)
+        code_snippets_list: list[CodeSnippetInfo] = []
+        security_rules_list: list[SecurityRuleInfo] = []
+        error_messages_list: list[ErrorMessageInfo] = []
+        transition_conditions_list: list[TransitionConditionInfo] = []
+        form_field_details_list: list[FormFieldDetailInfo] = []
+        enhanced_methods_list: list[EnhancedMethodContext] = []
+
+        try:
+            await report("enhanced", "Extracting code snippets, security rules, and error messages...")
+
+            # Get method IDs from architecture components
+            method_components = [c for c in architecture.components if 'method' in c.type.lower() or 'action' in c.type.lower()]
+
+            if method_components:
+                # Fetch enhanced method context
+                method_names = [c.name for c in method_components[:20]]  # Limit to 20 methods
+                enhanced_methods_data = await self._fetch_enhanced_methods(method_names)
+
+                for method_data in enhanced_methods_data:
+                    # Extract code snippet
+                    if method_data.get("codeSnippet"):
+                        code_snippets_list.append(CodeSnippetInfo(
+                            method_name=method_data.get("methodName", ""),
+                            class_name=method_data.get("className"),
+                            file_path=method_data.get("filePath", ""),
+                            start_line=method_data.get("startLine", 0),
+                            end_line=method_data.get("endLine", 0),
+                            snippet=method_data.get("codeSnippet", ""),
+                        ))
+
+                    # Extract security rules
+                    for rule in method_data.get("securityRules", []):
+                        if rule.get("type"):
+                            security_rules_list.append(SecurityRuleInfo(
+                                annotation_type=rule.get("type", ""),
+                                annotation_text=rule.get("expression", ""),
+                                expression=rule.get("expression"),
+                                roles=rule.get("roles", []),
+                                target_name=method_data.get("methodName", ""),
+                                target_type="method",
+                                file_path=method_data.get("filePath"),
+                                line_number=method_data.get("startLine"),
+                                description=rule.get("description"),
+                            ))
+
+                    # Extract error messages
+                    for err_msg in method_data.get("errorMessages", []):
+                        if isinstance(err_msg, str) and err_msg:
+                            error_messages_list.append(ErrorMessageInfo(
+                                message_text=err_msg,
+                                source_type="inline",
+                                source_file=method_data.get("filePath"),
+                                context_method=method_data.get("methodName"),
+                            ))
+
+                    # Build enhanced method context
+                    enhanced_methods_list.append(EnhancedMethodContext(
+                        method_name=method_data.get("methodName", ""),
+                        class_name=method_data.get("className"),
+                        signature=method_data.get("signature"),
+                        file_path=method_data.get("filePath", ""),
+                        start_line=method_data.get("startLine", 0),
+                        end_line=method_data.get("endLine", 0),
+                        code_snippet=method_data.get("codeSnippet"),
+                        error_messages=[
+                            ErrorMessageInfo(message_text=e, source_type="inline")
+                            for e in method_data.get("errorMessages", []) if isinstance(e, str) and e
+                        ],
+                        security_rules=[
+                            SecurityRuleInfo(
+                                annotation_type=r.get("type", ""),
+                                annotation_text=r.get("expression", ""),
+                                expression=r.get("expression"),
+                                roles=r.get("roles", []),
+                                target_name=method_data.get("methodName", ""),
+                                target_type="method",
+                            )
+                            for r in method_data.get("securityRules", []) if r.get("type")
+                        ],
+                        invoked_methods=method_data.get("invokedMethods", []),
+                    ))
+
+            # Fetch transition conditions from WebFlows
+            flow_components = [c for c in architecture.components if 'flow' in c.type.lower() or 'webflow' in c.type.lower()]
+            for flow in flow_components[:5]:  # Limit to 5 flows
+                conditions = await self._fetch_transition_conditions(flow.name)
+                for cond in conditions:
+                    transition_conditions_list.append(TransitionConditionInfo(
+                        flow_name=cond.get("flowName", flow.name),
+                        transition_name=cond.get("transitionName", ""),
+                        trigger_event=cond.get("triggerEvent", ""),
+                        target_state=cond.get("targetState", ""),
+                        condition_expression=cond.get("condition", ""),
+                        description=cond.get("conditionMetadata", {}).get("description") if cond.get("conditionMetadata") else None,
+                        variables=cond.get("conditionMetadata", {}).get("variables", []) if cond.get("conditionMetadata") else [],
+                        method_calls=cond.get("conditionMetadata", {}).get("methodCalls", []) if cond.get("conditionMetadata") else [],
+                        is_spel=cond.get("conditionMetadata", {}).get("isSpEL", False) if cond.get("conditionMetadata") else False,
+                    ))
+
+            # Fetch form field details from JSPs
+            jsp_components = [c for c in architecture.components if 'jsp' in c.type.lower() or 'page' in c.type.lower()]
+            for jsp in jsp_components[:5]:  # Limit to 5 JSPs
+                fields = await self._fetch_form_field_details(jsp.name)
+                for field in fields:
+                    form_field_details_list.append(FormFieldDetailInfo(
+                        field_name=field.get("fieldName", ""),
+                        field_type=field.get("fieldType", "text"),
+                        label=field.get("label"),
+                        label_key=field.get("labelKey"),
+                        required=field.get("required", False),
+                        placeholder=field.get("placeholder"),
+                        validation_rules=field.get("validationRules"),
+                        error_path=field.get("errorPath"),
+                        css_error_class=field.get("cssErrorClass"),
+                        form_name=field.get("formName"),
+                        jsp_name=field.get("jspName", jsp.name),
+                    ))
+
+            logger.info(f"[ENHANCED-PHASE7] Extracted {len(code_snippets_list)} code snippets, "
+                       f"{len(security_rules_list)} security rules, "
+                       f"{len(error_messages_list)} error messages, "
+                       f"{len(transition_conditions_list)} transition conditions, "
+                       f"{len(form_field_details_list)} form fields")
+
+        except Exception as e:
+            logger.warning(f"[ENHANCED-PHASE7] Enhanced data extraction failed: {e}")
+
         # Build complete context with schema info and feature flows
         from ..models.context import SchemaInfo
         context = AggregatedContext(
@@ -447,6 +688,19 @@ class ContextAggregator:
             feature_flows=[flow.model_dump() for flow in feature_flows_data] if feature_flows_data else None,
             implementation_mapping=impl_mapping_md if impl_mapping_md else None,
             technical_architecture=tech_arch_md if tech_arch_md else None,
+            # Phase 6: Enhanced context
+            menu_items=menu_items_list,
+            sub_features=sub_features_list,
+            validation_chains=validation_chains_list,
+            cross_feature_context=cross_feature_ctx,
+            enriched_business_rules=enriched_rules_list,
+            # Phase 11: Code snippets, security rules, error messages
+            code_snippets=code_snippets_list,
+            security_rules=security_rules_list,
+            error_messages=error_messages_list,
+            transition_conditions=transition_conditions_list,
+            form_field_details=form_field_details_list,
+            enhanced_methods=enhanced_methods_list,
         )
 
         # Check token budget
@@ -1741,6 +1995,268 @@ Return ONLY the JSON array, no other text."""
         logger.info(f"[FLOW-EXTRACT] Generated technical architecture for {len(feature_flows)} features")
 
         return feature_flows, impl_mapping_md, tech_arch_md
+
+    # =========================================================================
+    # Phase 11: Enhanced Data Fetching Methods
+    # =========================================================================
+
+    async def _fetch_enhanced_methods(
+        self,
+        method_names: list[str],
+    ) -> list[dict]:
+        """
+        Fetch enhanced method context including code snippets, security rules, and error messages.
+
+        Args:
+            method_names: List of method names to fetch
+
+        Returns:
+            List of method data dictionaries with enhanced fields
+        """
+        if not method_names:
+            return []
+
+        try:
+            # Build query to get method details with enhanced fields
+            query = """
+                MATCH (method:JavaMethod)
+                WHERE method.name IN $methodNames
+
+                // Get parent class
+                OPTIONAL MATCH (cls)-[:HAS_METHOD]->(method)
+
+                // Get security rules
+                OPTIONAL MATCH (method)<-[:SECURED_BY]-(rule:SecurityRule)
+
+                // Get invoked methods
+                OPTIONAL MATCH (method)-[:INVOKES]->(inv:MethodInvocation)
+
+                RETURN
+                    method.entityId AS entityId,
+                    method.name AS methodName,
+                    method.signature AS signature,
+                    method.filePath AS filePath,
+                    method.startLine AS startLine,
+                    method.endLine AS endLine,
+                    method.codeSnippet AS codeSnippet,
+                    method.errorMessages AS errorMessages,
+                    cls.name AS className,
+                    labels(cls)[0] AS classType,
+                    collect(DISTINCT {
+                        type: rule.annotationType,
+                        expression: rule.expression,
+                        roles: rule.roles,
+                        description: rule.ruleDescription
+                    }) AS securityRules,
+                    collect(DISTINCT inv.methodName) AS invokedMethods
+            """
+
+            result = await self.neo4j.query_code_structure(query, {"methodNames": method_names})
+            methods = []
+
+            for record in result.get("nodes", []):
+                if record.get("methodName"):
+                    # Filter out empty security rules
+                    security_rules = [r for r in record.get("securityRules", []) if r.get("type")]
+                    methods.append({
+                        "entityId": record.get("entityId"),
+                        "methodName": record.get("methodName"),
+                        "signature": record.get("signature"),
+                        "filePath": record.get("filePath"),
+                        "startLine": record.get("startLine", 0),
+                        "endLine": record.get("endLine", 0),
+                        "codeSnippet": record.get("codeSnippet"),
+                        "errorMessages": record.get("errorMessages", []),
+                        "className": record.get("className"),
+                        "classType": record.get("classType"),
+                        "securityRules": security_rules,
+                        "invokedMethods": [m for m in record.get("invokedMethods", []) if m],
+                    })
+
+            logger.info(f"[FETCH-METHODS] Fetched {len(methods)} enhanced methods")
+            return methods
+
+        except Exception as e:
+            logger.warning(f"[FETCH-METHODS] Failed to fetch enhanced methods: {e}")
+            return []
+
+    async def _fetch_transition_conditions(
+        self,
+        flow_name: str,
+    ) -> list[dict]:
+        """
+        Fetch transition conditions with parsed metadata from a WebFlow.
+
+        Args:
+            flow_name: Name of the WebFlow definition
+
+        Returns:
+            List of transition condition dictionaries
+        """
+        if not flow_name:
+            return []
+
+        try:
+            query = """
+                MATCH (flow:WebFlowDefinition)-[:HAS_TRANSITION|FLOW_DEFINES_STATE*1..2]->
+                      (trans:FlowTransition)
+                WHERE flow.name = $flowName
+                  AND trans.condition IS NOT NULL
+
+                RETURN
+                    flow.name AS flowName,
+                    trans.name AS transitionName,
+                    trans.on AS triggerEvent,
+                    trans.to AS targetState,
+                    trans.condition AS condition,
+                    trans.conditionMetadata AS conditionMetadata,
+                    trans.startLine AS lineNumber
+                ORDER BY trans.startLine
+            """
+
+            result = await self.neo4j.query_code_structure(query, {"flowName": flow_name})
+            conditions = []
+
+            for record in result.get("nodes", []):
+                if record.get("condition"):
+                    conditions.append({
+                        "flowName": record.get("flowName", flow_name),
+                        "transitionName": record.get("transitionName", ""),
+                        "triggerEvent": record.get("triggerEvent", ""),
+                        "targetState": record.get("targetState", ""),
+                        "condition": record.get("condition", ""),
+                        "conditionMetadata": record.get("conditionMetadata"),
+                        "lineNumber": record.get("lineNumber"),
+                    })
+
+            logger.info(f"[FETCH-CONDITIONS] Fetched {len(conditions)} conditions for flow {flow_name}")
+            return conditions
+
+        except Exception as e:
+            logger.warning(f"[FETCH-CONDITIONS] Failed to fetch conditions for {flow_name}: {e}")
+            return []
+
+    async def _fetch_form_field_details(
+        self,
+        jsp_name: str,
+    ) -> list[dict]:
+        """
+        Fetch form field details with labels and validation rules from a JSP.
+
+        Args:
+            jsp_name: Name of the JSP page
+
+        Returns:
+            List of form field dictionaries
+        """
+        if not jsp_name:
+            return []
+
+        try:
+            query = """
+                MATCH (jsp:JSPPage)-[:HAS_FORM]->(form:JSPForm)-[:HAS_FIELD]->(field)
+                WHERE jsp.name = $jspName
+                   OR jsp.filePath CONTAINS $jspName
+
+                RETURN
+                    jsp.name AS jspName,
+                    form.name AS formName,
+                    form.modelAttribute AS modelAttribute,
+                    field.name AS fieldName,
+                    field.type AS fieldType,
+                    field.label AS label,
+                    field.labelKey AS labelKey,
+                    field.required AS required,
+                    field.placeholder AS placeholder,
+                    field.validationRules AS validationRules,
+                    field.errorPath AS errorPath,
+                    field.cssErrorClass AS cssErrorClass
+                ORDER BY form.name, field.name
+            """
+
+            result = await self.neo4j.query_code_structure(query, {"jspName": jsp_name})
+            fields = []
+
+            for record in result.get("nodes", []):
+                if record.get("fieldName"):
+                    fields.append({
+                        "jspName": record.get("jspName", jsp_name),
+                        "formName": record.get("formName"),
+                        "modelAttribute": record.get("modelAttribute"),
+                        "fieldName": record.get("fieldName"),
+                        "fieldType": record.get("fieldType", "text"),
+                        "label": record.get("label"),
+                        "labelKey": record.get("labelKey"),
+                        "required": record.get("required", False),
+                        "placeholder": record.get("placeholder"),
+                        "validationRules": record.get("validationRules"),
+                        "errorPath": record.get("errorPath"),
+                        "cssErrorClass": record.get("cssErrorClass"),
+                    })
+
+            logger.info(f"[FETCH-FIELDS] Fetched {len(fields)} form fields for JSP {jsp_name}")
+            return fields
+
+        except Exception as e:
+            logger.warning(f"[FETCH-FIELDS] Failed to fetch form fields for {jsp_name}: {e}")
+            return []
+
+    async def _fetch_error_messages(
+        self,
+        keyword: str,
+    ) -> list[dict]:
+        """
+        Fetch error messages from resource bundles.
+
+        Args:
+            keyword: Keyword to search in message keys/text
+
+        Returns:
+            List of error message dictionaries
+        """
+        if not keyword:
+            return []
+
+        try:
+            query = """
+                MATCH (msg:ErrorMessage)
+                WHERE msg.messageKey CONTAINS $keyword
+                   OR msg.messageText CONTAINS $keyword
+                   OR msg.sourceFile CONTAINS $keyword
+
+                RETURN
+                    msg.entityId AS entityId,
+                    msg.messageKey AS messageKey,
+                    msg.messageText AS messageText,
+                    msg.sourceFile AS sourceFile,
+                    msg.locale AS locale,
+                    msg.parameters AS parameters,
+                    msg.startLine AS lineNumber
+                ORDER BY msg.messageKey
+                LIMIT 50
+            """
+
+            result = await self.neo4j.query_code_structure(query, {"keyword": keyword})
+            messages = []
+
+            for record in result.get("nodes", []):
+                if record.get("messageText"):
+                    messages.append({
+                        "entityId": record.get("entityId"),
+                        "messageKey": record.get("messageKey"),
+                        "messageText": record.get("messageText"),
+                        "sourceFile": record.get("sourceFile"),
+                        "locale": record.get("locale"),
+                        "parameters": record.get("parameters", []),
+                        "lineNumber": record.get("lineNumber"),
+                    })
+
+            logger.info(f"[FETCH-ERRORS] Fetched {len(messages)} error messages for keyword {keyword}")
+            return messages
+
+        except Exception as e:
+            logger.warning(f"[FETCH-ERRORS] Failed to fetch error messages for {keyword}: {e}")
+            return []
 
     async def _compress_context(
         self,

@@ -15,12 +15,128 @@ import {
     FlowTransitionNode,
     FlowActionNode,
     FlowVariable,
-    ActionReference
+    ActionReference,
+    ScreenNode,
+    TransitionConditionMetadata
 } from '../types.js';
 import { ensureTempDir, getTempFilePath, generateInstanceId, generateEntityId } from '../parser-utils.js';
 import { BusinessRuleDetector } from './BusinessRuleDetector.js';
 
 const logger = createContextLogger('WebFlowParser');
+
+/**
+ * Parse a WebFlow condition expression into structured metadata.
+ * Extracts operators, variables, method calls, and generates human-readable descriptions.
+ */
+function parseConditionExpression(condition: string): TransitionConditionMetadata {
+    const metadata: TransitionConditionMetadata = {
+        expression: condition,
+        variables: [],
+        methodCalls: [],
+        isSpEL: condition.includes('#') || condition.includes('T('),
+    };
+
+    // Extract scope variables (flowScope.variable, viewScope.variable, etc.)
+    const scopeVariablePattern = /(?:flowScope|viewScope|requestScope|conversationScope|flashScope)\.(\w+)/g;
+    let varMatch;
+    while ((varMatch = scopeVariablePattern.exec(condition)) !== null) {
+        if (varMatch[1] && !metadata.variables.includes(varMatch[1])) {
+            metadata.variables.push(varMatch[1]);
+        }
+    }
+
+    // Also extract simple variable references before operators
+    const simpleVarPattern = /\b([a-z]\w*)\b(?=\s*[!=<>]|\s*\.(?!class))/g;
+    while ((varMatch = simpleVarPattern.exec(condition)) !== null) {
+        if (varMatch[1] && !metadata.variables.includes(varMatch[1]) && !['null', 'true', 'false'].includes(varMatch[1])) {
+            metadata.variables.push(varMatch[1]);
+        }
+    }
+
+    // Extract method calls (pattern: identifier.methodName())
+    const methodPattern = /(\w+)\.(\w+)\s*\(/g;
+    let methodMatch;
+    while ((methodMatch = methodPattern.exec(condition)) !== null) {
+        if (methodMatch[2]) {
+            const fullMethod = `${methodMatch[1]}.${methodMatch[2]}`;
+            if (!metadata.methodCalls.includes(fullMethod)) {
+                metadata.methodCalls.push(fullMethod);
+            }
+        }
+    }
+
+    // Determine operator
+    if (condition.includes('==')) {
+        metadata.operator = 'equals';
+        const parts = condition.split('==').map(p => p.trim());
+        metadata.leftOperand = parts[0];
+        metadata.rightOperand = parts[1];
+    } else if (condition.includes('!=')) {
+        metadata.operator = 'notEquals';
+        const parts = condition.split('!=').map(p => p.trim());
+        metadata.leftOperand = parts[0];
+        metadata.rightOperand = parts[1];
+    } else if (condition.includes('>=')) {
+        metadata.operator = 'greaterThanOrEquals';
+        const parts = condition.split('>=').map(p => p.trim());
+        metadata.leftOperand = parts[0];
+        metadata.rightOperand = parts[1];
+    } else if (condition.includes('<=')) {
+        metadata.operator = 'lessThanOrEquals';
+        const parts = condition.split('<=').map(p => p.trim());
+        metadata.leftOperand = parts[0];
+        metadata.rightOperand = parts[1];
+    } else if (condition.includes('>')) {
+        metadata.operator = 'greaterThan';
+        const parts = condition.split('>').map(p => p.trim());
+        metadata.leftOperand = parts[0];
+        metadata.rightOperand = parts[1];
+    } else if (condition.includes('<')) {
+        metadata.operator = 'lessThan';
+        const parts = condition.split('<').map(p => p.trim());
+        metadata.leftOperand = parts[0];
+        metadata.rightOperand = parts[1];
+    } else if (condition.includes(' and ') || condition.includes('&&')) {
+        metadata.operator = 'and';
+    } else if (condition.includes(' or ') || condition.includes('||')) {
+        metadata.operator = 'or';
+    } else if (condition.startsWith('!') || condition.includes(' not ')) {
+        metadata.operator = 'not';
+    } else if (condition.includes('.contains(')) {
+        metadata.operator = 'contains';
+    } else if (condition.includes('.matches(')) {
+        metadata.operator = 'matches';
+    } else {
+        metadata.operator = 'custom';
+    }
+
+    // Generate human-readable description
+    metadata.description = generateConditionDescription(metadata);
+
+    return metadata;
+}
+
+/**
+ * Generate a human-readable description from condition metadata.
+ */
+function generateConditionDescription(meta: TransitionConditionMetadata): string {
+    if (meta.operator === 'equals' && meta.leftOperand && meta.rightOperand) {
+        return `When ${meta.leftOperand} equals ${meta.rightOperand}`;
+    } else if (meta.operator === 'notEquals' && meta.leftOperand && meta.rightOperand) {
+        return `When ${meta.leftOperand} is not equal to ${meta.rightOperand}`;
+    } else if (meta.operator === 'greaterThan' && meta.leftOperand && meta.rightOperand) {
+        return `When ${meta.leftOperand} is greater than ${meta.rightOperand}`;
+    } else if (meta.operator === 'lessThan' && meta.leftOperand && meta.rightOperand) {
+        return `When ${meta.leftOperand} is less than ${meta.rightOperand}`;
+    } else if (meta.operator === 'not') {
+        return `When condition is false: ${meta.expression.substring(0, 50)}`;
+    } else if (meta.methodCalls.length > 0) {
+        return `When ${meta.methodCalls.join(' and ')} returns true`;
+    } else if (meta.variables.length > 0) {
+        return `Condition based on: ${meta.variables.join(', ')}`;
+    }
+    return `Custom condition: ${meta.expression.substring(0, 50)}${meta.expression.length > 50 ? '...' : ''}`;
+}
 
 export class WebFlowParser {
     private instanceCounter: InstanceCounter = { count: 0 };
@@ -164,9 +280,51 @@ export class WebFlowParser {
                `${businessRuleResult.totalRulesDetected} rules`
            );
 
+           // Extract Screen nodes from view-states (Phase 1: Menu & Screen Indexing)
+           const screens = this.extractScreens(flowElement, flowNode, states, transitions);
+           nodes.push(...screens);
+
+           // Create screen relationships
+           screens.forEach(screen => {
+               // Screen uses flow
+               relationships.push(this.createRelationship(
+                   'SCREEN_USES_FLOW',
+                   screen.entityId,
+                   flowNode.entityId
+               ));
+
+               // Screen navigates to other screens
+               screen.properties.transitionsTo.forEach(targetScreenId => {
+                   const targetScreen = screens.find(s => s.properties.screenId === targetScreenId);
+                   if (targetScreen) {
+                       relationships.push(this.createRelationship(
+                           'SCREEN_NAVIGATES_TO',
+                           screen.entityId,
+                           targetScreen.entityId
+                       ));
+                   }
+               });
+
+               // Screen inherits from parent
+               if (screen.properties.parentScreenId) {
+                   const parentScreen = screens.find(s => s.properties.screenId === screen.properties.parentScreenId);
+                   if (parentScreen) {
+                       relationships.push(this.createRelationship(
+                           'SCREEN_INHERITS',
+                           screen.entityId,
+                           parentScreen.entityId
+                       ));
+                   }
+               }
+           });
+
+           logger.debug(
+               `[WebFlowParser] Extracted ${screens.length} screens from ${fileName}`
+           );
+
            return {
                filePath: normalizedPath,
-               nodes: [...nodes, ...businessRuleNodes],
+               nodes: [...nodes, ...businessRuleNodes, ...screens],
                relationships: [...relationships, ...businessRuleRelationships]
            };
 
@@ -508,6 +666,9 @@ export class WebFlowParser {
        if (!to) return null;
 
        const condition = transitionElement.getAttribute('condition') || undefined;
+       // BRD Enhancement: Parse condition into structured metadata
+       const conditionMetadata = condition ? parseConditionExpression(condition) : undefined;
+
        const executeBefore = this.parseTransitionActions(transitionElement, 'execute');
        const executeAfter = this.parseTransitionActions(transitionElement, 'execute');
 
@@ -531,6 +692,7 @@ export class WebFlowParser {
                fromStateId: sourceState.properties.stateId,
                toStateId: to,
                condition,
+               conditionMetadata,
                executeBefore: executeBefore.length > 0 ? executeBefore : undefined,
                executeAfter: executeAfter.length > 0 ? executeAfter : undefined
            }
@@ -544,6 +706,9 @@ export class WebFlowParser {
        if (!to) return null;
 
        const condition = transitionElement.getAttribute('condition') || undefined;
+       // BRD Enhancement: Parse condition into structured metadata
+       const conditionMetadata = condition ? parseConditionExpression(condition) : undefined;
+
        const flowId = flowElement.getAttribute('id') || 'unknown';
 
        const entityId = generateEntityId('flowtransition', `global:${flowId}:${event}:${to}`);
@@ -565,7 +730,8 @@ export class WebFlowParser {
                event,
                fromStateId: 'global',
                toStateId: to,
-               condition
+               condition,
+               conditionMetadata
            }
        };
    }
@@ -850,5 +1016,265 @@ export class WebFlowParser {
            createdAt: this.now,
            weight: 5
        };
+   }
+
+   // =============================================================================
+   // Phase 1: Screen Extraction for Menu & Screen Indexing
+   // =============================================================================
+
+   /**
+    * Extracts Screen nodes from view-states with full metadata.
+    * Screens represent the actual UI pages users interact with.
+    */
+   private extractScreens(
+       flowElement: Element,
+       flowNode: WebFlowDefinitionNode,
+       states: FlowStateNode[],
+       transitions: FlowTransitionNode[]
+   ): ScreenNode[] {
+       const screens: ScreenNode[] = [];
+       const flowId = flowNode.properties.flowId;
+
+       // Only process view-states as screens
+       const viewStates = states.filter(s => s.properties.stateType === 'view-state');
+
+       for (const state of viewStates) {
+           const stateElement = this.findStateElement(flowElement, state.properties.stateId);
+           if (!stateElement) continue;
+
+           const screenId = state.properties.stateId;
+
+           // Extract screen title from on-entry set expressions
+           const title = this.extractScreenTitle(stateElement, screenId);
+
+           // Extract JSP references
+           const jsps = this.extractJspReferences(stateElement, screenId);
+
+           // Extract action class and methods from evaluate expressions
+           const { actionClass, actionMethods } = this.extractActionInfo(stateElement);
+
+           // Get transitions from this state
+           const transitionsTo = transitions
+               .filter(t => t.properties.fromStateId === screenId)
+               .map(t => t.properties.toStateId);
+
+           // Check for parent attribute
+           const parentScreenId = stateElement.getAttribute('parent') || undefined;
+
+           // Infer screen type from naming patterns
+           const screenType = this.inferScreenType(screenId, jsps);
+
+           // Check if maintenance mode
+           const isMaintenanceMode = screenId.toLowerCase().includes('maintenance') ||
+               title.toLowerCase().includes('maintenance');
+
+           // Build URL pattern
+           const urlPattern = `${flowId}.html?pageSelect=${screenId}`;
+
+           const screenNode: ScreenNode = {
+               id: generateInstanceId(this.instanceCounter, 'screen', screenId),
+               entityId: generateEntityId('screen', `${flowId}:${screenId}`),
+               kind: 'Screen',
+               name: screenId,
+               filePath: flowNode.filePath,
+               language: 'SpringWebFlow',
+               startLine: 1,
+               endLine: 1,
+               startColumn: 0,
+               endColumn: 0,
+               createdAt: this.now,
+               properties: {
+                   screenId,
+                   title,
+                   flowId,
+                   screenType,
+                   jsps,
+                   entryJsp: jsps.find(j => j.includes('Entry')) || jsps[0],
+                   resultsJsp: jsps.find(j => j.includes('Results')),
+                   headerJsp: jsps.find(j => j.includes('Header') || j.includes('header')),
+                   footerJsp: jsps.find(j => j.includes('Footer') || j.includes('footer') || j.includes('Comments')),
+                   actionClass,
+                   actionMethods,
+                   transitionsTo,
+                   parentScreenId,
+                   isMaintenanceMode,
+                   urlPattern,
+               },
+           };
+
+           screens.push(screenNode);
+       }
+
+       return screens;
+   }
+
+   /**
+    * Extract screen title from on-entry set expressions.
+    */
+   private extractScreenTitle(stateElement: Element, defaultTitle: string): string {
+       const onEntryElements = stateElement.getElementsByTagName('on-entry');
+
+       for (let i = 0; i < onEntryElements.length; i++) {
+           const onEntry = onEntryElements[i];
+           if (!onEntry) continue;
+
+           const setElements = onEntry.getElementsByTagName('set');
+           for (let j = 0; j < setElements.length; j++) {
+               const set = setElements[j];
+               if (!set) continue;
+
+               const name = set.getAttribute('name') || '';
+               const value = set.getAttribute('value') || '';
+
+               // Look for title-related set expressions
+               if (name.toLowerCase().includes('title') ||
+                   name.includes('EntryTitle') ||
+                   name.includes('ResultsTitle') ||
+                   name.includes('LookupTitle')) {
+                   // Extract string literal from value
+                   const match = value.match(/'([^']+)'|"([^"]+)"/);
+                   if (match) {
+                       return match[1] || match[2] || defaultTitle;
+                   }
+               }
+           }
+       }
+
+       // Try to humanize the screen ID as fallback
+       return this.humanizeScreenId(defaultTitle);
+   }
+
+   /**
+    * Extract JSP file references from the view-state.
+    */
+   private extractJspReferences(stateElement: Element, screenId: string): string[] {
+       const jsps: string[] = [];
+
+       // Check view attribute
+       const view = stateElement.getAttribute('view');
+       if (view && view.endsWith('.jsp')) {
+           jsps.push(view);
+       }
+
+       // Check on-entry for JSP assignments
+       const onEntryElements = stateElement.getElementsByTagName('on-entry');
+       for (let i = 0; i < onEntryElements.length; i++) {
+           const onEntry = onEntryElements[i];
+           if (!onEntry) continue;
+
+           const setElements = onEntry.getElementsByTagName('set');
+           for (let j = 0; j < setElements.length; j++) {
+               const set = setElements[j];
+               if (!set) continue;
+
+               const name = set.getAttribute('name') || '';
+               const value = set.getAttribute('value') || '';
+
+               // Look for JSP assignments
+               if (name.includes('Jsp') || name.includes('jsp') || name.includes('JSP')) {
+                   // Extract JSP filename from value
+                   const jspMatch = value.match(/'([^']+\.jsp)'|"([^"]+\.jsp)"/);
+                   if (jspMatch) {
+                       jsps.push(jspMatch[1] || jspMatch[2]);
+                   } else if (value.endsWith('.jsp')) {
+                       jsps.push(value.replace(/['"`]/g, ''));
+                   }
+               }
+           }
+       }
+
+       // If no JSPs found, infer from screen ID
+       if (jsps.length === 0) {
+           jsps.push(`${screenId}Entry.jsp`);
+           jsps.push(`${screenId}Results.jsp`);
+       }
+
+       return [...new Set(jsps)]; // Remove duplicates
+   }
+
+   /**
+    * Extract action class and methods from evaluate expressions.
+    */
+   private extractActionInfo(stateElement: Element): { actionClass: string; actionMethods: string[] } {
+       const methods: string[] = [];
+       let actionClass = '';
+
+       // Search all evaluate expressions in the state
+       const evaluateElements = stateElement.getElementsByTagName('evaluate');
+       for (let i = 0; i < evaluateElements.length; i++) {
+           const evaluate = evaluateElements[i];
+           if (!evaluate) continue;
+
+           const expression = evaluate.getAttribute('expression') || '';
+
+           // Pattern: actionClassName.methodName(...)
+           const match = expression.match(/(\w+Action)\.(\w+)\s*\(/);
+           if (match) {
+               actionClass = actionClass || match[1];
+               methods.push(match[2]);
+           }
+
+           // Also check for service calls with Action suffix
+           const serviceMatch = expression.match(/(\w+)Action\.(\w+)/);
+           if (serviceMatch) {
+               actionClass = actionClass || serviceMatch[1] + 'Action';
+               if (!methods.includes(serviceMatch[2])) {
+                   methods.push(serviceMatch[2]);
+               }
+           }
+       }
+
+       // Also check transitions for action methods
+       const transitionElements = stateElement.getElementsByTagName('transition');
+       for (let i = 0; i < transitionElements.length; i++) {
+           const transition = transitionElements[i];
+           if (!transition) continue;
+
+           const evalInTransition = transition.getElementsByTagName('evaluate');
+           for (let j = 0; j < evalInTransition.length; j++) {
+               const evaluate = evalInTransition[j];
+               if (!evaluate) continue;
+
+               const expression = evaluate.getAttribute('expression') || '';
+               const match = expression.match(/(\w+Action)\.(\w+)\s*\(/);
+               if (match) {
+                   actionClass = actionClass || match[1];
+                   if (!methods.includes(match[2])) {
+                       methods.push(match[2]);
+                   }
+               }
+           }
+       }
+
+       return { actionClass, actionMethods: methods };
+   }
+
+   /**
+    * Infer screen type from naming patterns.
+    */
+   private inferScreenType(screenId: string, jsps: string[]): 'entry' | 'results' | 'inquiry' | 'lookup' | 'wizard' | 'maintenance' | 'search' | 'unknown' {
+       const idLower = screenId.toLowerCase();
+       const jspString = jsps.join(' ').toLowerCase();
+
+       if (idLower.includes('wizard') || jspString.includes('wizard')) return 'wizard';
+       if (idLower.includes('search') || jspString.includes('search')) return 'search';
+       if (idLower.includes('lookup') || jspString.includes('lookup')) return 'lookup';
+       if (idLower.includes('inquiry') || jspString.includes('inquiry')) return 'inquiry';
+       if (idLower.includes('results') || jspString.includes('results')) return 'results';
+       if (idLower.includes('maintenance') || jspString.includes('maintenance')) return 'maintenance';
+       if (idLower.includes('entry') || jspString.includes('entry')) return 'entry';
+
+       return 'unknown';
+   }
+
+   /**
+    * Convert a screen ID to a human-readable title.
+    */
+   private humanizeScreenId(screenId: string): string {
+       // Convert camelCase to Title Case with spaces
+       return screenId
+           .replace(/([A-Z])/g, ' $1')
+           .replace(/^./, str => str.toUpperCase())
+           .trim();
    }
 }

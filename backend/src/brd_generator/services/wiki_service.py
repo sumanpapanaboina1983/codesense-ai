@@ -992,7 +992,7 @@ class WikiService:
                 labels(c) as labels,
                 collect(DISTINCT dep.name) as dependencies
             ORDER BY c.name
-            LIMIT 100
+            LIMIT 500
             """
             classes_result = await self.neo4j_client.query_code_structure(
                 classes_query,
@@ -1011,7 +1011,7 @@ class WikiService:
                 method.name as handler,
                 c.name as controller
             ORDER BY method.path
-            LIMIT 200
+            LIMIT 500
             """
             endpoints_result = await self.neo4j_client.query_code_structure(
                 endpoints_query,

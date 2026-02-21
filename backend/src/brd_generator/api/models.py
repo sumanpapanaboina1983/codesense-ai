@@ -458,17 +458,18 @@ class GenerateBRDRequest(BaseModel):
     )
 
     # Section length control
-    default_section_words: int = Field(
-        300,
+    default_section_words: Optional[int] = Field(
+        None,
         ge=100,
-        le=2000,
+        le=5000,
         description="""
-        Default target word count per section.
+        Default target word count per section. If None (default), no length restriction is applied.
 
         Can be overridden per-section in the template using:
         ## Section Name {words: 500}
 
-        Sections will be generated to approximately this length.
+        When set, sections will be generated to approximately this length.
+        When None, sections will be as comprehensive as needed without length limits.
         """
     )
 

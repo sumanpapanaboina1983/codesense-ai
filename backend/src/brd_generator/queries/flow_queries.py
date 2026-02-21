@@ -271,7 +271,7 @@ FIND_ENTRY_POINTS = """
         80 AS score
 
     ORDER BY score DESC
-    LIMIT 20
+    LIMIT 100
 """
 
 # Get form field bindings for a JSP page
@@ -532,5 +532,220 @@ GET_DATA_MODEL_INFO = """
             relationshipType: type(rel),
             relatedEntity: relatedEntity.name
         }) AS relationships
-    LIMIT 20
+    LIMIT 100
+"""
+
+# ============================================================================
+# Enhanced Queries for BRD Generation (Phase 10)
+# ============================================================================
+
+# Get method code snippets and error messages for a component
+GET_METHOD_DETAILS_ENHANCED = """
+    MATCH (method:JavaMethod)
+    WHERE method.entityId = $methodId
+       OR (method.name = $methodName AND $className IS NOT NULL AND
+           EXISTS {
+               MATCH (cls)-[:HAS_METHOD]->(method)
+               WHERE cls.name = $className
+           })
+
+    RETURN
+        method.entityId AS entityId,
+        method.name AS name,
+        method.signature AS signature,
+        method.filePath AS filePath,
+        method.startLine AS startLine,
+        method.endLine AS endLine,
+        method.codeSnippet AS codeSnippet,
+        method.codeSnippetLines AS codeSnippetLines,
+        method.errorMessages AS errorMessages,
+        method.securityAnnotations AS securityAnnotations,
+        method.returnType AS returnType,
+        method.parameters AS parameters
+"""
+
+# Get security rules for a component (method or class)
+GET_SECURITY_RULES = """
+    MATCH (rule:SecurityRule)-[:SECURED_BY]-(target)
+    WHERE target.entityId = $targetId
+       OR target.name = $targetName
+
+    RETURN
+        rule.entityId AS ruleId,
+        rule.annotationType AS annotationType,
+        rule.annotationText AS annotationText,
+        rule.expression AS expression,
+        rule.roles AS roles,
+        rule.targetType AS targetType,
+        rule.ruleDescription AS ruleDescription,
+        rule.confidence AS confidence,
+        target.name AS targetName,
+        labels(target)[0] AS targetType
+    ORDER BY rule.annotationType
+"""
+
+# Get all security rules for a feature flow
+GET_SECURITY_RULES_FOR_FLOW = """
+    MATCH (entry)
+    WHERE entry.entityId = $entryPointId
+       OR entry.name = $entryPointName
+
+    // Traverse the flow to find all methods
+    OPTIONAL MATCH path = (entry)-[:CONTAINS_FORM|SUBMITS_TO_FLOW|FLOW_RENDERS_VIEW|
+                                    FLOW_EXECUTES_ACTION|HAS_ACTION_STATE|HAS_METHOD|
+                                    INVOKES|CALLS*0..5]->(method:JavaMethod)
+
+    WITH DISTINCT method
+    WHERE method IS NOT NULL
+
+    // Get security rules for each method
+    OPTIONAL MATCH (method)<-[:SECURED_BY]-(rule:SecurityRule)
+
+    RETURN DISTINCT
+        method.name AS methodName,
+        method.filePath AS filePath,
+        method.startLine AS lineNumber,
+        rule.annotationType AS annotationType,
+        rule.expression AS expression,
+        rule.roles AS roles,
+        rule.ruleDescription AS description
+    ORDER BY method.name
+"""
+
+# Get error messages from resource bundles
+GET_ERROR_MESSAGES = """
+    MATCH (msg:ErrorMessage)
+    WHERE msg.messageKey CONTAINS $keyword
+       OR msg.messageText CONTAINS $keyword
+       OR msg.sourceFile CONTAINS $keyword
+
+    RETURN
+        msg.entityId AS entityId,
+        msg.messageKey AS messageKey,
+        msg.messageText AS messageText,
+        msg.sourceFile AS sourceFile,
+        msg.locale AS locale,
+        msg.parameters AS parameters,
+        msg.startLine AS lineNumber
+    ORDER BY msg.messageKey
+    LIMIT 100
+"""
+
+# Get error messages referenced by a method
+GET_ERROR_MESSAGES_FOR_METHOD = """
+    MATCH (method:JavaMethod)
+    WHERE method.entityId = $methodId
+       OR method.name = $methodName
+
+    // Get inline error messages from method
+    WITH method, COALESCE(method.errorMessages, []) AS inlineErrors
+
+    // Find referenced message keys from resource bundles
+    OPTIONAL MATCH (method)-[:REFERENCES_MESSAGE]->(msg:ErrorMessage)
+
+    RETURN
+        method.name AS methodName,
+        method.filePath AS filePath,
+        inlineErrors AS inlineErrorMessages,
+        collect(DISTINCT {
+            key: msg.messageKey,
+            text: msg.messageText,
+            locale: msg.locale
+        }) AS referencedMessages
+"""
+
+# Get code snippets for all methods in a class
+GET_CODE_SNIPPETS_FOR_CLASS = """
+    MATCH (cls)-[:HAS_METHOD]->(method:JavaMethod)
+    WHERE cls.entityId = $classId
+       OR cls.name = $className
+
+    WHERE method.codeSnippet IS NOT NULL
+
+    RETURN
+        cls.name AS className,
+        method.name AS methodName,
+        method.signature AS signature,
+        method.codeSnippet AS codeSnippet,
+        method.codeSnippetLines AS codeSnippetLines,
+        method.startLine AS startLine,
+        method.endLine AS endLine
+    ORDER BY method.startLine
+"""
+
+# Get transition conditions with parsed metadata
+GET_TRANSITION_CONDITIONS = """
+    MATCH (flow:WebFlowDefinition)-[:HAS_TRANSITION|FLOW_DEFINES_STATE*1..2]->
+          (trans:FlowTransition)
+    WHERE flow.entityId = $flowId
+       OR flow.name = $flowName
+
+    WHERE trans.condition IS NOT NULL
+
+    RETURN
+        flow.name AS flowName,
+        trans.name AS transitionName,
+        trans.on AS triggerEvent,
+        trans.to AS targetState,
+        trans.condition AS condition,
+        trans.conditionMetadata AS conditionMetadata,
+        trans.startLine AS lineNumber
+    ORDER BY trans.startLine
+"""
+
+# Get form field labels and validation details
+GET_FORM_FIELD_DETAILS = """
+    MATCH (jsp:JSPPage)-[:HAS_FORM]->(form:JSPForm)-[:HAS_FIELD]->(field)
+    WHERE jsp.entityId = $jspId
+       OR jsp.name = $jspName
+       OR jsp.filePath CONTAINS $jspPath
+
+    RETURN
+        jsp.name AS jspName,
+        form.name AS formName,
+        form.modelAttribute AS modelAttribute,
+        field.name AS fieldName,
+        field.type AS fieldType,
+        field.label AS label,
+        field.labelKey AS labelKey,
+        field.required AS required,
+        field.placeholder AS placeholder,
+        field.validationRules AS validationRules,
+        field.errorPath AS errorPath,
+        field.cssErrorClass AS cssErrorClass
+    ORDER BY form.name, field.name
+"""
+
+# Get comprehensive method context for BRD generation
+GET_METHOD_CONTEXT_FOR_BRD = """
+    MATCH (method:JavaMethod)
+    WHERE method.entityId IN $methodIds
+
+    // Get parent class
+    OPTIONAL MATCH (cls)-[:HAS_METHOD]->(method)
+
+    // Get security rules
+    OPTIONAL MATCH (method)<-[:SECURED_BY]-(rule:SecurityRule)
+
+    // Get invoked methods
+    OPTIONAL MATCH (method)-[:INVOKES]->(inv:MethodInvocation)
+
+    RETURN
+        method.entityId AS entityId,
+        method.name AS methodName,
+        method.signature AS signature,
+        method.filePath AS filePath,
+        method.startLine AS startLine,
+        method.endLine AS endLine,
+        method.codeSnippet AS codeSnippet,
+        method.errorMessages AS errorMessages,
+        cls.name AS className,
+        labels(cls)[0] AS classType,
+        collect(DISTINCT {
+            type: rule.annotationType,
+            expression: rule.expression,
+            roles: rule.roles,
+            description: rule.ruleDescription
+        }) AS securityRules,
+        collect(DISTINCT inv.methodName) AS invokedMethods
 """

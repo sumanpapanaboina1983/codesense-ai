@@ -344,6 +344,15 @@ export interface JavaMethodNode extends AstNode {
     parentId?: string;
     /** Complete signature information */
     signatureInfo?: MethodSignature;
+    // Enhanced properties for BRD generation
+    /** Code snippet from method body (5-15 lines) */
+    codeSnippet?: string;
+    /** Line range of the code snippet */
+    codeSnippetLines?: { start: number; end: number };
+    /** Error messages extracted from throw statements */
+    errorMessages?: string[];
+    /** Security annotations (@PreAuthorize, @Secured, etc.) */
+    securityAnnotations?: AnnotationInfo[];
 }
 
 export interface JavaFieldNode extends AstNode {
@@ -361,6 +370,54 @@ export interface JavaEnumNode extends AstNode {
     properties: {
         qualifiedName: string;
         // TODO: Add implements list, enum constants
+    };
+}
+
+/**
+ * Represents a security rule/constraint on a method or class.
+ * Extracted from @PreAuthorize, @PostAuthorize, @Secured, @RolesAllowed, etc.
+ */
+export interface SecurityRuleNode extends AstNode {
+    kind: 'SecurityRule';
+    language: 'Java';
+    /** Method or Class entityId this rule applies to */
+    parentId: string;
+    properties: {
+        /** Security annotation type */
+        annotationType: 'PreAuthorize' | 'PostAuthorize' | 'Secured' | 'RolesAllowed' | 'PermitAll' | 'DenyAll' | 'RunAs';
+        /** Full annotation text */
+        annotationText: string;
+        /** SpEL expression for @PreAuthorize/@PostAuthorize */
+        expression?: string;
+        /** Required roles extracted from annotation */
+        roles?: string[];
+        /** Target type */
+        targetType: 'method' | 'class';
+        /** Human-readable description */
+        ruleDescription: string;
+        /** Confidence score */
+        confidence: number;
+    };
+}
+
+/**
+ * Represents an error message key and its resolved text.
+ * Used to link message keys in code to actual message text from .properties files.
+ */
+export interface ErrorMessageNode extends AstNode {
+    kind: 'ErrorMessage';
+    language: 'Properties';
+    properties: {
+        /** Message key like "poi.notfound" */
+        messageKey: string;
+        /** Resolved message text */
+        messageText: string;
+        /** Properties file this came from */
+        sourceFile: string;
+        /** Locale if applicable */
+        locale?: string;
+        /** Parameters in the message (e.g., {0}, {1}) */
+        parameters?: string[];
     };
 }
 
@@ -637,6 +694,29 @@ export interface FlowStateNode extends AstNode {
     };
 }
 
+/**
+ * Parsed condition metadata from WebFlow transition.
+ * Provides structured information about transition guards.
+ */
+export interface TransitionConditionMetadata {
+    /** Original condition expression */
+    expression: string;
+    /** Parsed operator */
+    operator?: 'equals' | 'notEquals' | 'greaterThan' | 'lessThan' | 'greaterThanOrEquals' | 'lessThanOrEquals' | 'and' | 'or' | 'not' | 'contains' | 'matches' | 'custom';
+    /** Left operand (usually a variable or method call) */
+    leftOperand?: string;
+    /** Right operand (value being compared) */
+    rightOperand?: string;
+    /** Variables referenced in condition */
+    variables: string[];
+    /** Methods called in condition */
+    methodCalls: string[];
+    /** Whether this is a SpEL expression */
+    isSpEL: boolean;
+    /** Human-readable description */
+    description?: string;
+}
+
 export interface FlowTransitionNode extends AstNode {
     kind: 'FlowTransition';
     language: 'SpringWebFlow';
@@ -646,6 +726,8 @@ export interface FlowTransitionNode extends AstNode {
         fromStateId: string;
         toStateId: string;
         condition?: string;
+        /** Parsed condition metadata for BRD generation */
+        conditionMetadata?: TransitionConditionMetadata;
         executeBefore?: ActionReference[];
         executeAfter?: ActionReference[];
     };
@@ -698,6 +780,78 @@ export interface SpringServiceNode extends AstNode {
         serviceType: 'service' | 'repository' | 'component';
         transactional: boolean;
         qualifier?: string;
+        /** Transaction boundary details */
+        transactionInfo?: TransactionBoundaryInfo;
+    };
+}
+
+// --- Business Logic Blueprint Nodes ---
+
+/**
+ * Represents a data table extracted from JSP
+ */
+export interface DataTableNode extends AstNode {
+    kind: 'DataTable';
+    language: 'JSP';
+    parentId: string; // Parent JSP page entityId
+    properties: DataTableInfo;
+}
+
+/**
+ * Represents a business constant extracted from code
+ */
+export interface BusinessConstantNode extends AstNode {
+    kind: 'BusinessConstant';
+    language: 'Java';
+    parentId?: string; // Parent class entityId
+    properties: BusinessConstantInfo;
+}
+
+/**
+ * Represents a screen with mode information
+ */
+export interface ScreenModeNode extends AstNode {
+    kind: 'ScreenMode';
+    language: 'SpringWebFlow';
+    parentId: string; // Parent Screen/FlowState entityId
+    properties: {
+        /** Screen modes available */
+        modes: ScreenModeInfo[];
+        /** How mode is determined */
+        modeSource: 'url-param' | 'flow-variable' | 'request-param' | 'conditional';
+        /** Mode parameter name */
+        modeParameter?: string;
+        /** Default mode */
+        defaultMode?: string;
+    };
+}
+
+/**
+ * Represents a feature with full business logic context
+ * Used for Blueprint generation
+ */
+export interface FeatureBlueprintNode extends AstNode {
+    kind: 'FeatureBlueprint';
+    language: 'Application';
+    properties: {
+        /** Feature name from menu */
+        featureName: string;
+        /** Menu path (e.g., "Point > Point Maintenance") */
+        menuPath: string[];
+        /** Flow/screen count */
+        screenCount: number;
+        /** Total field count */
+        fieldCount: number;
+        /** Total validation count */
+        validationCount: number;
+        /** Total action count */
+        actionCount: number;
+        /** Security roles that can access */
+        accessRoles: string[];
+        /** Confidence level of extraction */
+        confidence: 'high' | 'medium' | 'low';
+        /** Sections with missing data */
+        missingData?: string[];
     };
 }
 
@@ -714,6 +868,227 @@ export interface FormField {
     type: string;
     required: boolean;
     defaultValue?: string;
+    // Enhanced properties for BRD generation
+    /** Extracted label text from <label> tags or adjacent elements */
+    label?: string;
+    /** i18n message key like "selectedGroup.groupName" from <fmt:message> */
+    labelKey?: string;
+    /** HTML5 placeholder attribute */
+    placeholder?: string;
+    /** Help text from title attribute or adjacent help elements */
+    helpText?: string;
+    /** Path from <form:errors path="..."> */
+    errorPath?: string;
+    /** HTML5 and Spring validation attributes */
+    validationRules?: {
+        pattern?: string;
+        min?: string | number;
+        max?: string | number;
+        minLength?: number;
+        maxLength?: number;
+        step?: number;
+    };
+    /** CSS classes for styling detection */
+    cssClasses?: string[];
+    /** Error CSS class from cssErrorClass attribute */
+    cssErrorClass?: string;
+    // Business Logic Blueprint enhancements
+    /** Options for select/dropdown fields */
+    selectOptions?: SelectOption[];
+    /** Data source for dynamic options (e.g., service call, enum) */
+    dataSource?: DataSourceInfo;
+    /** Whether field is read-only */
+    readOnly?: boolean;
+    /** Whether field is disabled */
+    disabled?: boolean;
+    /** Conditional visibility expression */
+    visibilityCondition?: string;
+    /** Conditional editability expression */
+    editabilityCondition?: string;
+    /** Cross-field dependencies (fields that affect this field) */
+    dependsOnFields?: string[];
+    /** Fields that this field affects */
+    affectsFields?: string[];
+}
+
+/**
+ * Represents an option in a select/dropdown field
+ */
+export interface SelectOption {
+    /** The value submitted with the form */
+    value: string;
+    /** The display label shown to users */
+    label: string;
+    /** i18n message key for the label */
+    labelKey?: string;
+    /** Whether this is the default selected option */
+    isDefault?: boolean;
+    /** Whether this option is disabled */
+    disabled?: boolean;
+    /** Parent value for cascading dropdowns */
+    parentValue?: string;
+}
+
+/**
+ * Represents the data source for dynamic field options
+ */
+export interface DataSourceInfo {
+    /** Type of data source */
+    type: 'static' | 'enum' | 'service' | 'database' | 'items-attribute';
+    /** Service/bean name if type is 'service' */
+    serviceName?: string;
+    /** Method name if type is 'service' */
+    methodName?: string;
+    /** Enum class name if type is 'enum' */
+    enumClass?: string;
+    /** Items attribute path (e.g., "${itemList}") */
+    itemsPath?: string;
+    /** Item value property (e.g., "id") */
+    itemValue?: string;
+    /** Item label property (e.g., "name") */
+    itemLabel?: string;
+}
+
+/**
+ * Represents a column in a data table/grid
+ */
+export interface TableColumnInfo {
+    /** Column header text */
+    header: string;
+    /** i18n key for header */
+    headerKey?: string;
+    /** Property/field path for data binding */
+    dataField?: string;
+    /** Column data type */
+    dataType?: 'text' | 'number' | 'date' | 'boolean' | 'currency' | 'link' | 'action';
+    /** Whether column is sortable */
+    sortable?: boolean;
+    /** Whether column is filterable */
+    filterable?: boolean;
+    /** Whether column is hidden */
+    hidden?: boolean;
+    /** Column width */
+    width?: string;
+    /** Display format (e.g., date format) */
+    format?: string;
+    /** Link URL pattern if type is 'link' */
+    linkPattern?: string;
+    /** Action buttons if type is 'action' */
+    actions?: TableActionInfo[];
+}
+
+/**
+ * Represents an action button in a table row
+ */
+export interface TableActionInfo {
+    /** Action name/type */
+    name: string;
+    /** Display label */
+    label: string;
+    /** Icon name */
+    icon?: string;
+    /** Event triggered */
+    event?: string;
+    /** URL pattern */
+    urlPattern?: string;
+    /** Confirmation message before action */
+    confirmMessage?: string;
+    /** Visibility condition */
+    visibilityCondition?: string;
+}
+
+/**
+ * Represents a data table/grid in a screen
+ */
+export interface DataTableInfo {
+    /** Table identifier */
+    id: string;
+    /** Data source expression */
+    dataSource: string;
+    /** Column definitions */
+    columns: TableColumnInfo[];
+    /** Whether table supports pagination */
+    paginated?: boolean;
+    /** Default page size */
+    pageSize?: number;
+    /** Whether table supports selection */
+    selectable?: boolean;
+    /** Selection mode */
+    selectionMode?: 'single' | 'multiple';
+    /** Whether table supports inline editing */
+    inlineEditable?: boolean;
+    /** Row click action */
+    rowClickAction?: string;
+    /** Bulk actions available */
+    bulkActions?: TableActionInfo[];
+}
+
+/**
+ * Represents screen mode information (Create/Edit/View)
+ */
+export interface ScreenModeInfo {
+    /** Mode identifier */
+    mode: 'create' | 'edit' | 'view' | 'clone' | 'approve' | 'delete';
+    /** How the mode is determined (URL param, flow variable, etc.) */
+    determinedBy: 'url-param' | 'flow-variable' | 'request-param' | 'model-attribute';
+    /** Parameter/variable name */
+    parameterName?: string;
+    /** Expected value for this mode */
+    parameterValue?: string;
+    /** Fields visible in this mode */
+    visibleFields?: string[];
+    /** Fields editable in this mode */
+    editableFields?: string[];
+    /** Fields hidden in this mode */
+    hiddenFields?: string[];
+    /** Fields required in this mode */
+    requiredFields?: string[];
+    /** Actions available in this mode */
+    availableActions?: string[];
+}
+
+/**
+ * Represents transaction boundary information
+ */
+export interface TransactionBoundaryInfo {
+    /** Transaction propagation */
+    propagation?: 'REQUIRED' | 'REQUIRES_NEW' | 'NESTED' | 'SUPPORTS' | 'NOT_SUPPORTED' | 'MANDATORY' | 'NEVER';
+    /** Transaction isolation level */
+    isolation?: 'DEFAULT' | 'READ_UNCOMMITTED' | 'READ_COMMITTED' | 'REPEATABLE_READ' | 'SERIALIZABLE';
+    /** Read-only flag */
+    readOnly?: boolean;
+    /** Timeout in seconds */
+    timeout?: number;
+    /** Rollback for exceptions */
+    rollbackFor?: string[];
+    /** No rollback for exceptions */
+    noRollbackFor?: string[];
+    /** Transaction manager name */
+    transactionManager?: string;
+}
+
+/**
+ * Represents a business constant/magic number
+ */
+export interface BusinessConstantInfo {
+    /** Constant name */
+    name: string;
+    /** Constant value */
+    value: string | number | boolean;
+    /** Data type */
+    type: 'string' | 'number' | 'boolean' | 'date' | 'enum';
+    /** Business meaning/purpose */
+    description?: string;
+    /** Where it's used (class.method references) */
+    usedIn?: string[];
+    /** Whether it's configurable (from properties file) */
+    configurable?: boolean;
+    /** Configuration key if configurable */
+    configKey?: string;
+    /** Source location */
+    sourceFile?: string;
+    /** Line number */
+    lineNumber?: number;
 }
 
 export interface SubmitElement {
@@ -2435,4 +2810,274 @@ export const FEATURE_RELATIONSHIPS = [
     'FEATURE_HAS_SERVICE', // Feature -> Service class
     'FEATURE_HAS_DATA',    // Feature -> Entity/Repository
     'RELATED_FEATURE',     // Feature -> Feature
+] as const;
+
+// =============================================================================
+// Phase 1: Menu & Screen Indexing Types
+// =============================================================================
+
+/**
+ * Represents a menu item from menu-config.xml or similar navigation configuration.
+ * This provides the user-facing navigation structure that maps to code.
+ */
+export interface MenuItemNode extends AstNode {
+    kind: 'MenuItem';
+    properties: {
+        /** Display label shown in the UI menu */
+        label: string;
+        /** URL/path this menu item navigates to */
+        url: string;
+        /** Extracted flow ID from URL (e.g., "pointWizard" from "pointWizard.html") */
+        flowId: string;
+        /** Extracted view-state ID from URL (e.g., "pointInfoMaintenance" from "?pageSelect=pointInfoMaintenance") */
+        viewStateId?: string;
+        /** Required roles for accessing this menu item */
+        requiredRoles: string[];
+        /** Parent menu label for hierarchical navigation */
+        parentMenu?: string;
+        /** Menu nesting level (1 = top level, 2 = sub-menu, etc.) */
+        menuLevel: number;
+        /** Whether this is a separator item */
+        isSeparator: boolean;
+        /** Bean ID in Spring config if applicable */
+        beanId?: string;
+    };
+}
+
+/**
+ * Represents the top-level menu hierarchy structure.
+ */
+export interface MenuHierarchyNode extends AstNode {
+    kind: 'MenuHierarchy';
+    properties: {
+        /** List of top-level menu names */
+        topLevelMenus: string[];
+        /** Total number of menu items */
+        totalItems: number;
+        /** Source file for this menu configuration */
+        configSource: string;
+    };
+}
+
+/**
+ * Represents a screen/view-state within a WebFlow.
+ * Screens are the actual UI pages users interact with.
+ */
+export interface ScreenNode extends AstNode {
+    kind: 'Screen';
+    properties: {
+        /** Screen identifier (view-state ID) */
+        screenId: string;
+        /** Display title for the screen */
+        title: string;
+        /** Parent WebFlow ID */
+        flowId: string;
+        /** Type of screen based on naming/usage patterns */
+        screenType: 'entry' | 'results' | 'inquiry' | 'lookup' | 'wizard' | 'maintenance' | 'search' | 'unknown';
+        /** JSP files used by this screen */
+        jsps: string[];
+        /** Entry JSP for data entry */
+        entryJsp?: string;
+        /** Results JSP for displaying results */
+        resultsJsp?: string;
+        /** Header JSP */
+        headerJsp?: string;
+        /** Footer JSP */
+        footerJsp?: string;
+        /** Action class that handles this screen */
+        actionClass?: string;
+        /** Methods called from this screen */
+        actionMethods: string[];
+        /** Screens this can transition to */
+        transitionsTo: string[];
+        /** Parent screen ID for inherited screens */
+        parentScreenId?: string;
+        /** Whether this is a maintenance mode screen */
+        isMaintenanceMode: boolean;
+        /** URL pattern to access this screen */
+        urlPattern?: string;
+    };
+}
+
+/**
+ * Relationship types for menu and screen navigation.
+ */
+export const MENU_SCREEN_RELATIONSHIPS = [
+    'HAS_MENU_ITEM',        // MenuHierarchy -> MenuItem
+    'PARENT_MENU_ITEM',     // MenuItem -> MenuItem (nested menus)
+    'MENU_OPENS_SCREEN',    // MenuItem -> Screen
+    'MENU_OPENS_FLOW',      // MenuItem -> WebFlowDefinition
+    'SCREEN_USES_FLOW',     // Screen -> WebFlowDefinition
+    'SCREEN_CALLS_ACTION',  // Screen -> JavaClass (action class)
+    'SCREEN_RENDERS_JSP',   // Screen -> JSPPage
+    'SCREEN_NAVIGATES_TO',  // Screen -> Screen (transitions)
+    'SCREEN_INHERITS',      // Screen -> Screen (parent attribute)
+] as const;
+
+// =============================================================================
+// Phase 2: Deep Dependency Traversal Types
+// =============================================================================
+
+/**
+ * Represents a method within a service with detailed call information.
+ * Used for deep traversal of business logic.
+ */
+export interface ServiceMethodNode extends AstNode {
+    kind: 'ServiceMethod';
+    properties: {
+        /** Parent class name */
+        className: string;
+        /** Method name */
+        methodName: string;
+        /** Return type */
+        returnType: string;
+        /** Method parameters */
+        parameters: Array<{ name: string; type: string }>;
+        /** Other services this method calls */
+        callsServices: string[];
+        /** Specific methods called */
+        callsMethods: string[];
+        /** Entity classes used */
+        usesEntities: string[];
+        /** Whether method has @Transactional annotation */
+        hasTransaction: boolean;
+        /** Access level */
+        accessLevel: 'public' | 'protected' | 'private' | 'package';
+        /** Whether this is a validation method */
+        isValidation: boolean;
+        /** Whether this is a DAO/repository method */
+        isDataAccess: boolean;
+    };
+}
+
+/**
+ * Relationship types for deep dependency traversal.
+ */
+export const DEEP_TRAVERSAL_RELATIONSHIPS = [
+    'METHOD_CALLS_METHOD',      // ServiceMethod -> ServiceMethod
+    'METHOD_USES_ENTITY',       // ServiceMethod -> JavaClass (entity)
+    'METHOD_QUERIES_DAO',       // ServiceMethod -> DAO method
+    'METHOD_VALIDATES_WITH',    // ServiceMethod -> Validator
+    'SERVICE_DELEGATES_TO',     // Service -> Service
+    'INJECTS_SERVICE',          // Class -> Service (autowired)
+] as const;
+
+// =============================================================================
+// Phase 3: Shared Component Detection Types
+// =============================================================================
+
+/**
+ * Represents a shared utility, helper, or common component.
+ */
+export interface SharedComponentNode extends AstNode {
+    kind: 'SharedComponent';
+    properties: {
+        /** Type of shared component */
+        componentType: 'utility' | 'helper' | 'validator' | 'converter' | 'formatter' | 'constants' | 'base' | 'abstract';
+        /** Features that use this component */
+        usedByFeatures: string[];
+        /** Number of places using this component */
+        usageCount: number;
+        /** Inferred business domains */
+        businessDomains: string[];
+        /** Whether this is a cross-cutting concern */
+        isCrossCutting: boolean;
+    };
+}
+
+// =============================================================================
+// Phase 4: Business Rule Enrichment Types
+// =============================================================================
+
+/**
+ * Enhanced business rule with full context linkage.
+ */
+export interface EnrichedBusinessRuleNode extends AstNode {
+    kind: 'EnrichedBusinessRule';
+    properties: {
+        /** Type of rule */
+        ruleType: 'validation' | 'constraint' | 'calculation' | 'workflow' | 'authorization' | 'guard';
+        /** Human-readable description */
+        ruleDescription: string;
+        /** Source method where rule is defined */
+        sourceMethod: string;
+        /** Source class */
+        sourceClass: string;
+        /** The actual condition code */
+        condition: string;
+        /** Associated error message */
+        errorMessage?: string;
+        /** Entity fields this rule affects */
+        affectsFields: string[];
+        /** What triggers this rule */
+        triggeredBy: string[];
+        /** Other rules this depends on */
+        dependencies: string[];
+        /** Severity level */
+        severity: 'error' | 'warning' | 'info';
+        /** Feature context linkage */
+        featureContext: {
+            menuItem?: string;
+            screen?: string;
+            action?: string;
+            subFeature?: string;
+        };
+        /** Confidence score for auto-detected rules */
+        confidence: number;
+    };
+}
+
+/**
+ * Represents a validation chain from UI to database.
+ */
+export interface ValidationChainNode extends AstNode {
+    kind: 'ValidationChain';
+    properties: {
+        /** Entry point (action method) */
+        entryPoint: string;
+        /** Validation steps in order */
+        validationSteps: Array<{
+            order: number;
+            type: 'action' | 'service' | 'validator' | 'entity';
+            className: string;
+            methodName?: string;
+            rules: string[];
+        }>;
+        /** Total number of rules in chain */
+        totalRules: number;
+        /** Fields validated */
+        validatedFields: string[];
+    };
+}
+
+// =============================================================================
+// Phase 5: Cross-Feature Analysis Types
+// =============================================================================
+
+/**
+ * Represents a cross-feature relationship.
+ */
+export interface CrossFeatureRelationship {
+    /** Source feature/screen */
+    sourceFeature: string;
+    /** Target feature/screen */
+    targetFeature: string;
+    /** Type of relationship */
+    relationshipType: 'SHARES_ENTITY' | 'SHARES_SERVICE' | 'CASCADES_TO' | 'DEPENDS_ON';
+    /** Shared component name */
+    sharedComponent?: string;
+    /** Implication of this relationship */
+    implication: string;
+}
+
+/**
+ * Relationship types for cross-feature analysis.
+ */
+export const CROSS_FEATURE_RELATIONSHIPS = [
+    'FEATURE_DEPENDS_ON',       // MenuItem -> MenuItem
+    'SHARES_ENTITY',            // Screen -> Screen
+    'SHARES_SERVICE',           // Screen -> Screen
+    'TRIGGERS_VALIDATION_IN',   // Action -> Action
+    'CASCADES_TO',              // Entity change cascades
+    'FEATURE_AFFECTS',          // Feature -> Feature
 ] as const;

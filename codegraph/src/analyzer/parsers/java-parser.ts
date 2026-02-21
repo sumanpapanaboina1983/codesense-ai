@@ -226,6 +226,142 @@ function extractJavaAnnotations(node: Parser.SyntaxNode): AnnotationInfo[] {
 }
 
 /**
+ * Security annotations to extract for BRD generation.
+ */
+const SECURITY_ANNOTATIONS = [
+    'PreAuthorize', 'PostAuthorize', 'Secured',
+    'RolesAllowed', 'PermitAll', 'DenyAll', 'RunAs'
+];
+
+/**
+ * Extract security annotations from a Java method/class declaration.
+ * Returns annotations like @PreAuthorize, @Secured, @RolesAllowed, etc.
+ */
+function extractSecurityAnnotations(node: Parser.SyntaxNode): AnnotationInfo[] {
+    const securityAnnotations: AnnotationInfo[] = [];
+
+    for (const child of node.namedChildren) {
+        if (child.type === 'modifiers') {
+            for (const modifier of child.namedChildren) {
+                if (modifier.type === 'marker_annotation' || modifier.type === 'annotation') {
+                    const annoText = getNodeText(modifier);
+                    const annoName = annoText.replace(/^@/, '').split('(')[0] || 'Unknown';
+
+                    if (SECURITY_ANNOTATIONS.includes(annoName)) {
+                        const args: Record<string, string | number | boolean> = {};
+
+                        // Extract SpEL expression or roles
+                        const argsNode = modifier.childForFieldName('arguments');
+                        if (argsNode) {
+                            const argsText = getNodeText(argsNode).replace(/^\(|\)$/g, '');
+                            // For @PreAuthorize("hasRole('ADMIN')") - extract the expression
+                            if (argsText.startsWith('"') || argsText.startsWith("'")) {
+                                args['expression'] = argsText.replace(/^["']|["']$/g, '');
+                            } else if (argsText.includes('=')) {
+                                // For @Secured(value = {"ROLE_ADMIN", "ROLE_USER"})
+                                for (const argChild of argsNode.namedChildren) {
+                                    if (argChild.type === 'element_value_pair') {
+                                        const keyNode = argChild.childForFieldName('key');
+                                        const valueNode = argChild.childForFieldName('value');
+                                        if (keyNode && valueNode) {
+                                            args[getNodeText(keyNode)] = getNodeText(valueNode);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Simple value like @Secured("ROLE_ADMIN")
+                                args['value'] = argsText.replace(/^["']|["']$/g, '');
+                            }
+                        }
+
+                        securityAnnotations.push({
+                            name: annoName,
+                            text: annoText,
+                            arguments: Object.keys(args).length > 0 ? args : undefined,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    return securityAnnotations;
+}
+
+/**
+ * Extract a code snippet from the method body.
+ * Returns 5-15 lines of representative code.
+ */
+function extractMethodCodeSnippet(
+    bodyNode: Parser.SyntaxNode | null,
+    sourceText: string,
+    maxLines: number = 15
+): { snippet: string; startLine: number; endLine: number } | null {
+    if (!bodyNode) return null;
+
+    const startLine = bodyNode.startPosition.row;
+    const endLine = bodyNode.endPosition.row;
+    const lines = sourceText.split('\n');
+
+    // Take first maxLines lines or entire body if smaller
+    const snippetEndLine = Math.min(startLine + maxLines, endLine);
+    const snippetLines = lines.slice(startLine, snippetEndLine + 1);
+
+    // Clean up: remove excessive whitespace but preserve indentation
+    const snippet = snippetLines
+        .map(line => line.trimEnd())
+        .join('\n')
+        .substring(0, 2000); // Limit total characters
+
+    return {
+        snippet,
+        startLine: startLine + 1, // 1-based
+        endLine: snippetEndLine + 1
+    };
+}
+
+/**
+ * Extract error messages from throw statements in a method body.
+ * Looks for patterns like: throw new Exception("message")
+ */
+function extractErrorMessages(bodyNode: Parser.SyntaxNode | null): string[] {
+    const errorMessages: string[] = [];
+    if (!bodyNode) return errorMessages;
+
+    const searchThrowStatements = (node: Parser.SyntaxNode): void => {
+        if (node.type === 'throw_statement') {
+            // Find object_creation_expression (new Exception(...))
+            for (const child of node.namedChildren) {
+                if (child.type === 'object_creation_expression') {
+                    const argsNode = child.childForFieldName('arguments');
+                    if (argsNode) {
+                        for (const arg of argsNode.namedChildren) {
+                            if (arg.type === 'string_literal') {
+                                // Extract the string literal content
+                                const message = getNodeText(arg)
+                                    .replace(/^"|"$/g, '')  // Remove double quotes
+                                    .replace(/^'|'$/g, ''); // Remove single quotes
+                                if (message.length > 0 && message.length < 500) {
+                                    errorMessages.push(message);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Recursively search children
+        for (const child of node.namedChildren) {
+            searchThrowStatements(child);
+        }
+    };
+
+    searchThrowStatements(bodyNode);
+    return errorMessages;
+}
+
+/**
  * Extract Javadoc comment from a Java declaration node.
  * Finds the comment node immediately preceding the declaration.
  */
@@ -755,6 +891,18 @@ class JavaAstVisitor {
         const documentationInfo = extractJavaDocumentationInfo(node, this.sourceText);
         const docTags = documentationInfo?.tags || [];
 
+        // Extract method body for BRD generation enhancements
+        const bodyNode = node.childForFieldName('body');
+
+        // Extract code snippet from method body (Phase 1 - BRD Enhancement)
+        const snippetInfo = extractMethodCodeSnippet(bodyNode, this.sourceText);
+
+        // Extract error messages from throw statements (Phase 2 - BRD Enhancement)
+        const errorMessages = extractErrorMessages(bodyNode);
+
+        // Extract security annotations (Phase 2 - BRD Enhancement)
+        const securityAnnotations = extractSecurityAnnotations(node);
+
         const methodEntityId = generateEntityId('javamethod', `${this.currentClassOrInterfaceId}.${name}`); // ID relative to parent
         const methodNode: JavaMethodNode = {
             id: generateInstanceId(this.instanceCounter, 'javamethod', name, { line: location.startLine, column: location.startColumn }),
@@ -780,6 +928,13 @@ class JavaAstVisitor {
             isStatic: signatureInfo.isStatic,
             isAbstract: signatureInfo.isAbstract,
             modifierFlags: signatureInfo.modifiers,
+            // BRD Enhancement: Code snippet for LLM interpretation
+            codeSnippet: snippetInfo?.snippet,
+            codeSnippetLines: snippetInfo ? { start: snippetInfo.startLine, end: snippetInfo.endLine } : undefined,
+            // BRD Enhancement: Error messages for requirement documentation
+            errorMessages: errorMessages.length > 0 ? errorMessages : undefined,
+            // BRD Enhancement: Security annotations for access control documentation
+            securityAnnotations: securityAnnotations.length > 0 ? securityAnnotations : undefined,
         };
         this.nodes.push(methodNode);
 
@@ -797,7 +952,6 @@ class JavaAstVisitor {
         this.currentMethodId = methodEntityId;
 
         // Visit method body to capture invocations
-        const bodyNode = node.childForFieldName('body');
         if (bodyNode) {
             for (const child of bodyNode.namedChildren) {
                 this.visit(child);
@@ -835,6 +989,15 @@ class JavaAstVisitor {
         const documentationInfo = extractJavaDocumentationInfo(node, this.sourceText);
         const docTags = documentationInfo?.tags || [];
 
+        // Extract constructor body for BRD generation enhancements
+        const bodyNode = node.childForFieldName('body');
+
+        // Extract code snippet from constructor body (Phase 1 - BRD Enhancement)
+        const snippetInfo = extractMethodCodeSnippet(bodyNode, this.sourceText);
+
+        // Extract error messages from throw statements (Phase 2 - BRD Enhancement)
+        const errorMessages = extractErrorMessages(bodyNode);
+
         const methodEntityId = generateEntityId('javamethod', `${this.currentClassOrInterfaceId}.${name}`); // Use same kind for simplicity
         const methodNode: JavaMethodNode = {
             id: generateInstanceId(this.instanceCounter, 'javamethod', name, { line: location.startLine, column: location.startColumn }),
@@ -857,6 +1020,11 @@ class JavaAstVisitor {
             // Also set top-level properties for backward compatibility
             visibility: signatureInfo.visibility === 'default' ? 'package' : signatureInfo.visibility,
             modifierFlags: signatureInfo.modifiers,
+            // BRD Enhancement: Code snippet for LLM interpretation
+            codeSnippet: snippetInfo?.snippet,
+            codeSnippetLines: snippetInfo ? { start: snippetInfo.startLine, end: snippetInfo.endLine } : undefined,
+            // BRD Enhancement: Error messages for requirement documentation
+            errorMessages: errorMessages.length > 0 ? errorMessages : undefined,
         };
         this.nodes.push(methodNode);
 
@@ -874,7 +1042,6 @@ class JavaAstVisitor {
         this.currentMethodId = methodEntityId;
 
         // Visit constructor body to capture invocations
-        const bodyNode = node.childForFieldName('body');
         if (bodyNode) {
             for (const child of bodyNode.namedChildren) {
                 this.visit(child);

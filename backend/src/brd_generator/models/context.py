@@ -16,6 +16,160 @@ class SchemaInfo(BaseModel):
     dependency_relationships: list[str] = Field(default_factory=list)
 
 
+# ============================================================================
+# Enhanced Models for BRD Generation (Phase 11)
+# ============================================================================
+
+class CodeSnippetInfo(BaseModel):
+    """Code snippet from a method or function."""
+
+    method_name: str
+    class_name: Optional[str] = None
+    file_path: str
+    start_line: int
+    end_line: int
+    snippet: str  # The actual code (5-15 lines)
+    language: str = "Java"
+
+    def to_markdown(self) -> str:
+        """Format snippet for inclusion in BRD."""
+        location = f"{self.file_path}:{self.start_line}-{self.end_line}"
+        header = f"**{self.class_name}.{self.method_name}**" if self.class_name else f"**{self.method_name}**"
+        return f"{header} (`{location}`)\n```{self.language.lower()}\n{self.snippet}\n```"
+
+
+class SecurityRuleInfo(BaseModel):
+    """Security rule/annotation from code."""
+
+    annotation_type: str  # 'PreAuthorize', 'Secured', 'RolesAllowed', etc.
+    annotation_text: str  # Full annotation text
+    expression: Optional[str] = None  # SpEL expression for @PreAuthorize
+    roles: list[str] = Field(default_factory=list)  # Required roles
+    target_name: str  # Method or class name
+    target_type: str  # 'method' or 'class'
+    file_path: Optional[str] = None
+    line_number: Optional[int] = None
+    description: Optional[str] = None  # Human-readable description
+
+    def to_markdown(self) -> str:
+        """Format security rule for BRD."""
+        roles_text = ", ".join(self.roles) if self.roles else "N/A"
+        expr_text = f" (`{self.expression}`)" if self.expression else ""
+        location = f" at `{self.file_path}:{self.line_number}`" if self.file_path and self.line_number else ""
+        return f"- **{self.annotation_type}**{expr_text} on `{self.target_name}` - Roles: {roles_text}{location}"
+
+
+class ErrorMessageInfo(BaseModel):
+    """Error message from code or resource bundles."""
+
+    message_key: Optional[str] = None  # i18n key
+    message_text: str  # Actual message text
+    source_type: str = "inline"  # 'inline' (from throw) or 'resource_bundle' (.properties)
+    source_file: Optional[str] = None
+    line_number: Optional[int] = None
+    locale: Optional[str] = None
+    parameters: list[str] = Field(default_factory=list)  # Placeholders like {0}, {1}
+    context_method: Optional[str] = None  # Method where this error occurs
+
+    def to_markdown(self) -> str:
+        """Format error message for BRD."""
+        key_text = f"`{self.message_key}`: " if self.message_key else ""
+        params_text = f" (params: {', '.join(self.parameters)})" if self.parameters else ""
+        context = f" in `{self.context_method}`" if self.context_method else ""
+        return f"- {key_text}*\"{self.message_text}\"*{params_text}{context}"
+
+
+class TransitionConditionInfo(BaseModel):
+    """Parsed transition condition from WebFlow."""
+
+    flow_name: str
+    transition_name: str
+    trigger_event: str
+    target_state: str
+    condition_expression: str
+    operator: Optional[str] = None  # 'equals', 'notEquals', 'and', 'or', etc.
+    left_operand: Optional[str] = None
+    right_operand: Optional[str] = None
+    variables: list[str] = Field(default_factory=list)
+    method_calls: list[str] = Field(default_factory=list)
+    is_spel: bool = False
+    description: Optional[str] = None  # Human-readable description
+
+    def to_markdown(self) -> str:
+        """Format condition for BRD."""
+        desc = self.description or self.condition_expression
+        return f"- **{self.transition_name}** (on `{self.trigger_event}`): {desc} → `{self.target_state}`"
+
+
+class FormFieldDetailInfo(BaseModel):
+    """Enhanced form field with label and validation details."""
+
+    field_name: str
+    field_type: str
+    label: Optional[str] = None
+    label_key: Optional[str] = None  # i18n key
+    required: bool = False
+    placeholder: Optional[str] = None
+    help_text: Optional[str] = None
+    validation_rules: Optional[dict[str, Any]] = None  # pattern, min, max, etc.
+    error_path: Optional[str] = None  # <form:errors path="...">
+    css_error_class: Optional[str] = None
+    form_name: Optional[str] = None
+    jsp_name: Optional[str] = None
+
+    def to_markdown(self) -> str:
+        """Format form field for BRD."""
+        label_text = self.label or self.label_key or self.field_name
+        req_marker = " (Required)" if self.required else ""
+        validation_text = ""
+        if self.validation_rules:
+            rules = [f"{k}={v}" for k, v in self.validation_rules.items() if v]
+            if rules:
+                validation_text = f" | Validation: {', '.join(rules)}"
+        return f"| `{self.field_name}` | {label_text}{req_marker} | {self.field_type}{validation_text} |"
+
+
+class EnhancedMethodContext(BaseModel):
+    """Enhanced method context with code snippets, errors, and security."""
+
+    method_name: str
+    class_name: Optional[str] = None
+    signature: Optional[str] = None
+    file_path: str
+    start_line: int
+    end_line: int
+    code_snippet: Optional[str] = None
+    error_messages: list[ErrorMessageInfo] = Field(default_factory=list)
+    security_rules: list[SecurityRuleInfo] = Field(default_factory=list)
+    invoked_methods: list[str] = Field(default_factory=list)
+
+    def to_markdown(self) -> str:
+        """Format method context for BRD."""
+        lines = []
+        header = f"### `{self.class_name}.{self.method_name}`" if self.class_name else f"### `{self.method_name}`"
+        lines.append(header)
+        lines.append(f"**Location:** `{self.file_path}:{self.start_line}-{self.end_line}`")
+
+        if self.signature:
+            lines.append(f"**Signature:** `{self.signature}`")
+
+        if self.code_snippet:
+            lines.append("\n**Implementation:**")
+            lines.append(f"```java\n{self.code_snippet}\n```")
+
+        if self.security_rules:
+            lines.append("\n**Security:**")
+            for rule in self.security_rules:
+                lines.append(rule.to_markdown())
+
+        if self.error_messages:
+            lines.append("\n**Error Messages:**")
+            for err in self.error_messages:
+                lines.append(err.to_markdown())
+
+        return "\n".join(lines)
+
+
 class ComponentInfo(BaseModel):
     """Information about a code component."""
 
@@ -106,6 +260,70 @@ class ImplementationContext(BaseModel):
     configs: dict[str, Any] = Field(default_factory=dict)
 
 
+class MenuItemInfo(BaseModel):
+    """Information about a menu item from the application."""
+
+    name: str
+    label: str
+    url: str
+    flow_id: str
+    view_state_id: Optional[str] = None
+    menu_level: int = 0
+    parent_menu: Optional[str] = None
+    required_roles: list[str] = Field(default_factory=list)
+
+
+class SubFeatureInfo(BaseModel):
+    """Information about a sub-feature (screen) within a menu item."""
+
+    screen_id: str
+    title: str
+    screen_type: str  # 'entry', 'results', 'inquiry', 'maintenance', etc.
+    jsps: list[str] = Field(default_factory=list)
+    action_class: Optional[str] = None
+    action_methods: list[str] = Field(default_factory=list)
+    transitions_to: list[str] = Field(default_factory=list)
+    url_pattern: Optional[str] = None
+
+
+class ValidationStep(BaseModel):
+    """A step in a validation chain."""
+
+    order: int
+    step_type: str  # 'action', 'validator', 'entity'
+    class_name: str
+    method_name: Optional[str] = None
+    rules: list[str] = Field(default_factory=list)
+
+
+class ValidationChainInfo(BaseModel):
+    """Information about a validation chain from action to entity."""
+
+    entry_point: str  # e.g., "PointInfoAction.save"
+    validation_steps: list[ValidationStep] = Field(default_factory=list)
+    total_rules: int = 0
+    validated_fields: list[str] = Field(default_factory=list)
+
+
+class CrossFeatureDependency(BaseModel):
+    """Information about cross-feature dependencies."""
+
+    source_feature: str
+    target_feature: str
+    relationship_type: str  # 'SHARES_ENTITY', 'SHARES_SERVICE', 'CASCADES_TO'
+    shared_component: str
+    implication: str
+
+
+class CrossFeatureContext(BaseModel):
+    """Cross-feature dependency context."""
+
+    dependencies: list[CrossFeatureDependency] = Field(default_factory=list)
+    shared_entities: dict[str, list[str]] = Field(default_factory=dict)  # entity -> [features]
+    shared_services: dict[str, list[str]] = Field(default_factory=dict)  # service -> [features]
+    impact_summary: Optional[str] = None
+
+
 class AggregatedContext(BaseModel):
     """Complete aggregated context for BRD generation."""
 
@@ -131,6 +349,54 @@ class AggregatedContext(BaseModel):
     technical_architecture: Optional[str] = Field(
         default=None,
         description="Pre-generated markdown for BRD Section 7"
+    )
+
+    # Phase 6: Enhanced context from menu/screen indexing
+    menu_items: list[MenuItemInfo] = Field(
+        default_factory=list,
+        description="Menu items discovered for the feature"
+    )
+    sub_features: list[SubFeatureInfo] = Field(
+        default_factory=list,
+        description="Sub-features (screens) with their URLs, actions, methods, and JSPs"
+    )
+    validation_chains: list[ValidationChainInfo] = Field(
+        default_factory=list,
+        description="Validation chains from action → service → validator → entity"
+    )
+    cross_feature_context: Optional[CrossFeatureContext] = Field(
+        default=None,
+        description="Cross-feature dependencies, shared entities, and shared services"
+    )
+    enriched_business_rules: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Business rules enriched with feature context (menu, screen, action)"
+    )
+
+    # Phase 11: Enhanced context for BRD generation
+    code_snippets: list[CodeSnippetInfo] = Field(
+        default_factory=list,
+        description="Code snippets from key methods (5-15 lines each)"
+    )
+    security_rules: list[SecurityRuleInfo] = Field(
+        default_factory=list,
+        description="Security annotations and access control rules"
+    )
+    error_messages: list[ErrorMessageInfo] = Field(
+        default_factory=list,
+        description="Error messages from code and resource bundles"
+    )
+    transition_conditions: list[TransitionConditionInfo] = Field(
+        default_factory=list,
+        description="Parsed WebFlow transition conditions with semantics"
+    )
+    form_field_details: list[FormFieldDetailInfo] = Field(
+        default_factory=list,
+        description="Enhanced form fields with labels and validation details"
+    )
+    enhanced_methods: list[EnhancedMethodContext] = Field(
+        default_factory=list,
+        description="Methods with code snippets, errors, and security context"
     )
 
     @property

@@ -128,8 +128,21 @@ class EnhancedContextRetriever:
 
         logger.info(f"{LOG_PREFIX} Keywords: {keywords}")
 
-        # Step 1: Find entry points using compound term detection
-        entry_points = await self._find_entry_points(keywords, max_entry_points)
+        # =====================================================================
+        # NEW: Try menu-based lookup FIRST (Phase 1: Menu & Screen Indexing)
+        # This is the most accurate method - uses user-facing menu labels
+        # =====================================================================
+        menu_result = await self._find_entry_points_by_menu(feature_description, max_entry_points)
+
+        if menu_result.get("found"):
+            logger.info(f"{LOG_PREFIX} [MENU-BASED] Found menu match: {menu_result.get('menuLabel')}")
+            entry_points = menu_result.get("entry_points", [])
+            sub_features = menu_result.get("sub_features", [])
+            warnings.insert(0, f"Menu match: '{menu_result.get('menuLabel')}' -> {len(sub_features)} sub-features")
+        else:
+            logger.info(f"{LOG_PREFIX} [MENU-BASED] No menu match, falling back to compound term detection")
+            # Step 1: Find entry points using compound term detection (original approach)
+            entry_points = await self._find_entry_points(keywords, max_entry_points)
 
         if not entry_points:
             warnings.append(f"No entry points found for keywords: {keywords}")
@@ -213,6 +226,391 @@ class EnhancedContextRetriever:
 
         return all_nodes, entry_point_names, warnings
 
+    # =========================================================================
+    # Phase 1: Menu-Based Entry Point Discovery
+    # =========================================================================
+
+    async def _find_entry_points_by_menu(
+        self,
+        feature_description: str,
+        max_entry_points: int = 20,
+    ) -> dict:
+        """
+        Find entry points by matching against menu item labels.
+
+        This is the most accurate method - uses user-facing menu labels
+        that directly map to screens, actions, and code.
+
+        Args:
+            feature_description: The feature description (e.g., "Point Maintenance")
+            max_entry_points: Maximum entry points to return
+
+        Returns:
+            Dict with keys: found, menuLabel, entry_points, sub_features
+        """
+        search_term = feature_description.lower().strip()
+
+        # Build a fuzzy search pattern
+        # "Point Maintenance" -> matches "Point Maintenance", "Point Info Maintenance", etc.
+        search_words = search_term.split()
+        fuzzy_pattern = '.*'.join(search_words)
+
+        menu_query = f"""
+            // Find menu items matching the search term
+            MATCH (m:MenuItem)
+            WHERE toLower(m.label) CONTAINS '{search_term}'
+               OR toLower(m.label) =~ '.*{fuzzy_pattern}.*'
+               OR toLower(m.name) CONTAINS '{search_term}'
+
+            // Follow menu -> screen -> action chain
+            OPTIONAL MATCH (m)-[:MENU_OPENS_SCREEN]->(s:Screen)
+            OPTIONAL MATCH (s)-[:SCREEN_CALLS_ACTION]->(a:JavaClass)
+            OPTIONAL MATCH (s)-[:SCREEN_RENDERS_JSP]->(j:JSPPage)
+            OPTIONAL MATCH (m)-[:MENU_OPENS_FLOW]->(f:WebFlowDefinition)
+
+            // Get all screens in the same flow for sub-features
+            OPTIONAL MATCH (f)-[:FLOW_DEFINES_STATE]->(fs:FlowState)
+            WHERE fs.stateType = 'view-state'
+
+            RETURN m.label AS menuLabel,
+                   m.url AS menuUrl,
+                   m.parentMenu AS parentMenu,
+                   m.flowId AS flowId,
+                   m.viewStateId AS viewStateId,
+                   s.screenId AS screenId,
+                   s.title AS screenTitle,
+                   s.actionClass AS actionClass,
+                   s.actionMethods AS actionMethods,
+                   collect(DISTINCT a.name) AS actionClasses,
+                   collect(DISTINCT j.name) AS jspPages,
+                   f.name AS flowName,
+                   collect(DISTINCT fs.stateId) AS flowStates
+            ORDER BY
+                CASE WHEN toLower(m.label) = '{search_term}' THEN 0 ELSE 1 END,
+                m.menuLevel
+            LIMIT {max_entry_points}
+        """
+
+        try:
+            result = await self.neo4j.query_code_structure(menu_query)
+            menu_items = result.get("nodes", [])
+
+            if not menu_items:
+                logger.debug(f"{LOG_PREFIX} [MENU-BASED] No menu items found for '{search_term}'")
+                return {"found": False}
+
+            # Process the first (best) match
+            best_match = menu_items[0]
+            menu_label = best_match.get("menuLabel", "")
+            flow_id = best_match.get("flowId", "")
+
+            logger.info(f"{LOG_PREFIX} [MENU-BASED] Best match: '{menu_label}' -> flow={flow_id}")
+
+            # Build entry points from menu match
+            entry_points = []
+
+            # Add screen as entry point
+            if best_match.get("screenId"):
+                entry_points.append({
+                    "name": best_match.get("screenId"),
+                    "type": "Screen",
+                    "path": "",
+                    "layer": "ui",
+                    "layer_score": 100,
+                    "title": best_match.get("screenTitle", ""),
+                    "is_menu_match": True,
+                })
+
+            # Add action classes as entry points
+            action_classes = best_match.get("actionClasses", [])
+            action_class = best_match.get("actionClass")
+            if action_class and action_class not in action_classes:
+                action_classes.append(action_class)
+
+            for ac in action_classes:
+                if ac:
+                    entry_points.append({
+                        "name": ac,
+                        "type": "JavaClass",
+                        "path": "",
+                        "layer": "controller",
+                        "layer_score": 80,
+                        "is_menu_match": True,
+                    })
+
+            # Add flow as entry point
+            flow_name = best_match.get("flowName")
+            if flow_name:
+                entry_points.append({
+                    "name": flow_name,
+                    "type": "WebFlowDefinition",
+                    "path": "",
+                    "layer": "flow",
+                    "layer_score": 90,
+                    "is_menu_match": True,
+                })
+
+            # Get sub-features (other screens in the same flow)
+            sub_features = await self._get_sub_features(flow_id)
+
+            return {
+                "found": True,
+                "menuLabel": menu_label,
+                "menuUrl": best_match.get("menuUrl", ""),
+                "flowId": flow_id,
+                "entry_points": entry_points,
+                "sub_features": sub_features,
+                "actionMethods": best_match.get("actionMethods", []),
+            }
+
+        except Exception as e:
+            logger.warning(f"{LOG_PREFIX} [MENU-BASED] Menu query failed: {e}")
+            return {"found": False}
+
+    async def _get_sub_features(self, flow_id: str) -> list[dict]:
+        """
+        Get all sub-features (screens) for a given flow.
+
+        Args:
+            flow_id: The flow ID (e.g., "pointWizard")
+
+        Returns:
+            List of sub-feature dicts with screenId, title, actionClass, methods, jsps
+        """
+        if not flow_id:
+            return []
+
+        sub_feature_query = f"""
+            MATCH (s:Screen)
+            WHERE s.flowId = '{flow_id}'
+
+            OPTIONAL MATCH (s)-[:SCREEN_CALLS_ACTION]->(a:JavaClass)
+            OPTIONAL MATCH (s)-[:SCREEN_RENDERS_JSP]->(j:JSPPage)
+
+            RETURN s.screenId AS screenId,
+                   s.title AS title,
+                   s.screenType AS screenType,
+                   s.actionClass AS actionClass,
+                   s.actionMethods AS actionMethods,
+                   s.urlPattern AS urlPattern,
+                   s.isMaintenanceMode AS isMaintenanceMode,
+                   collect(DISTINCT j.name) AS jsps,
+                   a.name AS linkedActionClass
+            ORDER BY s.screenId
+        """
+
+        try:
+            result = await self.neo4j.query_code_structure(sub_feature_query)
+            sub_features = result.get("nodes", [])
+
+            logger.info(f"{LOG_PREFIX} [MENU-BASED] Found {len(sub_features)} sub-features for flow '{flow_id}'")
+
+            # Format sub-features
+            formatted = []
+            for sf in sub_features:
+                formatted.append({
+                    "screenId": sf.get("screenId"),
+                    "title": sf.get("title", sf.get("screenId")),
+                    "screenType": sf.get("screenType", "unknown"),
+                    "actionClass": sf.get("actionClass") or sf.get("linkedActionClass"),
+                    "actionMethods": sf.get("actionMethods", []),
+                    "urlPattern": sf.get("urlPattern", f"{flow_id}.html?pageSelect={sf.get('screenId')}"),
+                    "jsps": sf.get("jsps", []),
+                    "isMaintenanceMode": sf.get("isMaintenanceMode", False),
+                })
+
+            return formatted
+
+        except Exception as e:
+            logger.warning(f"{LOG_PREFIX} [MENU-BASED] Sub-feature query failed: {e}")
+            return []
+
+    # =========================================================================
+    # Phase 5: Cross-Feature Analysis
+    # =========================================================================
+
+    async def get_cross_feature_dependencies(self, flow_id: str) -> dict:
+        """
+        Get comprehensive cross-feature dependencies for a flow.
+
+        This finds other features that:
+        - Share entities (data coupling)
+        - Share services (service coupling)
+        - Have cascade effects
+        - Are triggered by common events
+
+        Args:
+            flow_id: The flow ID
+
+        Returns:
+            Dict with cross-feature relationships
+        """
+        all_cross_features = []
+
+        # Query 1: Shared entities
+        shared_entity_query = f"""
+            MATCH (s:Screen {{flowId: '{flow_id}'}})
+            OPTIONAL MATCH (s)-[:SCREEN_CALLS_ACTION]->()-[:USES|CALLS*1..3]->(entity:JavaClass)
+            WHERE entity.name ENDS WITH 'Entity' OR entity.name ENDS WITH 'Model'
+              OR entity.name ENDS WITH 'DTO'
+
+            WITH entity
+            WHERE entity IS NOT NULL
+
+            MATCH (other:Screen)-[:SCREEN_CALLS_ACTION]->()-[:USES|CALLS*1..3]->(entity)
+            WHERE other.flowId <> '{flow_id}'
+
+            RETURN DISTINCT other.flowId AS relatedFlow,
+                   other.screenId AS relatedScreen,
+                   other.title AS relatedTitle,
+                   entity.name AS sharedComponent,
+                   'SHARES_ENTITY' AS relationshipType,
+                   'Changes to ' + entity.name + ' may affect this feature' AS implication
+            LIMIT 500
+        """
+
+        # Query 2: Shared services
+        shared_service_query = f"""
+            MATCH (s:Screen {{flowId: '{flow_id}'}})
+            OPTIONAL MATCH (s)-[:SCREEN_CALLS_ACTION]->()-[:CALLS|USES*1..2]->(service)
+            WHERE (service:SpringService OR service:JavaClass)
+              AND (
+                toLower(service.name) CONTAINS 'service'
+                OR toLower(service.name) CONTAINS 'validator'
+              )
+
+            WITH service
+            WHERE service IS NOT NULL
+
+            MATCH (other:Screen)-[:SCREEN_CALLS_ACTION]->()-[:CALLS|USES*1..2]->(service)
+            WHERE other.flowId <> '{flow_id}'
+
+            RETURN DISTINCT other.flowId AS relatedFlow,
+                   other.screenId AS relatedScreen,
+                   other.title AS relatedTitle,
+                   service.name AS sharedComponent,
+                   'SHARES_SERVICE' AS relationshipType,
+                   'Both features depend on ' + service.name AS implication
+            LIMIT 500
+        """
+
+        # Query 3: Menu hierarchy relationships
+        menu_relation_query = f"""
+            MATCH (m1:MenuItem)-[:MENU_OPENS_SCREEN|MENU_OPENS_FLOW]->(:Screen {{flowId: '{flow_id}'}})
+            MATCH (m2:MenuItem)-[:PARENT_MENU_ITEM*1..2]-(m1)
+            MATCH (m2)-[:MENU_OPENS_SCREEN]->(s2:Screen)
+            WHERE s2.flowId <> '{flow_id}'
+
+            RETURN DISTINCT s2.flowId AS relatedFlow,
+                   s2.screenId AS relatedScreen,
+                   s2.title AS relatedTitle,
+                   m2.label AS sharedComponent,
+                   'SIBLING_FEATURE' AS relationshipType,
+                   'Part of same menu group: ' + m1.parentMenu AS implication
+            LIMIT 500
+        """
+
+        queries = [
+            (shared_entity_query, "shared_entity"),
+            (shared_service_query, "shared_service"),
+            (menu_relation_query, "menu_sibling"),
+        ]
+
+        for query, query_type in queries:
+            try:
+                result = await self.neo4j.query_code_structure(query)
+                features = result.get("nodes", [])
+                logger.debug(f"{LOG_PREFIX} [CROSS-FEATURE] {query_type}: found {len(features)} relationships")
+                all_cross_features.extend(features)
+            except Exception as e:
+                logger.warning(f"{LOG_PREFIX} [CROSS-FEATURE] {query_type} query failed: {e}")
+
+        # Deduplicate by relatedFlow + relatedScreen
+        seen = set()
+        unique_features = []
+        for feat in all_cross_features:
+            key = f"{feat.get('relatedFlow')}:{feat.get('relatedScreen')}"
+            if key not in seen:
+                seen.add(key)
+                unique_features.append(feat)
+
+        logger.info(f"{LOG_PREFIX} [CROSS-FEATURE] Found {len(unique_features)} cross-feature relationships for {flow_id}")
+
+        return {
+            "flowId": flow_id,
+            "crossFeatures": unique_features,
+            "count": len(unique_features),
+            "byType": {
+                "sharedEntity": len([f for f in unique_features if f.get("relationshipType") == "SHARES_ENTITY"]),
+                "sharedService": len([f for f in unique_features if f.get("relationshipType") == "SHARES_SERVICE"]),
+                "siblingFeature": len([f for f in unique_features if f.get("relationshipType") == "SIBLING_FEATURE"]),
+            }
+        }
+
+    async def get_feature_impact_analysis(
+        self,
+        component_name: str,
+        component_type: str = "entity",
+    ) -> dict:
+        """
+        Analyze the impact of changing a component on all features.
+
+        Args:
+            component_name: Name of the component (entity, service, etc.)
+            component_type: Type of component (entity, service, validator)
+
+        Returns:
+            Dict with impact analysis
+        """
+        logger.info(f"{LOG_PREFIX} [IMPACT] Analyzing impact of {component_type}: {component_name}")
+
+        # Find all features affected by this component
+        impact_query = f"""
+            MATCH (component:JavaClass)
+            WHERE toLower(component.name) = toLower('{component_name}')
+               OR component.name = '{component_name}'
+
+            // Find screens that use this component
+            MATCH (screen:Screen)-[:SCREEN_CALLS_ACTION]->()-[*1..4]->(component)
+
+            RETURN DISTINCT screen.flowId AS flowId,
+                   screen.screenId AS screenId,
+                   screen.title AS title,
+                   screen.actionClass AS actionClass
+            ORDER BY screen.flowId
+            LIMIT 150
+        """
+
+        affected_features = []
+        try:
+            result = await self.neo4j.query_code_structure(impact_query)
+            affected_features = result.get("nodes", [])
+            logger.info(f"{LOG_PREFIX} [IMPACT] Found {len(affected_features)} affected features")
+
+        except Exception as e:
+            logger.warning(f"{LOG_PREFIX} [IMPACT] Query failed: {e}")
+
+        return {
+            "component": component_name,
+            "componentType": component_type,
+            "affectedFeatures": affected_features,
+            "totalAffected": len(affected_features),
+            "impactLevel": self._calculate_impact_level(len(affected_features)),
+        }
+
+    def _calculate_impact_level(self, affected_count: int) -> str:
+        """Calculate impact level based on number of affected features."""
+        if affected_count == 0:
+            return "none"
+        elif affected_count <= 2:
+            return "low"
+        elif affected_count <= 5:
+            return "medium"
+        elif affected_count <= 10:
+            return "high"
+        else:
+            return "critical"
+
     async def _find_entry_points(
         self,
         keywords: list[str],
@@ -271,7 +669,7 @@ class EnhancedContextRetriever:
                    80 AS layer_score,
                    action_score + pagerank * 10 AS relevance_score
             ORDER BY relevance_score DESC
-            LIMIT 15
+            LIMIT 500
         """
 
         try:
@@ -310,7 +708,7 @@ class EnhancedContextRetriever:
                        w.filePath AS path,
                        'flow' AS layer,
                        90 AS layer_score
-                LIMIT 10
+                LIMIT 500
             """
 
             try:
@@ -360,7 +758,7 @@ class EnhancedContextRetriever:
                            100 AS layer_score,
                            relevance
                     ORDER BY relevance DESC
-                    LIMIT 15
+                    LIMIT 500
                 """
             else:
                 jsp_query = f"""
@@ -371,7 +769,7 @@ class EnhancedContextRetriever:
                            j.filePath AS path,
                            'ui' AS layer,
                            100 AS layer_score
-                    LIMIT 15
+                    LIMIT 500
                 """
 
             try:
@@ -474,7 +872,7 @@ class EnhancedContextRetriever:
                    related.description AS description,
                    1 AS distance,
                    type(r) AS relationship
-            LIMIT 100
+            LIMIT 500
         """
         queries.append((query_depth1, "depth1"))
 
@@ -490,7 +888,7 @@ class EnhancedContextRetriever:
                    related.description AS description,
                    2 AS distance,
                    type(r2) AS relationship
-            LIMIT 100
+            LIMIT 500
         """
         queries.append((query_depth2, "depth2"))
 
@@ -508,7 +906,7 @@ class EnhancedContextRetriever:
                    'Injected service' AS description,
                    1 AS distance,
                    'INJECTED_SERVICE' AS relationship
-            LIMIT 30
+            LIMIT 150
         """
         queries.append((query_injected, "injected"))
 
@@ -530,7 +928,7 @@ class EnhancedContextRetriever:
                        s.description AS description,
                        2 AS distance,
                        'RELATED_BY_NAME' AS relationship
-                LIMIT 25
+                LIMIT 500
             """
             queries.append((query_related, "related"))
 
@@ -551,9 +949,99 @@ class EnhancedContextRetriever:
                        'Data access layer' AS description,
                        3 AS distance,
                        'DATA_LAYER' AS relationship
-                LIMIT 15
+                LIMIT 500
             """
             queries.append((query_daos, "daos"))
+
+        # =================================================================
+        # Phase 2: Deep Traversal Queries (4-6 hops)
+        # =================================================================
+
+        # Query 6: Deep chain traversal (up to 4 hops)
+        query_deep_chain = f"""
+            MATCH path = (start)-[*1..4]->(target)
+            WHERE ({entry_filter})
+              AND (target:JavaClass OR target:JavaInterface OR target:SpringService)
+              AND NOT toLower(target.name) CONTAINS 'test'
+              AND NOT target.name = start.name
+            WITH DISTINCT target, length(path) AS distance
+            ORDER BY distance
+            RETURN target.name AS name,
+                   labels(target)[0] AS type,
+                   target.filePath AS path,
+                   'Deep chain component' AS description,
+                   distance,
+                   'DEEP_CHAIN' AS relationship
+            LIMIT 200
+        """
+        queries.append((query_deep_chain, "deep_chain"))
+
+        # Query 7: Validators connected to entry points
+        if entry_points:
+            entry_base_names = [ep.replace("Action", "").replace("Controller", "").lower() for ep in entry_points[:3]]
+            if entry_base_names:
+                validator_filter = " OR ".join([f"toLower(v.name) CONTAINS '{base}'" for base in entry_base_names])
+                query_validators = f"""
+                    MATCH (v)
+                    WHERE (v:JavaClass OR v:SpringService)
+                      AND (toLower(v.name) CONTAINS 'validator' OR toLower(v.name) CONTAINS 'validation')
+                      AND ({validator_filter})
+                      AND NOT toLower(v.name) CONTAINS 'test'
+                    RETURN DISTINCT v.name AS name,
+                           labels(v)[0] AS type,
+                           v.filePath AS path,
+                           'Validation component' AS description,
+                           2 AS distance,
+                           'VALIDATOR' AS relationship
+                    LIMIT 500
+                """
+                queries.append((query_validators, "validators"))
+
+        # Query 8: Utility/Helper classes used by entry points
+        query_utilities = f"""
+            MATCH (start)-[*1..3]->(util)
+            WHERE ({entry_filter})
+              AND (util:JavaClass OR util:SpringService)
+              AND (
+                toLower(util.name) CONTAINS 'util'
+                OR toLower(util.name) CONTAINS 'helper'
+                OR toLower(util.name) CONTAINS 'converter'
+                OR toLower(util.name) CONTAINS 'formatter'
+                OR toLower(util.name) CONTAINS 'builder'
+              )
+              AND NOT toLower(util.name) CONTAINS 'test'
+            RETURN DISTINCT util.name AS name,
+                   labels(util)[0] AS type,
+                   util.filePath AS path,
+                   'Utility/Helper class' AS description,
+                   3 AS distance,
+                   'UTILITY' AS relationship
+            LIMIT 500
+        """
+        queries.append((query_utilities, "utilities"))
+
+        # Query 9: Entity classes used by services (for business rule extraction)
+        query_entities = f"""
+            MATCH (start)-[*1..4]->(entity)
+            WHERE ({entry_filter})
+              AND entity:JavaClass
+              AND (
+                toLower(entity.name) CONTAINS 'entity'
+                OR toLower(entity.name) CONTAINS 'model'
+                OR toLower(entity.name) CONTAINS 'dto'
+                OR toLower(entity.name) CONTAINS 'vo'
+              )
+              AND NOT toLower(entity.name) CONTAINS 'test'
+              AND NOT toLower(entity.name) CONTAINS 'builder'
+            RETURN DISTINCT entity.name AS name,
+                   labels(entity)[0] AS type,
+                   entity.filePath AS path,
+                   'Entity/Model class' AS description,
+                   3 AS distance,
+                   'ENTITY' AS relationship
+            LIMIT 500
+        """
+        queries.append((query_entities, "entities"))
 
         return queries
 
@@ -663,6 +1151,341 @@ class EnhancedContextRetriever:
             logger.warning(f"{LOG_PREFIX} [ENTITIES] Query failed: {e}")
 
         return entities
+
+    # =========================================================================
+    # Phase 3: Shared Component Detection
+    # =========================================================================
+
+    async def get_shared_components(
+        self,
+        feature_components: list[str],
+        max_components: int = 30,
+    ) -> list[dict]:
+        """
+        Find shared utilities and helpers used by feature components.
+
+        This extracts:
+        - Utility classes (Utils, Helper, Converter, Formatter)
+        - Shared validators
+        - Base/Abstract classes
+        - Cross-cutting concerns
+
+        Args:
+            feature_components: List of component names from the feature
+            max_components: Maximum shared components to return
+
+        Returns:
+            List of shared component details
+        """
+        logger.info(f"{LOG_PREFIX} [SHARED] Finding shared components for {len(feature_components)} feature components")
+
+        if not feature_components:
+            return []
+
+        # Build component filter
+        component_filter = " OR ".join([f"fc.name = '{c}'" for c in feature_components[:10]])
+
+        shared_query = f"""
+            // Start from feature's components
+            MATCH (fc:JavaClass)
+            WHERE {component_filter}
+
+            // Find shared components they use (direct and 2-hop)
+            MATCH (fc)-[:USES|CALLS|JAVA_IMPORTS|DEPENDS_ON*1..2]->(shared)
+            WHERE (shared:JavaClass OR shared:SpringService OR shared:SharedComponent)
+              AND (
+                toLower(shared.name) CONTAINS 'util'
+                OR toLower(shared.name) CONTAINS 'helper'
+                OR toLower(shared.name) CONTAINS 'converter'
+                OR toLower(shared.name) CONTAINS 'formatter'
+                OR toLower(shared.name) CONTAINS 'constant'
+                OR toLower(shared.name) CONTAINS 'common'
+                OR shared.name STARTS WITH 'Base'
+                OR shared.name STARTS WITH 'Abstract'
+                OR toLower(shared.name) CONTAINS 'builder'
+                OR toLower(shared.name) CONTAINS 'factory'
+              )
+              AND NOT toLower(shared.name) CONTAINS 'test'
+
+            // Count usage across features
+            WITH shared, count(DISTINCT fc) AS usageCount
+
+            RETURN shared.name AS name,
+                   labels(shared)[0] AS type,
+                   shared.filePath AS path,
+                   CASE
+                     WHEN toLower(shared.name) CONTAINS 'util' THEN 'utility'
+                     WHEN toLower(shared.name) CONTAINS 'helper' THEN 'helper'
+                     WHEN toLower(shared.name) CONTAINS 'validator' THEN 'validator'
+                     WHEN toLower(shared.name) CONTAINS 'converter' THEN 'converter'
+                     WHEN toLower(shared.name) CONTAINS 'formatter' THEN 'formatter'
+                     WHEN toLower(shared.name) CONTAINS 'constant' THEN 'constants'
+                     WHEN shared.name STARTS WITH 'Base' THEN 'base'
+                     WHEN shared.name STARTS WITH 'Abstract' THEN 'abstract'
+                     ELSE 'utility'
+                   END AS componentType,
+                   usageCount
+            ORDER BY usageCount DESC, shared.name
+            LIMIT {max_components}
+        """
+
+        shared_components = []
+        try:
+            result = await self.neo4j.query_code_structure(shared_query)
+            raw_components = result.get("nodes", [])
+            logger.info(f"{LOG_PREFIX} [SHARED] Found {len(raw_components)} shared components")
+
+            for comp in raw_components:
+                shared_components.append({
+                    "name": comp.get("name", ""),
+                    "type": comp.get("type", "JavaClass"),
+                    "path": comp.get("path", ""),
+                    "componentType": comp.get("componentType", "utility"),
+                    "usageCount": comp.get("usageCount", 1),
+                    "description": f"Shared {comp.get('componentType', 'utility')} class",
+                })
+                logger.debug(f"{LOG_PREFIX} [SHARED]   + {comp.get('name')} ({comp.get('componentType')})")
+
+        except Exception as e:
+            logger.warning(f"{LOG_PREFIX} [SHARED] Query failed: {e}")
+
+        return shared_components
+
+    # =========================================================================
+    # Phase 4: Business Rule Enrichment
+    # =========================================================================
+
+    async def get_enriched_business_rules(
+        self,
+        entry_points: list[str],
+        feature_context: dict,
+        max_rules: int = 50,
+    ) -> list[dict]:
+        """
+        Get business rules enriched with feature context.
+
+        This extracts:
+        - Validation constraints (annotations)
+        - Guard clauses (preconditions)
+        - Business logic conditions
+        - Error messages
+
+        Args:
+            entry_points: Entry point class names
+            feature_context: Context dict with menuItem, screen, action
+            max_rules: Maximum rules to return
+
+        Returns:
+            List of enriched business rules
+        """
+        logger.info(f"{LOG_PREFIX} [RULES] Extracting business rules for {len(entry_points)} entry points")
+
+        if not entry_points:
+            return []
+
+        # Build entry point filter
+        entry_filter = " OR ".join([f"toLower(start.name) = '{ep.lower()}'" for ep in entry_points[:5]])
+
+        # Query for business rules connected to entry points
+        rules_query = f"""
+            // Find business rules from entry points
+            MATCH (start)-[*1..4]->(rule)
+            WHERE ({entry_filter})
+              AND (
+                rule:BusinessRule
+                OR rule:ValidationConstraint
+                OR rule:GuardClause
+                OR rule:ConditionalBusinessLogic
+              )
+
+            RETURN DISTINCT rule.name AS name,
+                   labels(rule)[0] AS ruleType,
+                   rule.filePath AS path,
+                   rule.condition AS condition,
+                   rule.errorMessage AS errorMessage,
+                   rule.targetName AS targetField,
+                   rule.severity AS severity,
+                   rule.confidence AS confidence,
+                   rule.ruleText AS ruleText
+            ORDER BY rule.confidence DESC
+            LIMIT {max_rules}
+        """
+
+        rules = []
+        try:
+            result = await self.neo4j.query_code_structure(rules_query)
+            raw_rules = result.get("nodes", [])
+            logger.info(f"{LOG_PREFIX} [RULES] Found {len(raw_rules)} business rules")
+
+            for rule in raw_rules:
+                # Enrich with feature context
+                enriched_rule = {
+                    "name": rule.get("name", ""),
+                    "ruleType": self._map_rule_type(rule.get("ruleType", "")),
+                    "path": rule.get("path", ""),
+                    "condition": rule.get("condition", ""),
+                    "ruleText": rule.get("ruleText", rule.get("condition", "")),
+                    "errorMessage": rule.get("errorMessage"),
+                    "targetField": rule.get("targetField"),
+                    "severity": rule.get("severity", "error"),
+                    "confidence": rule.get("confidence", 0.8),
+                    "featureContext": {
+                        "menuItem": feature_context.get("menuItem"),
+                        "screen": feature_context.get("screen"),
+                        "action": feature_context.get("action"),
+                    },
+                    "triggeredBy": self._infer_triggers(feature_context.get("action", "")),
+                }
+                rules.append(enriched_rule)
+                logger.debug(f"{LOG_PREFIX} [RULES]   + {rule.get('name')} ({rule.get('ruleType')})")
+
+        except Exception as e:
+            logger.warning(f"{LOG_PREFIX} [RULES] Query failed: {e}")
+
+        # Also get entity validation annotations
+        entity_validations = await self._get_entity_validations(entry_points)
+        rules.extend(entity_validations)
+
+        return rules
+
+    async def _get_entity_validations(
+        self,
+        entry_points: list[str],
+        max_validations: int = 30,
+    ) -> list[dict]:
+        """
+        Extract validation annotations from entities used by entry points.
+        """
+        if not entry_points:
+            return []
+
+        entry_filter = " OR ".join([f"toLower(start.name) = '{ep.lower()}'" for ep in entry_points[:5]])
+
+        validation_query = f"""
+            // Find entities used by entry points
+            MATCH (start)-[*1..4]->(entity:JavaClass)
+            WHERE ({entry_filter})
+              AND (
+                toLower(entity.name) CONTAINS 'entity'
+                OR toLower(entity.name) CONTAINS 'model'
+                OR toLower(entity.name) CONTAINS 'dto'
+              )
+              AND NOT toLower(entity.name) CONTAINS 'test'
+
+            // Get fields with validation annotations
+            OPTIONAL MATCH (entity)-[:HAS_FIELD]->(field:JavaField)
+            WHERE field.annotations IS NOT NULL
+              AND (
+                field.annotations CONTAINS '@NotNull'
+                OR field.annotations CONTAINS '@NotEmpty'
+                OR field.annotations CONTAINS '@Size'
+                OR field.annotations CONTAINS '@Min'
+                OR field.annotations CONTAINS '@Max'
+                OR field.annotations CONTAINS '@Pattern'
+                OR field.annotations CONTAINS '@Email'
+                OR field.annotations CONTAINS '@Valid'
+              )
+
+            RETURN entity.name AS entityName,
+                   field.name AS fieldName,
+                   field.fieldType AS fieldType,
+                   field.annotations AS annotations
+            LIMIT {max_validations}
+        """
+
+        validations = []
+        try:
+            result = await self.neo4j.query_code_structure(validation_query)
+            raw_validations = result.get("nodes", [])
+
+            for val in raw_validations:
+                annotations = val.get("annotations", "")
+                if not annotations:
+                    continue
+
+                # Parse validation annotations
+                parsed_rules = self._parse_validation_annotations(
+                    annotations,
+                    val.get("entityName", ""),
+                    val.get("fieldName", ""),
+                    val.get("fieldType", "")
+                )
+                validations.extend(parsed_rules)
+
+            logger.info(f"{LOG_PREFIX} [RULES] Found {len(validations)} entity validations")
+
+        except Exception as e:
+            logger.warning(f"{LOG_PREFIX} [RULES] Entity validation query failed: {e}")
+
+        return validations
+
+    def _parse_validation_annotations(
+        self,
+        annotations: str,
+        entity_name: str,
+        field_name: str,
+        field_type: str,
+    ) -> list[dict]:
+        """Parse validation annotations into rule dictionaries."""
+        rules = []
+
+        validation_patterns = [
+            (r"@NotNull", "required", f"{field_name} is required"),
+            (r"@NotEmpty", "required", f"{field_name} cannot be empty"),
+            (r"@NotBlank", "required", f"{field_name} cannot be blank"),
+            (r"@Size\s*\([^)]+\)", "length", f"{field_name} must meet size constraints"),
+            (r"@Min\s*\([^)]+\)", "range", f"{field_name} minimum value constraint"),
+            (r"@Max\s*\([^)]+\)", "range", f"{field_name} maximum value constraint"),
+            (r"@Pattern\s*\([^)]+\)", "format", f"{field_name} must match pattern"),
+            (r"@Email", "format", f"{field_name} must be a valid email"),
+            (r"@Valid", "nested", f"{field_name} nested validation"),
+        ]
+
+        import re
+        for pattern, rule_type, error_msg in validation_patterns:
+            if re.search(pattern, annotations):
+                rules.append({
+                    "name": f"{entity_name}.{field_name}.{rule_type}",
+                    "ruleType": "validation",
+                    "path": "",
+                    "condition": f"@{rule_type.title()} on {field_name}",
+                    "ruleText": error_msg,
+                    "errorMessage": error_msg,
+                    "targetField": f"{entity_name}.{field_name}",
+                    "severity": "error",
+                    "confidence": 1.0,
+                    "featureContext": {},
+                    "triggeredBy": ["save", "update"],
+                })
+
+        return rules
+
+    def _map_rule_type(self, rule_type: str) -> str:
+        """Map Neo4j rule type label to standard type."""
+        mapping = {
+            "ValidationConstraint": "validation",
+            "GuardClause": "guard",
+            "ConditionalBusinessLogic": "condition",
+            "BusinessRule": "business",
+            "TestAssertion": "assertion",
+        }
+        return mapping.get(rule_type, "validation")
+
+    def _infer_triggers(self, action: str) -> list[str]:
+        """Infer what triggers a rule based on action name."""
+        action_lower = action.lower() if action else ""
+        triggers = []
+
+        if "save" in action_lower or "create" in action_lower or "add" in action_lower:
+            triggers.extend(["save", "create"])
+        if "update" in action_lower or "edit" in action_lower or "modify" in action_lower:
+            triggers.append("update")
+        if "delete" in action_lower or "remove" in action_lower:
+            triggers.append("delete")
+        if "validate" in action_lower or "check" in action_lower:
+            triggers.append("validate")
+
+        return triggers if triggers else ["save", "update"]
 
     async def get_webflow_details(
         self,
@@ -798,7 +1621,7 @@ class EnhancedContextRetriever:
                      ELSE 'entity'
                    END AS layer
             ORDER BY layer, n.name
-            LIMIT 100
+            LIMIT 500
         """
 
         try:

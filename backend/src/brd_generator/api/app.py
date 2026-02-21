@@ -17,8 +17,10 @@ from .analysis_callback_routes import router as callback_router
 from .wiki_routes import router as wiki_router
 from .context_routes import router as context_router
 from .flow_routes import router as flow_router, set_flow_service
+from .blueprint_routes import router as blueprint_router
 from ..core.generator import BRDGenerator
 from ..core.feature_flow import FeatureFlowService
+from ..services.blueprint_service import BlueprintService, set_blueprint_service
 from ..database.config import init_db, close_db
 from ..services.repository_service import RepositoryService
 from ..utils.logger import get_logger, setup_logging
@@ -123,6 +125,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     set_flow_service(flow_service)
     logger.info("Feature Flow service initialized for end-to-end traceability")
 
+    # Initialize Blueprint Service for Business Logic Blueprint generation
+    # Uses same MCP clients as BRD generator: Neo4j for metadata, Copilot for LLM generation
+    blueprint_service = BlueprintService(
+        neo4j_client=generator.neo4j_client,
+        llm_session=generator._copilot_session,
+    )
+    set_blueprint_service(blueprint_service)
+    if generator._copilot_session:
+        logger.info("Blueprint service initialized with LLM support for rich documentation")
+    else:
+        logger.info("Blueprint service initialized with template fallback (no LLM)")
+
     logger.info("BRD Generator API started successfully")
 
     yield
@@ -172,6 +186,7 @@ def create_app() -> FastAPI:
     app.include_router(wiki_router, prefix="/api/v1")
     app.include_router(context_router, prefix="/api/v1")
     app.include_router(flow_router, prefix="/api/v1")
+    app.include_router(blueprint_router, prefix="/api/v1")
 
     # Root endpoint
     @app.get("/", tags=["Root"])
@@ -190,6 +205,9 @@ def create_app() -> FastAPI:
                 "generate_epics": "/api/v1/epics/generate",
                 "generate_backlogs": "/api/v1/backlogs/generate",
                 "create_jira": "/api/v1/jira/create",
+                "blueprint_features": "/api/v1/blueprint/repositories/{repo_id}/features",
+                "generate_blueprint": "/api/v1/blueprint/repositories/{repo_id}/generate",
+                "blueprint_stream": "/api/v1/blueprint/repositories/{repo_id}/generate/stream",
             },
         }
 
