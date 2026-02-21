@@ -626,6 +626,7 @@ export interface JSPPageNode extends AstNode {
         hasScriptlets: boolean;
         encoding?: string;
         contentType?: string;
+        springSelectOptions?: Record<string, { options: SelectOption[]; dataSource?: DataSourceInfo }>;
     };
 }
 
