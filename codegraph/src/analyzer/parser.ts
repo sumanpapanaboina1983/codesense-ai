@@ -32,6 +32,7 @@ import { ParserError } from '../utils/errors.js';
 import config from '../config/index.js';
 import { generateEntityId, generateInstanceId } from './parser-utils.js';
 import ts from 'typescript';
+import pLimit from 'p-limit';
 
 const logger = createContextLogger('Parser');
 
@@ -99,7 +100,10 @@ export class Parser {
      */
     async parseFiles(files: FileInfo[], context?: AnalysisContext): Promise<void> {
         this.analysisContext = context; // Store context for use in other methods
-        logger.info(`Starting Pass 1 processing for ${files.length} files...${context ? ` (Repository: ${context.repositoryName})` : ''}`);
+        logger.info(`Starting Pass 1 processing for ${files.length} files (concurrency: ${config.parseConcurrency})...${context ? ` (Repository: ${context.repositoryName})` : ''}`);
+
+        // Create concurrency limiter to prevent OOM when parsing many files
+        const limit = pLimit(config.parseConcurrency);
         const parsePromises: Promise<string | null>[] = [];
         // Store normalized paths of all files passed to this specific run
         const targetFilePaths = new Set(files.map(f => path.resolve(f.path).replace(/\\/g, '/')));
@@ -111,25 +115,25 @@ export class Parser {
             try {
                 switch (file.extension) {
                     case '.py':
-                        parsePromise = this.pythonParser.parseFile(file);
+                        parsePromise = limit(() => this.pythonParser.parseFile(file));
                         break;
                     case '.c':
                     case '.cpp':
                     case '.h':
                     case '.hpp':
-                        parsePromise = this.cppParser.parseFile(file);
+                        parsePromise = limit(() => this.cppParser.parseFile(file));
                         break;
                     case '.java':
-                        parsePromise = this.enhancedJavaParser.parseFile(file);
+                        parsePromise = limit(() => this.enhancedJavaParser.parseFile(file));
                         break;
                     case '.go':
-                        parsePromise = this.goParser.parseFile(file);
+                        parsePromise = limit(() => this.goParser.parseFile(file));
                         break;
                     case '.cs':
-                        parsePromise = this.csharpParser.parseFile(file);
+                        parsePromise = limit(() => this.csharpParser.parseFile(file));
                         break;
                     // case '.sql': // Temporarily disabled
-                    //     parsePromise = this.sqlParser.parseFile(file);
+                    //     parsePromise = limit(() => this.sqlParser.parseFile(file));
                     //     break;
                     case '.ts':
                     case '.tsx':
@@ -144,11 +148,11 @@ export class Parser {
                         break;
                     case '.jsp':
                     case '.jspx':
-                        parsePromise = this.jspParser.parseFile(file);
+                        parsePromise = limit(() => this.jspParser.parseFile(file));
                         break;
                     case '.properties':
                         // Parse resource bundle files for error messages and i18n
-                        parsePromise = this.resourceBundleParser.parseFile(file);
+                        parsePromise = limit(() => this.resourceBundleParser.parseFile(file));
                         break;
                     case '.xml':
                         // Check if it's a menu config file first
@@ -157,10 +161,10 @@ export class Parser {
                             if (context?.repositoryId) {
                                 this.menuParser.setRepositoryId(context.repositoryId);
                             }
-                            parsePromise = this.menuParser.parseFile(file);
+                            parsePromise = limit(() => this.menuParser.parseFile(file));
                         } else if (this.isWebFlowFile(file.path)) {
                             // Check if it's a Spring Web Flow file
-                            parsePromise = this.webFlowParser.parseFile(file);
+                            parsePromise = limit(() => this.webFlowParser.parseFile(file));
                         } else {
                             parsePromise = Promise.resolve(null);
                         }

@@ -8,6 +8,28 @@ import { Neo4jError } from '../utils/errors.js';
 const logger = createContextLogger('StorageManager');
 
 /**
+ * Callback invoked after each batch is successfully committed to Neo4j.
+ * Use this for checkpointing to track progress.
+ */
+export interface BatchCompleteCallback {
+    /**
+     * Called after a batch of nodes is committed
+     * @param batchIndex - The index of the batch (0-based)
+     * @param filesInBatch - Unique file paths of nodes in this batch
+     * @param nodesInBatch - Number of nodes in this batch
+     */
+    onNodeBatchComplete?: (batchIndex: number, filesInBatch: string[], nodesInBatch: number) => Promise<void>;
+
+    /**
+     * Called after a batch of relationships is committed
+     * @param batchIndex - The index of the batch (0-based)
+     * @param relationshipType - The type of relationships in this batch
+     * @param count - Number of relationships in this batch
+     */
+    onRelationshipBatchComplete?: (batchIndex: number, relationshipType: string, count: number) => Promise<void>;
+}
+
+/**
  * Result of a file data deletion operation.
  */
 export interface FileCleanupResult {
@@ -50,12 +72,18 @@ export class StorageManager {
      * Saves an array of AstNode objects to Neo4j in batches using MERGE.
      * Assumes the input 'nodes' array has already been deduplicated by entityId by the caller.
      * Uses a simple UNWIND + MERGE + SET Cypher query.
+     *
      * @param nodes - The array of unique AstNode objects to save.
+     * @param callbacks - Optional callbacks for progress tracking and checkpointing.
+     * @returns Object containing batch statistics for checkpoint tracking.
      */
-    async saveNodesBatch(nodes: AstNode[]): Promise<void> {
+    async saveNodesBatch(
+        nodes: AstNode[],
+        callbacks?: BatchCompleteCallback
+    ): Promise<{ totalBatches: number; nodesStored: number }> {
         if (nodes.length === 0) {
             logger.debug('No nodes provided to saveNodesBatch.');
-            return;
+            return { totalBatches: 0, nodesStored: 0 };
         }
 
         // Assume input `nodes` are already deduplicated by the caller (Parser.collectResults)
@@ -69,13 +97,16 @@ export class StorageManager {
         logger.info(`Node kinds: ${JSON.stringify(kindCounts)}`);
 
         const { removeClause, setLabelClauses } = generateNodeLabelCypher();
+        const totalBatches = Math.ceil(nodes.length / this.batchSize);
+        let nodesStored = 0;
 
         for (let i = 0; i < nodes.length; i += this.batchSize) {
-             const batch = nodes.slice(i, i + this.batchSize);
+            const batch = nodes.slice(i, i + this.batchSize);
+            const batchIndex = Math.floor(i / this.batchSize);
 
-             if (batch.length === 0) {
-                 continue;
-             }
+            if (batch.length === 0) {
+                continue;
+            }
 
             const preparedBatch = batch.map(node => ({
                 entityId: node.entityId,
@@ -94,63 +125,104 @@ export class StorageManager {
             `;
 
             try {
+                // COMMIT POINT: Each batch is committed as a separate transaction
                 await this.neo4jClient.runTransaction(cypher, { batch: preparedBatch }, 'WRITE', 'StorageManager-Nodes');
-                logger.debug(`Saved batch of ${preparedBatch.length} nodes (Total processed: ${Math.min(i + preparedBatch.length, nodes.length)}/${nodes.length})`);
+                nodesStored += preparedBatch.length;
+                logger.debug(`Saved batch ${batchIndex + 1}/${totalBatches}: ${preparedBatch.length} nodes (Total: ${nodesStored}/${nodes.length})`);
+
+                // CHECKPOINT CALLBACK: Invoke after successful commit
+                if (callbacks?.onNodeBatchComplete) {
+                    // Extract unique file paths from this batch for checkpoint tracking
+                    const filesInBatch = [...new Set(batch.map(n => n.filePath).filter(Boolean))];
+                    try {
+                        await callbacks.onNodeBatchComplete(batchIndex, filesInBatch, preparedBatch.length);
+                    } catch (callbackError: any) {
+                        // Log but don't fail - checkpoint errors shouldn't stop analysis
+                        logger.warn(`Checkpoint callback failed (non-fatal): ${callbackError.message}`);
+                    }
+                }
+
             } catch (error: any) {
                 logger.error(`Failed to save node batch (index ${i})`, { error: error.message, code: error.code });
-                 logger.error(`Failing node batch data (first 5): ${JSON.stringify(preparedBatch.slice(0, 5), null, 2)}`);
+                logger.error(`Failing node batch data (first 5): ${JSON.stringify(preparedBatch.slice(0, 5), null, 2)}`);
                 throw new Neo4jError(`Failed to save node batch: ${error.message}`, { originalError: error, code: error.code });
             }
         }
-        logger.info(`Finished saving ${nodes.length} unique nodes.`);
+
+        logger.info(`Finished saving ${nodesStored} unique nodes in ${totalBatches} batches.`);
+        return { totalBatches, nodesStored };
     }
 
     /**
      * Saves an array of RelationshipInfo objects to Neo4j in batches using MERGE.
      * Assumes the input 'relationships' array has already been deduplicated by entityId.
+     *
      * @param relationshipType - The specific type of relationships in this batch.
      * @param relationships - The array of unique RelationshipInfo objects to save.
+     * @param callbacks - Optional callbacks for progress tracking and checkpointing.
+     * @returns Object containing batch statistics for checkpoint tracking.
      */
-    async saveRelationshipsBatch(relationshipType: string, relationships: RelationshipInfo[]): Promise<void> {
+    async saveRelationshipsBatch(
+        relationshipType: string,
+        relationships: RelationshipInfo[],
+        callbacks?: BatchCompleteCallback
+    ): Promise<{ totalBatches: number; relationshipsStored: number }> {
         if (relationships.length === 0) {
             logger.debug(`No relationships of type ${relationshipType} provided to saveRelationshipsBatch.`);
-            return;
+            return { totalBatches: 0, relationshipsStored: 0 };
         }
 
         // Assume input `relationships` are already deduplicated by the caller (Parser.collectResults)
         logger.info(`Saving ${relationships.length} unique relationships of type ${relationshipType} to database...`);
 
+        const totalBatches = Math.ceil(relationships.length / this.batchSize);
+        let relationshipsStored = 0;
+
         for (let i = 0; i < relationships.length; i += this.batchSize) {
             const batch = relationships.slice(i, i + this.batchSize);
+            const batchIndex = Math.floor(i / this.batchSize);
 
-             if (batch.length === 0) {
-                 continue;
-             }
+            if (batch.length === 0) {
+                continue;
+            }
 
-             const preparedBatch = batch.map(rel => this.prepareRelationshipProperties(rel));
+            const preparedBatch = batch.map(rel => this.prepareRelationshipProperties(rel));
 
-            // Use MATCH for nodes, assuming they were created in saveNodesBatch
+            // Use MERGE for nodes, assuming they were created in saveNodesBatch
             const cypher = `
                 UNWIND $batch AS relData
-                 MERGE (source { entityId: relData.sourceId })
- // Use MERGE instead of MATCH
-                 MERGE (target { entityId: relData.targetId })
- // Use MERGE instead of MATCH
-                 MERGE (source)-[r:\`${relationshipType}\` { entityId: relData.entityId }]->(target) // Merge relationship on entityId
+                MERGE (source { entityId: relData.sourceId })
+                MERGE (target { entityId: relData.targetId })
+                MERGE (source)-[r:\`${relationshipType}\` { entityId: relData.entityId }]->(target)
                 ON CREATE SET r = relData.properties, r.type = relData.type, r.createdAt = relData.createdAt, r.weight = relData.weight
                 ON MATCH SET r += relData.properties
             `;
 
             try {
+                // COMMIT POINT: Each batch is committed as a separate transaction
                 await this.neo4jClient.runTransaction(cypher, { batch: preparedBatch }, 'WRITE', 'StorageManager-Rels');
-                logger.debug(`Saved batch of ${preparedBatch.length} relationships (Total processed: ${Math.min(i + preparedBatch.length, relationships.length)}/${relationships.length})`);
+                relationshipsStored += preparedBatch.length;
+                logger.debug(`Saved batch ${batchIndex + 1}/${totalBatches}: ${preparedBatch.length} ${relationshipType} relationships (Total: ${relationshipsStored}/${relationships.length})`);
+
+                // CHECKPOINT CALLBACK: Invoke after successful commit
+                if (callbacks?.onRelationshipBatchComplete) {
+                    try {
+                        await callbacks.onRelationshipBatchComplete(batchIndex, relationshipType, preparedBatch.length);
+                    } catch (callbackError: any) {
+                        // Log but don't fail - checkpoint errors shouldn't stop analysis
+                        logger.warn(`Checkpoint callback failed (non-fatal): ${callbackError.message}`);
+                    }
+                }
+
             } catch (error: any) {
                 logger.error(`Failed to save relationship batch (index ${i}, type: ${relationshipType})`, { error: error.message, code: error.code });
-                 logger.error(`Failing relationship batch data (first 5): ${JSON.stringify(preparedBatch.slice(0, 5), null, 2)}`);
-                throw new Neo4jError(`Failed to save relationship batch (type ${relationshipType}): ${error.message}`, { originalError: error, code: error.code, context: { batch: preparedBatch.slice(0,5) } });
+                logger.error(`Failing relationship batch data (first 5): ${JSON.stringify(preparedBatch.slice(0, 5), null, 2)}`);
+                throw new Neo4jError(`Failed to save relationship batch (type ${relationshipType}): ${error.message}`, { originalError: error, code: error.code, context: { batch: preparedBatch.slice(0, 5) } });
             }
         }
-        logger.info(`Finished saving ${relationships.length} unique relationships of type ${relationshipType}.`);
+
+        logger.info(`Finished saving ${relationshipsStored} unique relationships of type ${relationshipType} in ${totalBatches} batches.`);
+        return { totalBatches, relationshipsStored };
     }
 
     /**

@@ -3,6 +3,13 @@
  *
  * Manages incremental indexing by tracking index state and determining
  * which files need to be processed, skipped, or cleaned up.
+ *
+ * Supports two modes:
+ * 1. Git-based: Uses git diff for fast change detection (for git repos)
+ * 2. Hash-based: Compares file content hashes (for non-git repos or as fallback)
+ *
+ * Both modes use content hashes as the source of truth to ensure
+ * only truly changed files are reprocessed.
  */
 import { Neo4jClient } from '../database/neo4j-client.js';
 import { FileInfo } from '../scanner/file-scanner.js';
@@ -87,6 +94,18 @@ export interface CleanupResult {
  * that require a full reindex.
  */
 const CURRENT_INDEX_VERSION = 1;
+
+/**
+ * Result of filtering files by already-processed status
+ */
+export interface FilteredFilesResult {
+    /** Files that still need processing */
+    filesToProcess: FileInfo[];
+    /** Files that were already processed (from checkpoint) */
+    alreadyProcessed: string[];
+    /** Number of files skipped */
+    skippedCount: number;
+}
 
 /**
  * Manages incremental indexing state and operations.
@@ -529,5 +548,250 @@ export class IncrementalIndexManager {
         } catch (error: any) {
             logger.warn(`Failed to delete index state: ${error.message}`);
         }
+    }
+
+    /**
+     * Filters out files that have already been processed (from a checkpoint).
+     * Used when resuming from a crash.
+     *
+     * @param allFiles - All files to potentially process
+     * @param processedFilePaths - File paths already processed (from checkpoint)
+     * @returns Filtered files result
+     */
+    filterAlreadyProcessedFiles(
+        allFiles: FileInfo[],
+        processedFilePaths: string[]
+    ): FilteredFilesResult {
+        if (processedFilePaths.length === 0) {
+            return {
+                filesToProcess: allFiles,
+                alreadyProcessed: [],
+                skippedCount: 0,
+            };
+        }
+
+        const processedSet = new Set(processedFilePaths);
+        const filesToProcess: FileInfo[] = [];
+        const alreadyProcessed: string[] = [];
+
+        for (const file of allFiles) {
+            if (processedSet.has(file.path)) {
+                alreadyProcessed.push(file.path);
+            } else {
+                filesToProcess.push(file);
+            }
+        }
+
+        logger.info(`Resume filter: ${alreadyProcessed.length} already processed, ${filesToProcess.length} remaining`);
+
+        return {
+            filesToProcess,
+            alreadyProcessed,
+            skippedCount: alreadyProcessed.length,
+        };
+    }
+
+    /**
+     * Verifies which files have actually changed by comparing content hashes.
+     * This is the source of truth for both git and non-git workflows.
+     *
+     * Even if git says a file changed, if the hash is the same, we skip it.
+     * This handles cases like:
+     * - Whitespace-only changes that don't affect parsing
+     * - Files that were reverted
+     * - Git metadata changes without content changes
+     *
+     * @param files - Files to verify
+     * @param existingHashes - Previously stored file hashes
+     * @returns Object with truly changed and unchanged files
+     */
+    verifyChangesWithHashes(
+        files: FileInfo[],
+        existingHashes: Record<string, string>
+    ): { changed: FileInfo[]; unchanged: FileInfo[] } {
+        const changed: FileInfo[] = [];
+        const unchanged: FileInfo[] = [];
+
+        for (const file of files) {
+            const storedHash = existingHashes[file.path];
+            const currentHash = file.contentHash;
+
+            if (!storedHash) {
+                // New file - definitely changed
+                changed.push(file);
+            } else if (!currentHash) {
+                // No hash computed - need to process to be safe
+                changed.push(file);
+            } else if (currentHash !== storedHash) {
+                // Hash differs - content changed
+                changed.push(file);
+            } else {
+                // Same hash - no real change
+                unchanged.push(file);
+            }
+        }
+
+        if (unchanged.length > 0) {
+            logger.info(`Hash verification: ${unchanged.length} files unchanged despite being flagged, ${changed.length} truly changed`);
+        }
+
+        return { changed, unchanged };
+    }
+
+    /**
+     * Partially updates index state with newly processed files.
+     * Used for incremental checkpoint saves during processing.
+     *
+     * @param repositoryId - Repository ID
+     * @param processedFiles - Files that have been successfully stored
+     * @param commitSha - Current commit SHA (if git repo)
+     */
+    async partialSaveIndexState(
+        repositoryId: string,
+        processedFiles: FileInfo[],
+        commitSha: string | null
+    ): Promise<void> {
+        if (processedFiles.length === 0) {
+            return;
+        }
+
+        const now = new Date().toISOString();
+
+        // Build file hashes map for processed files
+        const newHashes: Record<string, string> = {};
+        for (const file of processedFiles) {
+            if (file.contentHash) {
+                newHashes[file.path] = file.contentHash;
+            }
+        }
+
+        // Load existing state
+        const existingState = await this.loadIndexState(repositoryId);
+
+        if (existingState) {
+            // Merge with existing hashes
+            const mergedHashes = { ...existingState.fileHashes, ...newHashes };
+
+            const cypher = `
+                MATCH (s:IndexState {repositoryId: $repositoryId})
+                SET s.fileHashes = $fileHashes,
+                    s.lastIndexedAt = $lastIndexedAt,
+                    s.totalFilesIndexed = $totalFilesIndexed
+                    ${commitSha ? ', s.lastCommitSha = $lastCommitSha' : ''}
+            `;
+
+            await this.neo4jClient.runTransaction(
+                cypher,
+                {
+                    repositoryId,
+                    fileHashes: JSON.stringify(mergedHashes),
+                    lastIndexedAt: now,
+                    totalFilesIndexed: Object.keys(mergedHashes).length,
+                    lastCommitSha: commitSha,
+                },
+                'WRITE',
+                'IncrementalIndexManager-PartialSave'
+            );
+
+            logger.debug(`Partial index state save: added ${processedFiles.length} files (total: ${Object.keys(mergedHashes).length})`);
+
+        } else {
+            // Create new state with just these files
+            const entityId = generateEntityId('indexstate', repositoryId);
+
+            const cypher = `
+                CREATE (s:IndexState {
+                    entityId: $entityId,
+                    repositoryId: $repositoryId,
+                    lastCommitSha: $lastCommitSha,
+                    lastIndexedAt: $lastIndexedAt,
+                    fileHashes: $fileHashes,
+                    totalFilesIndexed: $totalFilesIndexed,
+                    indexVersion: $indexVersion
+                })
+            `;
+
+            await this.neo4jClient.runTransaction(
+                cypher,
+                {
+                    entityId,
+                    repositoryId,
+                    lastCommitSha: commitSha,
+                    lastIndexedAt: now,
+                    fileHashes: JSON.stringify(newHashes),
+                    totalFilesIndexed: Object.keys(newHashes).length,
+                    indexVersion: CURRENT_INDEX_VERSION,
+                },
+                'WRITE',
+                'IncrementalIndexManager-PartialCreate'
+            );
+
+            logger.debug(`Created partial index state with ${processedFiles.length} files`);
+        }
+    }
+
+    /**
+     * Determines files to process with enhanced hash verification.
+     * Works for both git and non-git repositories.
+     *
+     * For git repos: Uses git diff first, then verifies with hash comparison
+     * For non-git repos: Uses hash comparison directly
+     *
+     * @param repoPath - Path to the repository
+     * @param repositoryId - Repository ID
+     * @param allFiles - All files discovered in scan (must have contentHash)
+     * @param forceFullReindex - Force full reindex
+     * @param isGitRepo - Whether this is a git repository
+     */
+    async determineFilesToProcessWithHashVerification(
+        repoPath: string,
+        repositoryId: string,
+        allFiles: FileInfo[],
+        forceFullReindex: boolean = false,
+        isGitRepo: boolean = false
+    ): Promise<IncrementalIndexResult> {
+        // Ensure all files have hashes for accurate comparison
+        const filesWithoutHash = allFiles.filter(f => !f.contentHash);
+        if (filesWithoutHash.length > 0) {
+            logger.warn(`${filesWithoutHash.length} files missing content hash - they will be processed`);
+        }
+
+        // Delegate to standard method first
+        const result = await this.determineFilesToProcess(
+            repoPath,
+            repositoryId,
+            allFiles,
+            forceFullReindex
+        );
+
+        // If full reindex, no need for hash verification
+        if (result.isFullReindex) {
+            return result;
+        }
+
+        // Load existing state for hash verification
+        const existingState = await this.loadIndexState(repositoryId);
+        if (!existingState) {
+            return result;
+        }
+
+        // Verify "changed" files using hash comparison
+        // This catches false positives from git diff (whitespace changes, etc.)
+        const { changed, unchanged } = this.verifyChangesWithHashes(
+            result.changedFiles,
+            existingState.fileHashes
+        );
+
+        if (unchanged.length > 0) {
+            logger.info(`Hash verification filtered out ${unchanged.length} false-positive changes`);
+        }
+
+        return {
+            changedFiles: changed,
+            deletedFiles: result.deletedFiles,
+            unchangedFiles: [...result.unchangedFiles, ...unchanged.map(f => f.path)],
+            isFullReindex: false,
+            reason: result.reason + (unchanged.length > 0 ? ` (${unchanged.length} filtered by hash check)` : ''),
+        };
     }
 }

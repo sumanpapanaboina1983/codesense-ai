@@ -28,6 +28,8 @@ interface Config {
   ignorePatterns: string[];
   /** Supported file extensions for parsing. */
   supportedExtensions: string[];
+  /** Maximum number of files to parse concurrently (controls memory usage). */
+  parseConcurrency: number;
 
   jspSpringConfig: {
     /** Paths to scan for JSP files */
@@ -51,6 +53,7 @@ const config: Config = {
   storageBatchSize: parseInt(process.env.STORAGE_BATCH_SIZE || '100', 10),
   tempDir: path.resolve(process.cwd(), process.env.TEMP_DIR || './analysis-data/temp'),
   pythonExecutable: process.env.PYTHON_EXECUTABLE || 'python3',
+  parseConcurrency: parseInt(process.env.PARSE_CONCURRENCY || '30', 10),
   ignorePatterns: [
     '**/node_modules/**',
     '**/.git/**',
@@ -125,6 +128,11 @@ const config: Config = {
 if (isNaN(config.storageBatchSize) || config.storageBatchSize <= 0) {
   console.warn(`Invalid STORAGE_BATCH_SIZE found, defaulting to 100. Value: ${process.env.STORAGE_BATCH_SIZE}`);
   config.storageBatchSize = 100;
+}
+
+if (isNaN(config.parseConcurrency) || config.parseConcurrency <= 0) {
+  console.warn(`Invalid PARSE_CONCURRENCY found, defaulting to 30. Value: ${process.env.PARSE_CONCURRENCY}`);
+  config.parseConcurrency = 30;
 }
 
 export default config;

@@ -16,8 +16,19 @@ services:
       - NEO4J_apoc_export_file_enabled=true
       - NEO4J_apoc_import_file_enabled=true
       - NEO4J_apoc_import_file_use__neo4j__config=true
-      - NEO4J_dbms_memory_heap_initial__size=512m
-      - NEO4J_dbms_memory_heap_max__size=2g
+      # Memory settings - increased for heavy indexing workloads
+      - NEO4J_server_memory_heap_initial__size=1g
+      - NEO4J_server_memory_heap_max__size=4g
+      - NEO4J_server_memory_pagecache_size=1g
+      # Transaction log settings - prevent corruption
+      - NEO4J_db_tx__log_rotation_retention__policy=2 days
+      - NEO4J_db_tx__log_rotation_size=256m
+      # Checkpoint settings - more frequent commits to prevent data loss
+      - NEO4J_db_checkpoint_interval_time=60s
+      - NEO4J_db_checkpoint_interval_tx=10000
+      # Connection pool settings
+      - NEO4J_server_bolt_connection__keep__alive__for__requests=ALL
+      - NEO4J_server_bolt_connection__keep__alive=30s
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
@@ -54,6 +65,10 @@ services:
       - PYTHON_EXECUTABLE=python3
       # Backend URL for callback reporting (internal Docker network)
       - BACKEND_CALLBACK_URL=http://backend:8000
+      # Increase Node.js heap size for large codebase analysis
+      - NODE_OPTIONS=--max-old-space-size=4096
+      # Limit concurrent file parsing to control memory usage (default: 30)
+      - PARSE_CONCURRENCY=30
     volumes:
       # Mount for analyzing local repositories (same path as backend's /codebase)
       - ./repos:/codebase:ro
@@ -66,10 +81,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
     networks:
       - codesense-ai-network
     restart: unless-stopped
