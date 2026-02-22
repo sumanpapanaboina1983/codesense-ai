@@ -1064,9 +1064,8 @@ export class WebFlowParser {
            // Infer screen type from naming patterns
            const screenType = this.inferScreenType(screenId, jsps);
 
-           // Check if maintenance mode
-           const isMaintenanceMode = screenId.toLowerCase().includes('maintenance') ||
-               title.toLowerCase().includes('maintenance');
+           // Extract screen mode info
+           const modeInfo = this.extractScreenMode(stateElement, screenId, parentScreenId, title, flowNode);
 
            // Build URL pattern
            const urlPattern = `${flowId}.html?pageSelect=${screenId}`;
@@ -1097,8 +1096,14 @@ export class WebFlowParser {
                    actionMethods,
                    transitionsTo,
                    parentScreenId,
-                   isMaintenanceMode,
+                   isMaintenanceMode: modeInfo.screenMode === 'maintenance',
                    urlPattern,
+                   // Enhanced screen mode properties
+                   screenMode: modeInfo.screenMode,
+                   modeSource: modeInfo.modeSource,
+                   supportedModes: modeInfo.supportedModes,
+                   modeVariableName: modeInfo.modeVariableName,
+                   defaultModeValue: modeInfo.defaultModeValue,
                },
            };
 
@@ -1247,6 +1252,145 @@ export class WebFlowParser {
        }
 
        return { actionClass, actionMethods: methods };
+   }
+
+   /**
+    * Extract screen mode information from multiple sources.
+    * Priority: 1. Flow variables, 2. On-entry actions, 3. Parent inheritance, 4. Naming patterns
+    */
+   private extractScreenMode(
+       stateElement: Element,
+       screenId: string,
+       parentScreenId: string | undefined,
+       title: string,
+       flowNode: WebFlowDefinitionNode
+   ): {
+       screenMode?: 'inquiry' | 'maintenance' | 'create' | 'edit' | 'view' | 'clone' | 'approve' | 'delete';
+       modeSource?: 'naming-pattern' | 'flow-variable' | 'on-entry-action' | 'parent-inheritance' | 'url-param';
+       supportedModes?: Array<'inquiry' | 'maintenance' | 'create' | 'edit' | 'view' | 'clone' | 'approve' | 'delete'>;
+       modeVariableName?: string;
+       defaultModeValue?: string;
+   } {
+       const result: ReturnType<typeof this.extractScreenMode> = {};
+       const supportedModes: Array<'inquiry' | 'maintenance' | 'create' | 'edit' | 'view' | 'clone' | 'approve' | 'delete'> = [];
+
+       // 1. Check flow variables for mode indicators
+       const flowVariables = flowNode.properties.flowVariables || [];
+       for (const variable of flowVariables) {
+           const varNameLower = variable.name.toLowerCase();
+           if (varNameLower.includes('mode') || varNameLower.includes('wizard') || varNameLower.includes('maintenance')) {
+               result.modeVariableName = variable.name;
+               result.modeSource = 'flow-variable';
+
+               // Try to infer mode from variable name
+               if (varNameLower.includes('maintenance')) {
+                   supportedModes.push('maintenance', 'inquiry');
+               } else if (varNameLower.includes('wizard')) {
+                   supportedModes.push('create', 'edit');
+               }
+           }
+       }
+
+       // 2. Check on-entry actions for mode-setting expressions
+       const onEntryElements = stateElement.getElementsByTagName('on-entry');
+       for (let i = 0; i < onEntryElements.length; i++) {
+           const onEntry = onEntryElements[i];
+           if (!onEntry) continue;
+
+           const setElements = onEntry.getElementsByTagName('set');
+           for (let j = 0; j < setElements.length; j++) {
+               const set = setElements[j];
+               if (!set) continue;
+
+               const name = set.getAttribute('name') || '';
+               const value = set.getAttribute('value') || '';
+               const nameLower = name.toLowerCase();
+               const valueLower = value.toLowerCase();
+
+               // Look for mode-related set expressions
+               if (nameLower.includes('mode') || nameLower.includes('wizard') || nameLower.includes('maintenance')) {
+                   result.modeVariableName = name.replace(/^flowScope\./, '').replace(/^viewScope\./, '');
+                   result.modeSource = 'on-entry-action';
+
+                   // Parse value for mode determination
+                   if (valueLower === 'true' || valueLower.includes('maintenance')) {
+                       result.screenMode = 'maintenance';
+                       supportedModes.push('maintenance');
+                   } else if (valueLower === 'false' || valueLower.includes('inquiry') || valueLower.includes('view')) {
+                       result.screenMode = 'inquiry';
+                       supportedModes.push('inquiry');
+                   }
+
+                   result.defaultModeValue = value.replace(/['"]/g, '');
+               }
+
+               // Check for isWizardMode
+               if (nameLower.includes('iswizardmode')) {
+                   result.modeVariableName = 'isWizardMode';
+                   if (valueLower === 'true') {
+                       supportedModes.push('create', 'edit');
+                   }
+               }
+           }
+       }
+
+       // 3. Check parent inheritance for mode
+       if (parentScreenId && !result.screenMode) {
+           result.modeSource = 'parent-inheritance';
+           const parentIdLower = parentScreenId.toLowerCase().replace(/^#/, '');
+
+           // If parent is inquiry, child is likely maintenance
+           if (parentIdLower.includes('inquiry')) {
+               result.screenMode = 'maintenance';
+               supportedModes.push('maintenance');
+               // Both modes are supported
+               supportedModes.push('inquiry');
+           }
+       }
+
+       // 4. Fallback to naming patterns
+       if (!result.screenMode) {
+           const idLower = screenId.toLowerCase();
+           const titleLower = title.toLowerCase();
+           const combined = idLower + ' ' + titleLower;
+
+           if (combined.includes('maintenance')) {
+               result.screenMode = 'maintenance';
+               result.modeSource = 'naming-pattern';
+               supportedModes.push('maintenance');
+           } else if (combined.includes('inquiry') || combined.includes('view')) {
+               result.screenMode = 'inquiry';
+               result.modeSource = 'naming-pattern';
+               supportedModes.push('inquiry');
+           } else if (combined.includes('wizard') || combined.includes('create') || combined.includes('new')) {
+               result.screenMode = 'create';
+               result.modeSource = 'naming-pattern';
+               supportedModes.push('create');
+           } else if (combined.includes('edit') || combined.includes('update') || combined.includes('modify')) {
+               result.screenMode = 'edit';
+               result.modeSource = 'naming-pattern';
+               supportedModes.push('edit');
+           } else if (combined.includes('clone') || combined.includes('copy')) {
+               result.screenMode = 'clone';
+               result.modeSource = 'naming-pattern';
+               supportedModes.push('clone');
+           } else if (combined.includes('approve') || combined.includes('approval')) {
+               result.screenMode = 'approve';
+               result.modeSource = 'naming-pattern';
+               supportedModes.push('approve');
+           } else if (combined.includes('delete') || combined.includes('remove')) {
+               result.screenMode = 'delete';
+               result.modeSource = 'naming-pattern';
+               supportedModes.push('delete');
+           }
+       }
+
+       // Deduplicate supported modes
+       if (supportedModes.length > 0) {
+           result.supportedModes = [...new Set(supportedModes)];
+       }
+
+       return result;
    }
 
    /**

@@ -2832,6 +2832,10 @@ export interface MenuItemNode extends AstNode {
         flowId: string;
         /** Extracted view-state ID from URL (e.g., "pointInfoMaintenance" from "?pageSelect=pointInfoMaintenance") */
         viewStateId?: string;
+        /** Screen mode determined from URL (e.g., "maintenance", "inquiry", "create", "edit") */
+        screenMode?: 'inquiry' | 'maintenance' | 'create' | 'edit' | 'view' | 'clone' | 'approve' | 'delete';
+        /** How the screen mode was determined */
+        modeSource?: 'url-param' | 'pageSelect-suffix';
         /** Required roles for accessing this menu item */
         requiredRoles: string[];
         /** Parent menu label for hierarchical navigation */
@@ -2897,6 +2901,26 @@ export interface ScreenNode extends AstNode {
         isMaintenanceMode: boolean;
         /** URL pattern to access this screen */
         urlPattern?: string;
+        /**
+         * Detected screen mode - what the screen does
+         * inquiry: Read-only view of data
+         * maintenance: Full CRUD operations
+         * create: New record creation only
+         * edit: Modify existing record only
+         * view: Read-only (same as inquiry)
+         * clone: Copy existing record
+         * approve: Approval workflow
+         * delete: Remove record
+         */
+        screenMode?: 'inquiry' | 'maintenance' | 'create' | 'edit' | 'view' | 'clone' | 'approve' | 'delete';
+        /** How the screen mode was determined */
+        modeSource?: 'naming-pattern' | 'flow-variable' | 'on-entry-action' | 'parent-inheritance' | 'url-param';
+        /** All modes this screen can support (e.g., inquiry can also be maintenance) */
+        supportedModes?: Array<'inquiry' | 'maintenance' | 'create' | 'edit' | 'view' | 'clone' | 'approve' | 'delete'>;
+        /** Flow variable that controls the mode (e.g., "maintenanceMode", "isWizardMode") */
+        modeVariableName?: string;
+        /** Default mode value if mode is controlled by variable */
+        defaultModeValue?: string;
     };
 }
 

@@ -8,14 +8,15 @@ const logger = createContextLogger('SchemaManager');
 export const NODE_LABELS = [
     'Repository', // Root node for multi-repository support
     'IndexState', // Tracks last indexed state per repository for incremental indexing
-    'File', 'Directory', 'Class', 'Interface', 'Function', 'Method',
+    'File', 'Directory', 'Class', 'Interface', 'Function', 'Method', 'TSFunction',
     'Variable', 'Parameter', 'TypeAlias', 'Import', 'Export',
     'Component', 'JSXElement', 'JSXAttribute',
     'TailwindClass',
     'PythonModule', 'PythonFunction', 'PythonClass', 'PythonMethod', 'PythonParameter', 'PythonVariable',
     'CFunction', 'CppClass', 'CppMethod', 'IncludeDirective',
     'MacroDefinition', // Added MacroDefinition
-    'JavaClass', 'JavaInterface', 'JavaMethod', 'JavaField', 'PackageDeclaration', 'ImportDeclaration',
+    'JavaClass', 'JavaInterface', 'JavaEnum', 'JavaMethod', 'JavaField', 'PackageDeclaration', 'ImportDeclaration',
+    'MethodInvocation', 'EnumValue',  // Method calls and enum constants
     'CSharpClass', 'CSharpInterface', 'CSharpStruct', 'CSharpMethod', 'Property', 'Field', 'NamespaceDeclaration', 'UsingDirective',
     'GoFunction', 'GoMethod', 'GoStruct', 'GoInterface', 'PackageClause', 'ImportSpec',
     // Added SQL labels
@@ -25,6 +26,9 @@ export const NODE_LABELS = [
     'JSPForm',
     'JSPInclude',
     'JSPTagLib',
+    'FormField',        // JSP form input fields
+    'FormFieldBinding', // Form field binding targets
+    'SQLStatement',     // SQL statements extracted from code
     'WebFlowDefinition',
     'FlowState',
     'FlowTransition',
@@ -88,6 +92,7 @@ export const RELATIONSHIP_TYPES = [
     'IMPORTS',       // File->File or File->Module (Placeholder)
     'EXPORTS',       // File->Variable/Function/Class/Interface/TypeAlias
     'CALLS',         // Function/Method->Function/Method
+    'INVOKES',       // Method->MethodInvocation (method call details)
     'EXTENDS',       // Class->Class, Interface->Interface
     'IMPLEMENTS',    // Class->Interface
     'HAS_METHOD',    // Class/Interface->Method
@@ -109,6 +114,12 @@ export const RELATIONSHIP_TYPES = [
     'DECLARES_PACKAGE',        // Java: File -> PackageDeclaration
     'JAVA_IMPORTS',            // Java: File -> ImportDeclaration (or Class/Package)
     'HAS_FIELD',               // Java/C#: Class/Interface/Struct -> Field
+    'DEFINES_CLASS',           // File -> Class (class definition)
+    'DEFINES_INTERFACE',       // File -> Interface (interface definition)
+    'DEFINES_ENUM',            // File -> JavaEnum (enum definition)
+    'BINDS_TO',                // FormField -> target (form binding)
+    'HAS_FIELD_BINDING',       // JSPPage -> FormField (form field bindings)
+    'EXECUTES_SQL',            // Method -> SqlStatement (SQL execution)
     'DECLARES_NAMESPACE',      // C#: File -> NamespaceDeclaration
     'USES_NAMESPACE',          // C#: File -> UsingDirective (or Namespace)
     'HAS_PROPERTY',            // C#: Class/Interface/Struct -> Property

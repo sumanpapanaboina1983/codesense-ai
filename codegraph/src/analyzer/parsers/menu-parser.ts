@@ -320,8 +320,8 @@ export class MenuParser {
         // Extract roles
         const requiredRoles = this.extractRoles(bean);
 
-        // Parse URL to extract flowId and viewStateId
-        const { flowId, viewStateId } = this.parseMenuUrl(url);
+        // Parse URL to extract flowId, viewStateId, and screen mode
+        const { flowId, viewStateId, screenMode, modeSource } = this.parseMenuUrl(url);
 
         // Create menu item node
         if (label && !isSeparator) {
@@ -342,6 +342,8 @@ export class MenuParser {
                     url,
                     flowId,
                     viewStateId,
+                    screenMode,
+                    modeSource,
                     requiredRoles,
                     parentMenu,
                     menuLevel: level,
@@ -507,33 +509,68 @@ export class MenuParser {
     }
 
     /**
-     * Parse a menu URL to extract flow ID and view state ID.
+     * Parse a menu URL to extract flow ID, view state ID, and screen mode.
      */
-    private parseMenuUrl(url: string): { flowId: string; viewStateId?: string } {
+    private parseMenuUrl(url: string): {
+        flowId: string;
+        viewStateId?: string;
+        screenMode?: 'inquiry' | 'maintenance' | 'create' | 'edit' | 'view' | 'clone' | 'approve' | 'delete';
+        modeSource?: 'url-param' | 'pageSelect-suffix';
+    } {
         if (!url) return { flowId: '' };
 
-        // Pattern: "pointWizard.html?pageSelect=pointInfoMaintenance"
-        const match = url.match(/^(\w+)\.html(?:\?pageSelect=(\w+))?/);
-        if (match) {
-            return {
-                flowId: match[1],
-                viewStateId: match[2],
-            };
+        // Extract all query parameters
+        const urlParts = url.split('?');
+        const baseUrl = urlParts[0];
+        const queryString = urlParts[1] || '';
+        const params = new URLSearchParams(queryString.replace(/&amp;/g, '&'));
+
+        // Extract flow ID from base URL
+        const flowMatch = baseUrl.match(/^(\w+)(?:\.html)?$/);
+        const flowId = flowMatch ? flowMatch[1] : '';
+
+        // Extract view state ID from pageSelect param
+        const viewStateId = params.get('pageSelect') || undefined;
+
+        // Detect screen mode from various sources
+        let screenMode: 'inquiry' | 'maintenance' | 'create' | 'edit' | 'view' | 'clone' | 'approve' | 'delete' | undefined;
+        let modeSource: 'url-param' | 'pageSelect-suffix' | undefined;
+
+        // 1. Check explicit mode parameter: ?mode=maintenance, ?mode=edit, etc.
+        const modeParam = params.get('mode');
+        if (modeParam) {
+            const normalizedMode = modeParam.toLowerCase();
+            if (normalizedMode === 'true' || normalizedMode === 'maintenance') {
+                screenMode = 'maintenance';
+                modeSource = 'url-param';
+            } else if (normalizedMode === 'false' || normalizedMode === 'inquiry' || normalizedMode === 'view') {
+                screenMode = 'inquiry';
+                modeSource = 'url-param';
+            } else if (['create', 'edit', 'clone', 'approve', 'delete'].includes(normalizedMode)) {
+                screenMode = normalizedMode as typeof screenMode;
+                modeSource = 'url-param';
+            } else if (normalizedMode === 'embedded') {
+                // Embedded mode is typically inquiry/search
+                screenMode = 'inquiry';
+                modeSource = 'url-param';
+            }
         }
 
-        // Pattern: "flowName.html" or "flowName"
-        const simpleMatch = url.match(/^(\w+)(?:\.html)?$/);
-        if (simpleMatch) {
-            return { flowId: simpleMatch[1] };
+        // 2. Check pageSelect suffix for mode hints: pointInfoMaintenance vs pointInfoInquiry
+        if (!screenMode && viewStateId) {
+            if (viewStateId.toLowerCase().endsWith('maintenance')) {
+                screenMode = 'maintenance';
+                modeSource = 'pageSelect-suffix';
+            } else if (viewStateId.toLowerCase().endsWith('inquiry')) {
+                screenMode = 'inquiry';
+                modeSource = 'pageSelect-suffix';
+            } else if (viewStateId.toLowerCase().includes('wizard') || viewStateId.toLowerCase().endsWith('minsetup')) {
+                screenMode = 'create';
+                modeSource = 'pageSelect-suffix';
+            }
         }
 
-        // Pattern with mode: "pointWizard.html?mode=maintenance"
-        const modeMatch = url.match(/^(\w+)\.html\?mode=/);
-        if (modeMatch) {
-            return { flowId: modeMatch[1] };
-        }
-
-        return { flowId: '' };
+        return { flowId, viewStateId, screenMode, modeSource };
     }
 
     /**
